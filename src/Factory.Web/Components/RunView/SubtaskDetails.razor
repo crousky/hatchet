@@ -1,0 +1,146 @@
+@if (Subtask is null)
+{
+    <div class="empty-state">
+        <div class="empty-title">No subtask selected</div>
+        <div class="muted">Subtasks appear on the left once the plan exists.</div>
+    </div>
+}
+else
+{
+    <div class="details">
+        <div class="details-head">
+            <h2>@Subtask.Order. @Subtask.Title</h2>
+            <div class="details-meta">
+                <span class="tag">@Fmt.Label(Subtask.Status)</span>
+                @if (Subtask.FixAttempts > 0)
+                {
+                    <span class="tag tag-warn"><Icon Name="wrench" Size="12" /> @Subtask.FixAttempts fix @(Subtask.FixAttempts == 1 ? "attempt" : "attempts")</span>
+                }
+                @if (Subtask.CommitSha is not null)
+                {
+                    <span class="tag tag-good mono-small"><Icon Name="git-branch" Size="12" /> @Fmt.ShortSha(Subtask.CommitSha)</span>
+                }
+            </div>
+        </div>
+
+        <p class="details-description">@Subtask.Description</p>
+
+        @if (Subtask.TargetFilesToModify.Count + Subtask.TargetFilesToCreate.Count + Subtask.ContextFilesToRead.Count > 0)
+        {
+            <div class="plan-chips">
+                @foreach (var file in Subtask.TargetFilesToModify)
+                {
+                    <span class="file-chip file-modify" title="Modify">@file</span>
+                }
+                @foreach (var file in Subtask.TargetFilesToCreate)
+                {
+                    <span class="file-chip file-create" title="Create">@file</span>
+                }
+                @foreach (var file in Subtask.ContextFilesToRead)
+                {
+                    <span class="file-chip" title="Read for context">@file</span>
+                }
+            </div>
+        }
+
+        <div class="details-row">
+            <span class="details-label">Verify with</span>
+            <code class="command-line">@EffectiveCommand</code>
+        </div>
+
+        @if (!string.IsNullOrWhiteSpace(Subtask.SummaryOfChanges))
+        {
+            <h3>Latest change</h3>
+            <p>@Subtask.SummaryOfChanges</p>
+        }
+
+        @if (Subtask.LastFailure is not null)
+        {
+            <h3 class="text-bad">Last failure</h3>
+            <pre class="code-block code-bad">@Fmt.Tail(Subtask.LastFailure, 12_000)</pre>
+        }
+
+        @if (Verdict is { } verdict)
+        {
+            <h3>Review <span class="tag @(verdict.Passed ? "tag-good" : "tag-bad")">@(verdict.Passed ? "Approved" : "Rejected") · @verdict.ConfidenceScore%</span></h3>
+            @if (verdict.BlockingIssues.Count > 0)
+            {
+                <ul class="issue-list issue-bad">
+                    @foreach (var issue in verdict.BlockingIssues)
+                    {
+                        <li>@issue</li>
+                    }
+                </ul>
+            }
+            @if (verdict.Suggestions.Count > 0)
+            {
+                <ul class="issue-list">
+                    @foreach (var suggestion in verdict.Suggestions)
+                    {
+                        <li>@suggestion</li>
+                    }
+                </ul>
+            }
+        }
+
+        @if (Refined is { } refined)
+        {
+            <h3>Refined spec</h3>
+            <p class="preserve">@refined.ImplementationInstructions</p>
+            @if (refined.MethodSignatures.Count > 0)
+            {
+                <h4>Signatures</h4>
+                <pre class="code-block">@string.Join("\n", refined.MethodSignatures)</pre>
+            }
+            @if (refined.Interfaces.Count > 0)
+            {
+                <h4>Interfaces</h4>
+                <pre class="code-block">@string.Join("\n\n", refined.Interfaces)</pre>
+            }
+            @if (refined.TestCases.Count > 0)
+            {
+                <h4>Test cases</h4>
+                <ul class="issue-list">
+                    @foreach (var test in refined.TestCases)
+                    {
+                        <li>@test</li>
+                    }
+                </ul>
+            }
+            @if (refined.EdgeCaseChecks.Count > 0)
+            {
+                <h4>Edge cases</h4>
+                <ul class="issue-list">
+                    @foreach (var edge in refined.EdgeCaseChecks)
+                    {
+                        <li>@edge</li>
+                    }
+                </ul>
+            }
+        }
+    </div>
+}
+
+@code {
+    [Parameter] public FactorySubtask? Subtask { get; set; }
+    [Parameter] public FactoryTask? Task { get; set; }
+
+    private string EffectiveCommand => Subtask is null || Task is null ? "" : FactoryOrchestrator.ConfiguredCommand(Task, Subtask) ?? "Detected from the repository when it runs";
+
+    private RefinedSpecResponse? Refined => Parse<RefinedSpecResponse>(Subtask?.RefinedSpecJson);
+
+    private ReviewVerdictResponse? Verdict => Parse<ReviewVerdictResponse>(Subtask?.ReviewJson);
+
+    private static T? Parse<T>(string? json) where T : class
+    {
+        if (json is null) return null;
+        try
+        {
+            return JsonSerializer.Deserialize<T>(json, LlmSchemas.SerializerOptions);
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+}

@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark" />
+    @* The UI is already dark. This stops Dark Reader rewriting the page, which breaks Blazor's DOM tracking. *@
+    <meta name="darkreader-lock" />
+    <base href="/" />
+    <title>Hatchet</title>
+    <link rel="icon" type="image/svg+xml" href="@Assets["favicon.svg"]" />
+    <link rel="stylesheet" href="@Assets["app.css"]" />
+</head>
+<body>
+    <Routes @rendermode="PageRenderMode" />
+
+    <div id="components-reconnect-modal">
+        <div class="reconnect-card">
+            <div class="reconnect-title">Connection to Hatchet lost</div>
+            <div class="reconnect-text">Running pipelines keep going on the server. This page will reconnect if it can.</div>
+            <button class="btn" onclick="location.reload()">Reload page</button>
+        </div>
+    </div>
+
+    <div id="blazor-error-ui">
+        <span>Hatchet hit an error and this page stopped updating. Running pipelines are not affected.</span>
+        <button class="btn btn-small" onclick="location.reload()">Reload</button>
+    </div>
+
+    <script src="@Assets["_framework/blazor.web.js"]"></script>
+    <script src="@Assets["app.js"]"></script>
+</body>
+</html>
+
+@code {
+    // Prerendering would load every page twice and open a second event subscription.
+    private static readonly IComponentRenderMode PageRenderMode = new InteractiveServerRenderMode(prerender: false);
+}

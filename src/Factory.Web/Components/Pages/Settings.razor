@@ -1,0 +1,433 @@
+@page "/settings"
+@implements IDisposable
+@inject EfSettingsStore SettingsStore
+@inject ModelHealthService Health
+
+<DocumentTitle Value="Settings · Hatchet" />
+
+<div class="page">
+    <div class="page-inner page-narrow">
+        <header class="page-header">
+            <div>
+                <h1>Settings</h1>
+                <p class="muted">One local model plays every role. Roles differ by prompt, schema, temperature and reasoning effort, and the model is never swapped.</p>
+            </div>
+            <button class="btn btn-primary" disabled="@(_settings is null)" @onclick="SaveAsync">
+                <Icon Name="@(_saved ? "check" : "shield")" Size="14" /> @(_saved ? "Saved" : "Save")
+            </button>
+        </header>
+
+        @if (_settings is not null)
+        {
+            <section class="settings-section">
+                <h2>Model endpoint</h2>
+
+                <div class="segmented">
+                    @foreach (var provider in Enum.GetValues<LlmProvider>())
+                    {
+                        <button class="@(_settings.Provider == provider ? "active" : "")" @onclick="@(() => SelectProvider(provider))">@ProviderLabel(provider)</button>
+                    }
+                </div>
+
+                <div class="field-row">
+                    <div class="field grow">
+                        <label for="url">OpenAI-compatible base URL</label>
+                        <input autocomplete="off" data-1p-ignore data-lpignore="true" id="url" class="mono" spellcheck="false" @bind="_settings.BaseUrl" />
+                    </div>
+                    <div class="field grow">
+                        <label for="model">Model</label>
+                        <input autocomplete="off" data-1p-ignore data-lpignore="true" id="model" class="mono" spellcheck="false" list="model-options" @bind="_settings.ModelId" />
+                        <datalist id="model-options">
+                            @foreach (var model in _check?.AvailableModels ?? [])
+                            {
+                                <option value="@model"></option>
+                            }
+                        </datalist>
+                    </div>
+                    <button class="btn align-end" disabled="@_checking" @onclick="TestAsync">
+                        @if (_checking)
+                        {
+                            <span class="spinner"></span>
+                        }
+                        else
+                        {
+                            <Icon Name="refresh" Size="14" />
+                        }
+                        Test
+                    </button>
+                </div>
+
+                @if (_check is { Reachable: false })
+                {
+                    <div class="probe probe-bad"><Icon Name="x" Size="13" /> @_check.Error</div>
+                }
+                else if (_check is { ModelAvailable: true } && ContextWindow.IsTooSmall(_check.ContextLength))
+                {
+                    <div class="probe probe-warn">
+                        <Icon Name="alert" Size="13" /> Connected, but <code>@_check.ConfiguredModel</code> is loaded with a context window of only @_check.ContextLength!.Value.ToString("N0") tokens. @ContextWindow.Advice(_settings.Provider)
+                    </div>
+                    @if (_settings.Provider == LlmProvider.LmStudio && _check.BaseUrl == Health.Current?.BaseUrl && _check.ConfiguredModel == Health.Current?.ConfiguredModel)
+                    {
+                        <div class="probe-actions">
+                            <ContextReloadButton />
+                            @if (Health.ReloadError is { } reloadError)
+                            {
+                                <span class="probe-bad small">@reloadError</span>
+                            }
+                        </div>
+                    }
+                }
+                else if (_check is { ModelAvailable: true })
+                {
+                    <div class="probe probe-good">
+                        <Icon Name="check" Size="13" /> Connected. <code>@_check.ConfiguredModel</code> is available@(_check.ContextLength is { } length ? $" with a {length:N0}-token context" : "").
+                    </div>
+                }
+                else if (_check is not null)
+                {
+                    <div class="probe probe-warn">
+                        <Icon Name="alert" Size="13" /> Connected, but <code>@_check.ConfiguredModel</code> isn't listed.
+                    </div>
+                    @if (_check.AvailableModels.Count > 0)
+                    {
+                        <div class="chips">
+                            @foreach (var model in _check.AvailableModels)
+                            {
+                                <button class="chip mono" @onclick="@(() => SelectModel(model))">@model</button>
+                            }
+                        </div>
+                    }
+                }
+
+                @if (_settings.Provider == LlmProvider.Ollama)
+                {
+                    <div class="hint">Ollama's OpenAI endpoint can't set the context size per request, and a small default silently truncates long prompts. Start it with <code>OLLAMA_CONTEXT_LENGTH=@ContextWindow.Recommended</code> (at least @ContextWindow.Minimum).</div>
+                }
+            </section>
+
+            <section class="settings-section">
+                <h2>Agent profiles</h2>
+                <div class="hint">Each agent runs on the local model, or on Claude through Claude Code, which uses your Claude login rather than an API key. Claude only answers: its patches still go through Hatchet's checks, git and plan approval.</div>
+                <table class="profiles-table">
+                    <thead>
+                        <tr>
+                            <th>Agent</th>
+                            <th>Stage</th>
+                            <th>Runs on</th>
+                            <th>Reasoning effort</th>
+                            <th>Temperature</th>
+                            <th>Sampling</th>
+                            <th></th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var profile in AgentProfiles.Defaults)
+                        {
+                            var edit = _profiles[profile.Role];
+                            var resolved = profile with { ReasoningEffort = edit.ReasoningEffort, Temperature = edit.Temperature };
+                            var isDefault = edit.ReasoningEffort == profile.ReasoningEffort && Math.Abs(edit.Temperature - profile.Temperature) < 0.0001
+                                            && edit.Engine == profile.Engine && edit.ClaudeModel == profile.ClaudeModel && edit.ClaudeEffort == profile.ClaudeEffort
+                                            && edit.SystemPrompt is null;
+                            var promptOpen = _openPrompts.Contains(profile.Role);
+                            var onClaude = edit.Engine == AgentEngine.ClaudeCode;
+                            <tr>
+                                <td><Icon Name="@Fmt.Icon(profile.Role)" Size="14" Class="muted" /> @profile.DisplayName</td>
+                                <td class="muted">@profile.Stage</td>
+                                <td class="engine-cell">
+                                    <select @bind="edit.Engine" @bind:after="CheckClaudeIfUsedAsync" aria-label="Runs on">
+                                        <option value="@AgentEngine.Local">Local model</option>
+                                        <option value="@AgentEngine.ClaudeCode">Claude Code</option>
+                                    </select>
+                                    @if (onClaude)
+                                    {
+                                        <select @bind="edit.ClaudeModel" aria-label="Claude model">
+                                            @foreach (var model in ClaudeCodeOptions.Models)
+                                            {
+                                                <option value="@model">@ClaudeCodeOptions.ModelLabel(model)</option>
+                                            }
+                                        </select>
+                                    }
+                                </td>
+                                <td>
+                                    @if (onClaude)
+                                    {
+                                        <select @bind="edit.ClaudeEffort" aria-label="Claude effort">
+                                            @foreach (var effort in ClaudeCodeOptions.Efforts)
+                                            {
+                                                <option value="@effort">@effort</option>
+                                            }
+                                        </select>
+                                    }
+                                    else
+                                    {
+                                        <select @bind="edit.ReasoningEffort" aria-label="Reasoning effort">
+                                            @foreach (var effort in ReasoningEfforts.All)
+                                            {
+                                                <option value="@effort">@effort</option>
+                                            }
+                                        </select>
+                                    }
+                                </td>
+                                @if (onClaude)
+                                {
+                                    <td class="muted" colspan="2">Set by Claude</td>
+                                }
+                                else
+                                {
+                                    <td><input autocomplete="off" data-1p-ignore data-lpignore="true" class="input-number mono" type="number" min="0" max="2" step="0.1" @bind="edit.Temperature" /></td>
+                                    <td class="muted mono-small">top_p @resolved.TopP.ToString("0.00")@(resolved.TopK is { } k ? $", top_k {k}" : "")</td>
+                                }
+                                <td class="profile-actions">
+                                    <button class="btn btn-ghost btn-small @(promptOpen ? "active" : "")" title="View and edit this agent's system prompt" @onclick="@(() => TogglePrompt(profile.Role))">
+                                        <Icon Name="file-text" Size="13" /> Prompt
+                                        @if (edit.SystemPrompt is not null)
+                                        {
+                                            <span class="tag tag-small tag-warn">Custom</span>
+                                        }
+                                    </button>
+                                    @if (!isDefault)
+                                    {
+                                        <button class="link-button" title="Restore every setting on this row, including the prompt" @onclick="@(() => ResetProfile(profile))">Reset</button>
+                                    }
+                                </td>
+                            </tr>
+                            @if (promptOpen)
+                            {
+                                <tr class="prompt-row">
+                                    <td colspan="7">
+                                        <div class="prompt-editor">
+                                            <div class="prompt-editor-head">
+                                                <span>System prompt for the @profile.DisplayName</span>
+                                                <span class="muted small">@(edit.SystemPrompt is null ? "Built-in" : "Customized") · @((edit.SystemPrompt ?? profile.SystemPrompt).Length.ToString("N0")) characters</span>
+                                                <span class="toolbar-spacer"></span>
+                                                @if (edit.SystemPrompt is not null)
+                                                {
+                                                    <button class="link-button" @onclick="@(() => edit.SystemPrompt = null)">Restore built-in prompt</button>
+                                                }
+                                            </div>
+                                            <textarea class="mono prompt-text" spellcheck="false" autocomplete="off" data-1p-ignore data-lpignore="true" rows="18"
+                                                      value="@(edit.SystemPrompt ?? profile.SystemPrompt)"
+                                                      @oninput="@(e => SetPrompt(edit, profile, e.Value?.ToString()))"></textarea>
+                                            <div class="hint">
+                                                Sent as the system message on every @profile.DisplayName call, with the task details in the user message. The answer's shape is enforced separately by the
+                                                <code>@LlmSchemas.For(profile.Role).Name</code> schema below, so keep asking for that JSON, but you can change everything else.
+                                            </div>
+                                            <details class="schema-view">
+                                                <summary>Response schema: @LlmSchemas.For(profile.Role).Name</summary>
+                                                <pre class="mono">@PrettyJson(LlmSchemas.For(profile.Role).Json)</pre>
+                                            </details>
+                                        </div>
+                                    </td>
+                                </tr>
+                            }
+                        }
+                    </tbody>
+                </table>
+
+                <div class="claude-code-row">
+                    <div class="field claude-code-path">
+                        <label for="claude-path">Claude Code executable</label>
+                        <input autocomplete="off" data-1p-ignore data-lpignore="true" id="claude-path" class="mono" spellcheck="false" @bind="_settings.ClaudeCodePath" @bind:after="CheckClaudeAsync" />
+                    </div>
+                    <button class="btn align-end" disabled="@_checkingClaude" @onclick="CheckClaudeAsync">
+                        @if (_checkingClaude)
+                        {
+                            <span class="spinner"></span>
+                        }
+                        else
+                        {
+                            <Icon Name="refresh" Size="13" />
+                        }
+                        Check
+                    </button>
+                </div>
+                @if (_claude is { Installed: false })
+                {
+                    <div class="probe @(UsesClaude ? "probe-bad" : "probe-muted")"><Icon Name="x" Size="13" /> @_claude.Error</div>
+                }
+                else if (_claude is { LoggedIn: false })
+                {
+                    <div class="probe @(UsesClaude ? "probe-warn" : "probe-muted")">
+                        <Icon Name="alert" Size="13" /> Claude Code @_claude.Version is installed but not logged in. Run <code>claude auth login</code> in a terminal, then check again.
+                    </div>
+                }
+                else if (_claude is not null)
+                {
+                    <div class="probe probe-good"><Icon Name="check" Size="13" /> Claude Code @_claude.Version is logged in@(_claude.Account is { } account ? $" ({account})" : "").</div>
+                }
+            </section>
+
+            <section class="settings-section">
+                <h2>Limits</h2>
+                <div class="field-grid">
+                    <div class="field">
+                        <label for="retries">Fix attempts per subtask</label>
+                        <input autocomplete="off" data-1p-ignore data-lpignore="true" id="retries" type="number" min="0" max="20" @bind="_settings.MaxFixRetries" />
+                        <div class="hint">Build failures and review rejections share this budget. Then the run pauses for you.</div>
+                    </div>
+                    <div class="field">
+                        <label for="escalate">Hand stubborn fixes to Claude after</label>
+                        <input autocomplete="off" data-1p-ignore data-lpignore="true" id="escalate" type="number" min="0" max="20" @bind="_settings.EscalateFixesToClaudeAfter" />
+                        <div class="hint">Failed fix attempts on the local model before the Bug Fixer switches to Claude Code for that subtask. Local models often guess library APIs wrong. 0 keeps fixes local.</div>
+                    </div>
+                    <div class="field">
+                        <label for="attempts">Attempts per model call</label>
+                        <input autocomplete="off" data-1p-ignore data-lpignore="true" id="attempts" type="number" min="1" max="10" @bind="_settings.MaxLlmAttempts" />
+                        <div class="hint">Retries for connection errors and unparseable output.</div>
+                    </div>
+                    <div class="field">
+                        <label for="verify">Verification timeout (seconds)</label>
+                        <input autocomplete="off" data-1p-ignore data-lpignore="true" id="verify" type="number" min="10" @bind="_settings.VerifyTimeoutSeconds" />
+                        <div class="hint">The process tree is killed at this point, and it counts as a failure.</div>
+                    </div>
+                    <div class="field">
+                        <label for="stall">Model stall timeout (seconds)</label>
+                        <input autocomplete="off" data-1p-ignore data-lpignore="true" id="stall" type="number" min="10" @bind="_settings.LlmStallTimeoutSeconds" />
+                        <div class="hint">Longest wait with no streamed data. Allow for slow prompt processing.</div>
+                    </div>
+                    <div class="field">
+                        <label for="file-chars">Max characters per file</label>
+                        <input autocomplete="off" data-1p-ignore data-lpignore="true" id="file-chars" type="number" min="1000" step="1000" @bind="_settings.MaxFileChars" />
+                    </div>
+                    <div class="field">
+                        <label for="context-chars">Max file context per call</label>
+                        <input autocomplete="off" data-1p-ignore data-lpignore="true" id="context-chars" type="number" min="1000" step="1000" @bind="_settings.MaxContextChars" />
+                        <div class="hint">Lower this if your model's context window is small.</div>
+                    </div>
+                </div>
+            </section>
+        }
+    </div>
+</div>
+
+@code {
+    private FactorySettings? _settings;
+    private Dictionary<AgentRole, AgentProfileOverride> _profiles = [];
+    private ModelEndpointStatus? _check;
+    private int _checkVersion;
+    private bool _checking;
+    private bool _saved;
+
+    protected override async Task OnInitializedAsync()
+    {
+        _settings = await SettingsStore.GetAsync();
+        _profiles = AgentProfiles.Defaults.ToDictionary(p => p.Role, p =>
+        {
+            var resolved = AgentProfiles.Resolve(_settings, p.Role);
+            return new AgentProfileOverride
+            {
+                Role = p.Role, ReasoningEffort = resolved.ReasoningEffort, Temperature = resolved.Temperature,
+                Engine = resolved.Engine, ClaudeModel = resolved.ClaudeModel, ClaudeEffort = resolved.ClaudeEffort,
+                SystemPrompt = resolved.SystemPrompt == p.SystemPrompt ? null : resolved.SystemPrompt
+            };
+        });
+        _ = CheckClaudeAsync();
+        await TestAsync();
+        Health.Changed += OnHealthChanged;
+    }
+
+    // Check again once a reload finishes, so the warning reflects the new window.
+    private bool _wasReloading;
+
+    private void OnHealthChanged() => _ = InvokeAsync(async () =>
+    {
+        var finished = _wasReloading && !Health.Reloading;
+        _wasReloading = Health.Reloading;
+        if (finished) await TestAsync();
+        else StateHasChanged();
+    });
+
+    public void Dispose() => Health.Changed -= OnHealthChanged;
+
+    private readonly HashSet<AgentRole> _openPrompts = [];
+
+    private void TogglePrompt(AgentRole role)
+    {
+        if (!_openPrompts.Remove(role)) _openPrompts.Add(role);
+    }
+
+    // Matching the built-in text again counts as using it, so later improvements to the built-in prompt still apply.
+    private static void SetPrompt(AgentProfileOverride edit, AgentProfile profile, string? text) =>
+        edit.SystemPrompt = string.IsNullOrWhiteSpace(text) || text.ReplaceLineEndings() == profile.SystemPrompt.ReplaceLineEndings() ? null : text;
+
+    private static string PrettyJson(string json) =>
+        System.Text.Json.JsonSerializer.Serialize(System.Text.Json.JsonDocument.Parse(json).RootElement, new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
+
+    private ClaudeCodeStatus? _claude;
+    private int _claudeVersion;
+    private bool _checkingClaude;
+
+    private bool UsesClaude => _profiles.Values.Any(p => p.Engine == AgentEngine.ClaudeCode);
+
+    private async Task CheckClaudeAsync()
+    {
+        var version = ++_claudeVersion;
+        _checkingClaude = true;
+        StateHasChanged();
+        var status = await ClaudeCodeLlmClient.CheckAsync(_settings!.ClaudeCodePath);
+        if (version != _claudeVersion) return;
+        _claude = status;
+        _checkingClaude = false;
+        StateHasChanged();
+    }
+
+    private Task CheckClaudeIfUsedAsync() => _claude is null && UsesClaude ? CheckClaudeAsync() : Task.CompletedTask;
+
+    private static string ProviderLabel(LlmProvider provider) => provider switch
+    {
+        LlmProvider.LmStudio => "LM Studio",
+        LlmProvider.Ollama => "Ollama",
+        _ => "Custom"
+    };
+
+    private async Task SelectProvider(LlmProvider provider)
+    {
+        _settings!.Provider = provider;
+        _settings.BaseUrl = provider switch
+        {
+            LlmProvider.LmStudio => FactorySettings.LmStudioUrl,
+            LlmProvider.Ollama => FactorySettings.OllamaUrl,
+            _ => _settings.BaseUrl
+        };
+        await TestAsync();
+    }
+
+    private async Task SelectModel(string model)
+    {
+        _settings!.ModelId = model;
+        await TestAsync();
+    }
+
+    private void ResetProfile(AgentProfile profile)
+    {
+        _profiles[profile.Role].ReasoningEffort = profile.ReasoningEffort;
+        _profiles[profile.Role].Temperature = profile.Temperature;
+        _profiles[profile.Role].Engine = profile.Engine;
+        _profiles[profile.Role].ClaudeModel = profile.ClaudeModel;
+        _profiles[profile.Role].ClaudeEffort = profile.ClaudeEffort;
+        _profiles[profile.Role].SystemPrompt = null;
+    }
+
+    private async Task TestAsync()
+    {
+        // A refused connection can take seconds, so an older check may finish after a newer one.
+        var version = ++_checkVersion;
+        _checking = true;
+        StateHasChanged();
+        var result = await Health.CheckAsync(_settings!.BaseUrl, _settings.ModelId);
+        if (version != _checkVersion) return;
+        _check = result;
+        _checking = false;
+    }
+
+    private async Task SaveAsync()
+    {
+        _settings!.ProfileOverrides = _profiles.Values.ToList();
+        await SettingsStore.SaveAsync(_settings);
+        _saved = true;
+        await TestAsync();
+        StateHasChanged();
+        await Task.Delay(1800);
+        _saved = false;
+    }
+}

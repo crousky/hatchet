@@ -1,0 +1,98 @@
+@implements IDisposable
+@inject ModelHealthService Health
+
+@if (Health.Reloading)
+{
+    <div class="notice">
+        <span class="spinner"></span>
+        <div class="notice-body">
+            <div class="notice-title">Reloading <code>@Health.Current?.ConfiguredModel</code> with a @ContextWindow.Recommended.ToString("N0")-token context</div>
+            <div class="muted">LM Studio is loading the model again. A large model can take a minute or two.</div>
+        </div>
+    </div>
+}
+else if (Health.Current is { Reachable: false } offline)
+{
+    <div class="notice notice-warn">
+        <Icon Name="cpu" Size="16" />
+        <div class="notice-body">
+            <div class="notice-title">The model server isn't responding</div>
+            <div class="muted">Nothing answered at <code>@offline.BaseUrl</code>. Start the LM Studio server or Ollama, or change the endpoint. Runs can start without it, but will pause until it's back.</div>
+        </div>
+        <a class="btn" href="/settings">Settings</a>
+    </div>
+}
+else if (Health.Current is { ModelAvailable: false } missing)
+{
+    <div class="notice notice-warn">
+        <Icon Name="cpu" Size="16" />
+        <div class="notice-body">
+            <div class="notice-title"><code>@missing.ConfiguredModel</code> isn't available on the server</div>
+            <div class="muted">
+                @if (missing.AvailableModels.Count > 0)
+                {
+                    <text>The server offers: @string.Join(", ", missing.AvailableModels.Take(5)). Choose the right one in settings.</text>
+                }
+                else
+                {
+                    <text>The server has no models loaded. Load Qwen 3.8, then check here again.</text>
+                }
+            </div>
+        </div>
+        <a class="btn" href="/settings">Choose model</a>
+    </div>
+}
+else if (Health.Current is { ContextLength: int contextLength } small && ContextWindow.IsTooSmall(contextLength))
+{
+    <div class="notice notice-warn">
+        <Icon Name="alert" Size="16" />
+        <div class="notice-body">
+            <div class="notice-title"><code>@small.ConfiguredModel</code> is loaded with a context window of only @contextLength.ToString("N0") tokens</div>
+            @if (Health.Provider == LlmProvider.LmStudio)
+            {
+                <div class="muted">Planning and reviews think at length and will run out of room before they answer. Hatchet can reload it in LM Studio for you, keeping its other load settings.</div>
+            }
+            else
+            {
+                <div class="muted">Planning and reviews think at length and will run out of room before they answer. @ContextWindow.Advice(Health.Provider) Hatchet picks up the change within a few seconds.</div>
+            }
+            @if (Health.ReloadError is { } error)
+            {
+                <div class="probe-bad small notice-error"><Icon Name="x" Size="12" /> @error</div>
+            }
+        </div>
+        @if (Health.Provider == LlmProvider.LmStudio)
+        {
+            <ContextReloadButton />
+        }
+    </div>
+}
+
+@if (Health.ClaudeCode is { LoggedIn: false } claude)
+{
+    <div class="notice notice-warn">
+        <Icon Name="sparkle" Size="16" />
+        <div class="notice-body">
+            <div class="notice-title">@string.Join(" and ", Health.ClaudeAgents) @(Health.ClaudeAgents.Count == 1 ? "runs" : "run") on Claude Code, which @(claude.Installed ? "isn't logged in" : "isn't available")</div>
+            <div class="muted">
+                @if (claude.Installed)
+                {
+                    <text>Run <code>claude auth login</code> in a terminal. Hatchet notices within a minute.</text>
+                }
+                else
+                {
+                    <text>@claude.Error</text>
+                }
+            </div>
+        </div>
+        <a class="btn" href="/settings">Settings</a>
+    </div>
+}
+
+@code {
+    protected override void OnInitialized() => Health.Changed += OnChanged;
+
+    private void OnChanged() => _ = InvokeAsync(StateHasChanged);
+
+    public void Dispose() => Health.Changed -= OnChanged;
+}

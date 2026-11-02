@@ -1,0 +1,128 @@
+@page "/"
+@implements IDisposable
+@inject IRunStore Store
+@inject FactoryEventBus Bus
+@inject ModelHealthService Health
+
+<DocumentTitle Value="Hatchet" />
+
+<div class="page">
+    <div class="page-inner">
+        <header class="page-header">
+            <div>
+                <h1>Runs</h1>
+                <p class="muted">Hand over an architecture spec. Your local model plans, builds, tests and reviews it, one commit at a time.</p>
+            </div>
+            <a class="btn btn-primary" href="/runs/new"><Icon Name="plus" Size="14" /> New run</a>
+        </header>
+
+        <ModelCard />
+
+        @if (_runs is null)
+        {
+            <div class="muted pad">Loading…</div>
+        }
+        else if (_runs.Count == 0)
+        {
+            <div class="getting-started">
+                <h2>Start your first run</h2>
+                <ol class="steps">
+                    <li>
+                        <span class="step-number">1</span>
+                        <div>
+                            <div class="step-title">Serve the model</div>
+                            <div class="muted">Load Qwen 3.8 in LM Studio and start its local server, or run it with Ollama. Hatchet uses this one model for every agent role.</div>
+                        </div>
+                    </li>
+                    <li>
+                        <span class="step-number">2</span>
+                        <div>
+                            <div class="step-title">Pick a repository</div>
+                            <div class="muted">Any local Git repository with a clean working tree. All work happens on its own <code>factory/run-N</code> branch.</div>
+                        </div>
+                    </li>
+                    <li>
+                        <span class="step-number">3</span>
+                        <div>
+                            <div class="step-title">Paste your architecture spec</div>
+                            <div class="muted">You review the generated plan, then watch it build. Failures loop through the fixer, and anything stuck comes back to you.</div>
+                        </div>
+                    </li>
+                </ol>
+                <a class="btn btn-primary" href="/runs/new"><Icon Name="play" Size="14" /> New run</a>
+            </div>
+        }
+        else
+        {
+            <table class="runs-table">
+                <thead>
+                    <tr>
+                        <th class="col-id">#</th>
+                        <th>Run</th>
+                        <th>Repository</th>
+                        <th>Status</th>
+                        <th class="num">Tokens</th>
+                        <th class="num">Started</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var run in _runs)
+                    {
+                        <tr class="row-link" @onclick="@(() => Nav.NavigateTo($"/runs/{run.Id}"))">
+                            <td class="col-id muted">@run.Id</td>
+                            <td class="col-title"><a href="/runs/@run.Id">@run.Task.Title</a></td>
+                            <td class="muted mono-small" title="@run.Task.RepositoryPath">@Fmt.FolderName(run.Task.RepositoryPath)</td>
+                            <td><StatusBadge Status="run.Status" PausedByUser="run.PausedByUser" /></td>
+                            <td class="num muted">@Fmt.Tokens(run.PromptTokens + run.CompletionTokens)</td>
+                            <td class="num muted">@Fmt.Ago(run.CreatedAt)</td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        }
+    </div>
+</div>
+
+@code {
+    [Inject] private NavigationManager Nav { get; set; } = null!;
+
+    private readonly CancellationTokenSource _stop = new();
+    private FactoryEventBus.Subscription? _subscription;
+    private IReadOnlyList<FactoryRun>? _runs;
+
+    protected override async Task OnInitializedAsync()
+    {
+        _subscription = Bus.Subscribe();
+        _runs = await Store.ListRunsAsync();
+        _ = PumpAsync();
+    }
+
+    private async Task PumpAsync()
+    {
+        try
+        {
+            using var timer = new PeriodicTimer(TimeSpan.FromSeconds(1));
+            while (await timer.WaitForNextTickAsync(_stop.Token))
+            {
+                var changed = false;
+                while (_subscription!.Reader.TryRead(out var evt))
+                {
+                    if (evt is RunStatusChanged or LlmCallFinished) changed = true;
+                }
+                if (!changed) continue;
+
+                _runs = await Store.ListRunsAsync(_stop.Token);
+                await InvokeAsync(StateHasChanged);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
+    }
+
+    public void Dispose()
+    {
+        _stop.Cancel();
+        _subscription?.Dispose();
+    }
+}

@@ -1,0 +1,45 @@
+@if (Checking)
+{
+    <div class="probe muted"><span class="spinner"></span> Checking…</div>
+}
+else if (Probe is { Exists: false })
+{
+    <div class="probe probe-bad"><Icon Name="x" Size="13" /> That folder doesn't exist.</div>
+}
+else if (Probe?.Error is { } error)
+{
+    <div class="probe probe-bad"><Icon Name="x" Size="13" /> @error</div>
+}
+else if (Probe is { IsGitRepository: false })
+{
+    <div class="probe probe-warn">
+        <Icon Name="alert" Size="13" /> This folder isn't a Git repository.
+        <button class="link-button" @onclick="OnInitialize">Initialize one</button>
+    </div>
+}
+else if (Probe is { IsClean: false })
+{
+    <div class="probe probe-warn">
+        <Icon Name="alert" Size="13" /> Uncommitted changes on <code>@Probe.CurrentBranch</code>. Commit or stash them, so Hatchet's rollbacks can't touch your work.
+    </div>
+}
+else if (Probe is { CurrentBranch: null })
+{
+    <div class="probe probe-warn"><Icon Name="alert" Size="13" /> Detached HEAD. Check out a branch first.</div>
+}
+else if (Probe is not null)
+{
+    <div class="probe probe-good">
+        <Icon Name="check" Size="13" /> Clean on <code>@Probe.CurrentBranch</code>
+        @if (!Probe.HasCommits)
+        {
+            <span class="muted">(no commits yet; Hatchet will add an empty first commit)</span>
+        }
+    </div>
+}
+
+@code {
+    [Parameter] public RepositoryProbe? Probe { get; set; }
+    [Parameter] public bool Checking { get; set; }
+    [Parameter] public EventCallback OnInitialize { get; set; }
+}

@@ -1,0 +1,30 @@
+# Build output
+bin/
+obj/
+TestResults/
+publish/
+
+# Editors and IDEs
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+
+# Hatchet's database lives in %LOCALAPPDATA%, but keep stray copies out
+*.db
+*.db-shm
+*.db-wal
+
+# Secrets and machine-specific settings
+.env
+.env.*
+*.pfx
+*.snk
+appsettings.*.local.json
+appsettings.Development.json
+.claude/settings.local.json
+
+# Logs and scratch files
+*.log
+*.tmp

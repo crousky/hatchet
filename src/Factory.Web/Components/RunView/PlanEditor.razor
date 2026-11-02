@@ -1,0 +1,162 @@
+<div class="plan">
+    @if (Editable)
+    {
+        <div class="plan-toolbar">
+            <div>
+                <div class="plan-title">Review the plan</div>
+                <div class="muted small">@_items.Count subtasks. Edit anything, then approve. The commands below run on this machine once you do, so check them.</div>
+            </div>
+            <span class="toolbar-spacer"></span>
+            <button class="btn btn-primary" disabled="@(Busy || _items.Count == 0)" @onclick="ApproveAsync">
+                <Icon Name="play" Size="14" /> Approve and build
+            </button>
+        </div>
+    }
+
+    @if (_items.Count == 0)
+    {
+        <div class="empty-state">
+            @if (Planning)
+            {
+                <span class="spinner spinner-large"></span>
+                <div class="empty-title">The Task Planner is working</div>
+                <div class="muted">Its reasoning is streaming in the agent panel.</div>
+            }
+            else
+            {
+                <div class="empty-title">No subtasks</div>
+                @if (Editable)
+                {
+                    <button class="btn" @onclick="AddItem"><Icon Name="plus" Size="14" /> Add a subtask</button>
+                }
+            }
+        </div>
+    }
+
+    @for (var i = 0; i < _items.Count; i++)
+    {
+        var index = i;
+        var item = _items[i];
+        <div class="plan-card" @key="item">
+            @if (Editable)
+            {
+                <div class="plan-card-head">
+                    <span class="plan-number">@(index + 1)</span>
+                    <input autocomplete="off" data-1p-ignore data-lpignore="true" class="plan-input-title" placeholder="Subtask title" @bind="item.Title" />
+                    <button class="icon-button" title="Move up" disabled="@(index == 0)" @onclick="@(() => Move(index, -1))"><Icon Name="arrow-up" Size="14" /></button>
+                    <button class="icon-button" title="Move down" disabled="@(index == _items.Count - 1)" @onclick="@(() => Move(index, 1))"><Icon Name="arrow-down" Size="14" /></button>
+                    <button class="icon-button icon-button-danger" title="Remove" @onclick="@(() => _items.RemoveAt(index))"><Icon Name="trash" Size="14" /></button>
+                </div>
+                <textarea autocomplete="off" data-1p-ignore data-lpignore="true" class="plan-input-body" rows="3" placeholder="What to build and how it fits" @bind="item.Description"></textarea>
+                <div class="plan-fields">
+                    <label>
+                        <span>Modify</span>
+                        <input autocomplete="off" data-1p-ignore data-lpignore="true" class="mono" spellcheck="false" placeholder="comma separated" @bind="item.Modify" />
+                    </label>
+                    <label>
+                        <span>Create</span>
+                        <input autocomplete="off" data-1p-ignore data-lpignore="true" class="mono" spellcheck="false" placeholder="comma separated" @bind="item.Create" />
+                    </label>
+                    <label>
+                        <span>Read for context</span>
+                        <input autocomplete="off" data-1p-ignore data-lpignore="true" class="mono" spellcheck="false" placeholder="comma separated" @bind="item.Context" />
+                    </label>
+                    <label>
+                        <span>Verify with</span>
+                        <input autocomplete="off" data-1p-ignore data-lpignore="true" class="mono" spellcheck="false" placeholder="@(string.IsNullOrEmpty(DefaultCommand) ? "Detect from the repository" : DefaultCommand)" @bind="item.Command" />
+                    </label>
+                </div>
+            }
+            else
+            {
+                <div class="plan-card-head">
+                    <span class="plan-number">@(index + 1)</span>
+                    <span class="plan-readonly-title">@item.Title</span>
+                </div>
+                <div class="plan-readonly-body">@item.Description</div>
+                <div class="plan-chips">
+                    @foreach (var file in Split(item.Modify))
+                    {
+                        <span class="file-chip file-modify" title="Modify">@file</span>
+                    }
+                    @foreach (var file in Split(item.Create))
+                    {
+                        <span class="file-chip file-create" title="Create">@file</span>
+                    }
+                    @foreach (var file in Split(item.Context))
+                    {
+                        <span class="file-chip" title="Read for context">@file</span>
+                    }
+                </div>
+            }
+        </div>
+    }
+
+    @if (Editable)
+    {
+        <div class="plan-footer">
+            <button class="btn" @onclick="AddItem"><Icon Name="plus" Size="14" /> Add subtask</button>
+            <div class="plan-regenerate">
+                <input autocomplete="off" data-1p-ignore data-lpignore="true" placeholder="What should the planner change? (optional)" @bind="_feedback" />
+                <button class="btn" disabled="@Busy" @onclick="() => OnRegenerate.InvokeAsync(_feedback)"><Icon Name="refresh" Size="14" /> Plan again</button>
+            </div>
+        </div>
+    }
+</div>
+
+@code {
+    [Parameter] public IReadOnlyList<FactorySubtask> Subtasks { get; set; } = [];
+    [Parameter] public bool Editable { get; set; }
+    [Parameter] public bool Planning { get; set; }
+    [Parameter] public bool Busy { get; set; }
+    [Parameter] public string DefaultCommand { get; set; } = "";
+    [Parameter] public EventCallback<IReadOnlyList<SubtaskEdit>> OnApprove { get; set; }
+    [Parameter] public EventCallback<string?> OnRegenerate { get; set; }
+
+    private sealed class PlanItem
+    {
+        public string Title { get; set; } = "";
+        public string Description { get; set; } = "";
+        public string Modify { get; set; } = "";
+        public string Create { get; set; } = "";
+        public string Context { get; set; } = "";
+        public string Command { get; set; } = "";
+    }
+
+    private List<PlanItem> _items = [];
+    private string _loadedSignature = "";
+    private string? _feedback;
+
+    protected override void OnParametersSet()
+    {
+        // Only a new plan from the server replaces the form, so periodic refreshes don't discard edits.
+        var signature = string.Join(',', Subtasks.Select(s => s.Id)) + $"|{Editable}";
+        if (signature == _loadedSignature) return;
+        _loadedSignature = signature;
+        _items = Subtasks.Select(s => new PlanItem
+        {
+            Title = s.Title,
+            Description = s.Description,
+            Modify = string.Join(", ", s.TargetFilesToModify),
+            Create = string.Join(", ", s.TargetFilesToCreate),
+            Context = string.Join(", ", s.ContextFilesToRead),
+            Command = s.VerificationCommand
+        }).ToList();
+    }
+
+    private void AddItem() => _items.Add(new PlanItem { Title = "New subtask" });
+
+    private void Move(int index, int delta)
+    {
+        var item = _items[index];
+        _items.RemoveAt(index);
+        _items.Insert(index + delta, item);
+    }
+
+    private static List<string> Split(string files) =>
+        files.Split([',', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
+
+    private Task ApproveAsync() => OnApprove.InvokeAsync(_items
+        .Select(i => new SubtaskEdit(null, i.Title, i.Description, Split(i.Modify), Split(i.Create), Split(i.Context), i.Command))
+        .ToList());
+}

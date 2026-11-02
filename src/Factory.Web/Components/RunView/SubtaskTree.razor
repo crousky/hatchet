@@ -1,0 +1,70 @@
+<div class="pane-section pane-section-grow">
+    <div class="pane-heading">
+        Subtasks
+        @if (Subtasks.Count > 0)
+        {
+            <span class="pane-count">@Subtasks.Count(s => s.Status == SubtaskStatus.Completed)/@Subtasks.Count</span>
+        }
+    </div>
+    <div class="tree scroll">
+        @if (Subtasks.Count == 0)
+        {
+            <div class="tree-empty muted">The plan will appear here once the Task Planner finishes.</div>
+        }
+        @foreach (var subtask in Subtasks)
+        {
+            <button class="tree-item @(subtask.Id == SelectedId ? "selected" : "") tree-@ToneOf(subtask.Status)" @onclick="@(() => OnSelect.InvokeAsync(subtask.Id))">
+                <span class="tree-icon">
+                    @switch (subtask.Status)
+                    {
+                        case SubtaskStatus.Completed:
+                            <Icon Name="check" Size="14" />
+                            break;
+                        case SubtaskStatus.NeedsHuman:
+                            <Icon Name="alert" Size="14" />
+                            break;
+                        case SubtaskStatus.Skipped:
+                            <Icon Name="skip" Size="14" />
+                            break;
+                        case SubtaskStatus.Cancelled:
+                            <Icon Name="ban" Size="14" />
+                            break;
+                        case SubtaskStatus.Pending:
+                            <Icon Name="circle" Size="14" />
+                            break;
+                        default:
+                            <span class="spinner"></span>
+                            break;
+                    }
+                </span>
+                <span class="tree-text">
+                    <span class="tree-title">@subtask.Order. @subtask.Title</span>
+                    @if (!SubtaskStateMachine.IsFinished(subtask.Status) && subtask.Status != SubtaskStatus.Pending)
+                    {
+                        <span class="tree-sub">
+                            @Fmt.Label(subtask.Status)
+                            @if (subtask.FixAttempts > 0)
+                            {
+                                <text> · fix @subtask.FixAttempts</text>
+                            }
+                        </span>
+                    }
+                </span>
+            </button>
+        }
+    </div>
+</div>
+
+@code {
+    [Parameter] public IReadOnlyList<FactorySubtask> Subtasks { get; set; } = [];
+    [Parameter] public int? SelectedId { get; set; }
+    [Parameter] public EventCallback<int> OnSelect { get; set; }
+
+    private static string ToneOf(SubtaskStatus status) => status switch
+    {
+        SubtaskStatus.Completed => "good",
+        SubtaskStatus.NeedsHuman => "warn",
+        SubtaskStatus.Pending or SubtaskStatus.Skipped or SubtaskStatus.Cancelled => "muted",
+        _ => "active"
+    };
+}

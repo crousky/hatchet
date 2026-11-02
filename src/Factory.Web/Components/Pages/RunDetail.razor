@@ -1,0 +1,443 @@
+@page "/runs/{RunId:int}"
+@implements IDisposable
+@inject IRunStore Store
+@inject FactoryOrchestrator Orchestrator
+@inject FactoryEventBus Bus
+@inject NavigationManager Nav
+
+<DocumentTitle Value="@($"{(_run is null ? "Run" : $"#{_run.Id} {_run.Task.Title}")} · Hatchet")" />
+
+@if (_notFound)
+{
+    <div class="empty-state center-fill">
+        <div class="empty-title">Run #@RunId doesn't exist</div>
+        <a class="btn" href="/">Back to runs</a>
+    </div>
+}
+else if (_run is null)
+{
+    <div class="empty-state center-fill"><span class="spinner spinner-large"></span></div>
+}
+else
+{
+    <div class="run-view">
+        <aside class="side-pane">
+            <SubtaskTree Subtasks="_subtasks" SelectedId="SelectedSubtask?.Id" OnSelect="SelectSubtask" />
+            <RunsSection CurrentRunId="RunId" RefreshKey="_statusVersion" />
+        </aside>
+        <div class="resizer" data-resize="--side-w" data-min="200" data-max="520"></div>
+
+        <main class="center-pane">
+            <header class="run-header">
+                <div class="run-heading">
+                    <h1 title="@_run.Task.Title">@_run.Task.Title</h1>
+                    <StatusBadge Status="_run.Status" PausedByUser="_run.PausedByUser" />
+                </div>
+                <div class="run-meta">
+                    <span class="meta-item" title="@_run.Task.RepositoryPath"><Icon Name="folder" Size="12" /> @Fmt.FolderName(_run.Task.RepositoryPath)</span>
+                    @if (_run.BranchName is not null)
+                    {
+                        <span class="meta-item mono-small"><Icon Name="git-branch" Size="12" /> @_run.BaseBranch ← @_run.BranchName</span>
+                    }
+                    <span class="meta-item" title="Prompt and completion tokens so far"><Icon Name="sparkle" Size="12" /> @Fmt.Tokens(_run.PromptTokens + _run.CompletionTokens) tokens</span>
+                </div>
+                <div class="run-actions">
+                    @if (RunStateMachine.IsTerminal(_run.Status))
+                    {
+                        <button class="btn" disabled="@_busy" @onclick="RerunAsync"><Icon Name="refresh" Size="14" /> Run again</button>
+                    }
+                    else if (_run.Status != RunStatus.ReadyToMerge)
+                    {
+                        @if (RunStateMachine.IsWorking(_run.Status) && Orchestrator.IsPausing(_run.Id))
+                        {
+                            <span class="pausing"><span class="spinner"></span> Pausing after this step</span>
+                            <button class="btn" disabled="@_busy" title="Stop the current step now. It runs again from its start when you resume." @onclick="() => PauseAsync(true)">
+                                <Icon Name="square" Size="14" /> Stop now
+                            </button>
+                        }
+                        else if (RunStateMachine.IsWorking(_run.Status))
+                        {
+                            <button class="btn" disabled="@_busy" title="Finish the current step, then pause. Nothing is lost, and Resume picks up from there." @onclick="() => PauseAsync(false)">
+                                <Icon Name="pause" Size="14" /> Pause
+                            </button>
+                        }
+                        <ConfirmButton Text="Cancel run" ConfirmText="Discard uncommitted work?" IconName="square" Disabled="_busy" Title="Stop the run, discard uncommitted changes and return to the base branch. Commits stay on the run's branch." OnConfirmed="CancelAsync" />
+                    }
+                </div>
+            </header>
+
+            <PipelineRail Run="_run" Subtasks="_subtasks" />
+
+            @if (_error is not null)
+            {
+                <div class="action-banner action-banner-bad">
+                    <div class="action-banner-main">
+                        <Icon Name="alert" Size="18" />
+                        <div class="action-banner-text preserve">@_error</div>
+                        <button class="icon-button" title="Dismiss" @onclick="() => _error = null"><Icon Name="x" Size="14" /></button>
+                    </div>
+                </div>
+            }
+
+            @if (_run.Status == RunStatus.NeedsHuman)
+            {
+                <PausePanel Run="_run" Paused="PausedSubtask" Busy="_busy" OnDecision="ResumeAsync" />
+            }
+            else if (_run.Status == RunStatus.Failed)
+            {
+                <div class="action-banner action-banner-bad">
+                    <div class="action-banner-main">
+                        <Icon Name="alert" Size="18" />
+                        <div class="action-banner-text">
+                            <div class="action-banner-title">This run could not start</div>
+                            <div class="action-banner-reason">@_run.PauseReason</div>
+                        </div>
+                    </div>
+                </div>
+            }
+            else if (_run.Status == RunStatus.ReadyToMerge)
+            {
+                <div class="action-banner action-banner-good">
+                    <div class="action-banner-main">
+                        <Icon Name="shield" Size="18" />
+                        <div class="action-banner-text">
+                            <div class="action-banner-title">Ready to merge</div>
+                            <div class="action-banner-reason">@_subtasks.Count(s => s.Status == SubtaskStatus.Completed) of @_subtasks.Count subtasks committed on <code>@_run.BranchName</code>@(_run.IntegrationPassed == true ? ", and the final check passed." : ". No build or test setup was found, so there was no final check.")</div>
+                        </div>
+                    </div>
+                    <div class="action-row">
+                        <button class="btn btn-primary" disabled="@_busy" @onclick="MergeAsync"><Icon Name="git-merge" Size="14" /> Merge into @_run.BaseBranch</button>
+                        <button class="btn" disabled="@_busy" @onclick="PreparePrAsync"><Icon Name="git-pr" Size="14" /> Prepare PR</button>
+                        <ConfirmButton Text="Close without merging" ConfirmText="Keep branch and close?" Disabled="_busy" Title="Finish the run and switch back to the base branch. The branch is kept." OnConfirmed="CloseAsync" />
+                    </div>
+                </div>
+            }
+            else if (_run.Status == RunStatus.Merged)
+            {
+                <div class="action-banner action-banner-good">
+                    <div class="action-banner-main">
+                        <Icon Name="check" Size="18" />
+                        <div class="action-banner-text">
+                            <div class="action-banner-title">Merged into @_run.BaseBranch</div>
+                            <div class="action-banner-reason mono-small">@Fmt.ShortSha(_run.MergeCommit)</div>
+                        </div>
+                    </div>
+                </div>
+            }
+
+            <div class="center-split">
+                <section class="editor">
+                    <div class="tab-bar">
+                        @Tab(EditorTab.Plan, "Plan", "clipboard")
+                        @Tab(EditorTab.Subtask, "Subtask", "layers")
+                        @Tab(EditorTab.Diff, "Diff", "file-diff")
+                        @Tab(EditorTab.Spec, "Spec", "file-text")
+                        @if (ShowSummary)
+                        {
+                            @Tab(EditorTab.Summary, "Summary", "shield")
+                        }
+                    </div>
+                    <div class="tab-content @(_tab == EditorTab.Diff ? "" : "scroll")">
+                        @switch (_tab)
+                        {
+                            case EditorTab.Plan:
+                                <PlanEditor Subtasks="_subtasks"
+                                            Editable="@(_run.Status == RunStatus.AwaitingPlanApproval)"
+                                            Planning="@(_run.Status is RunStatus.Queued or RunStatus.Ingesting or RunStatus.Decomposing)"
+                                            Busy="_busy"
+                                            DefaultCommand="@_run.Task.VerificationCommand"
+                                            OnApprove="ApprovePlanAsync"
+                                            OnRegenerate="RegeneratePlanAsync" />
+                                break;
+                            case EditorTab.Subtask:
+                                <SubtaskDetails Subtask="SelectedSubtask" Task="_run.Task" />
+                                break;
+                            case EditorTab.Diff:
+                                <DiffViewer Snapshots="DiffOptions" Selected="SelectedDiff" OnSelect="@(id => _selectedDiffId = id)" />
+                                break;
+                            case EditorTab.Spec:
+                                <pre class="spec-view">@_run.Task.ArchitectureSpec</pre>
+                                break;
+                            case EditorTab.Summary:
+                                <SummaryView Run="_run" Subtasks="_subtasks" Draft="_prDraft" />
+                                break;
+                        }
+                    </div>
+                </section>
+                <div class="resizer resizer-y" data-resize="--bottom-h" data-axis="y" data-sign="-1" data-min="90" data-max="700"></div>
+                <section class="bottom-panel">
+                    <TerminalPanel Logs="_logs" Live="_liveCommand" />
+                </section>
+            </div>
+        </main>
+
+        <div class="resizer resizer-agent" data-resize="--agent-w" data-sign="-1" data-min="280" data-max="760"></div>
+        <aside class="agent-pane">
+            <AgentPanel Logs="_logs" Live="_liveCall" SelectedSubtaskId="SelectedSubtask?.Id" />
+        </aside>
+    </div>
+}
+
+@code {
+    private enum EditorTab { Plan, Subtask, Diff, Spec, Summary }
+
+    [Parameter] public int RunId { get; set; }
+
+    private readonly CancellationTokenSource _stop = new();
+    private FactoryEventBus.Subscription? _subscription;
+
+    private int _loadedRunId;
+    private bool _notFound;
+    private FactoryRun? _run;
+    private IReadOnlyList<FactorySubtask> _subtasks = [];
+    private List<AgentLogEntry> _logs = [];
+    private IReadOnlyList<DiffSnapshot> _diffs = [];
+    private LiveCall? _liveCall;
+    private LiveCommand? _liveCommand;
+    private PullRequestDraft? _prDraft;
+
+    private EditorTab _tab = EditorTab.Subtask;
+    private int? _selectedSubtaskId;
+    private long? _selectedDiffId;
+    private int _statusVersion;
+    private bool _busy;
+    private string? _error;
+
+    private bool ShowSummary => _run?.Status is RunStatus.Integrating or RunStatus.ReadyToMerge or RunStatus.Merged or RunStatus.Closed;
+
+    private FactorySubtask? PausedSubtask => _subtasks.FirstOrDefault(s => s.Status == SubtaskStatus.NeedsHuman);
+
+    /// <summary>Follows the pipeline until the user picks a subtask themselves.</summary>
+    private FactorySubtask? SelectedSubtask =>
+        _subtasks.FirstOrDefault(s => s.Id == _selectedSubtaskId)
+        ?? _subtasks.FirstOrDefault(s => s.Id == _run?.CurrentSubtaskId)
+        ?? PausedSubtask
+        ?? _subtasks.LastOrDefault(s => s.Status is SubtaskStatus.Completed)
+        ?? _subtasks.FirstOrDefault();
+
+    private List<DiffSnapshot> DiffOptions
+    {
+        get
+        {
+            var subtaskId = SelectedSubtask?.Id;
+            var options = _diffs.Where(d => d.SubtaskId == subtaskId).Reverse().ToList();
+            options.AddRange(_diffs.Where(d => d.SubtaskId is null));
+            return options;
+        }
+    }
+
+    private DiffSnapshot? SelectedDiff
+    {
+        get
+        {
+            var options = DiffOptions;
+            return options.FirstOrDefault(d => d.Id == _selectedDiffId) ?? options.FirstOrDefault();
+        }
+    }
+
+    private RenderFragment Tab(EditorTab tab, string label, string icon) =>
+        @<button class="tab @(_tab == tab ? "active" : "")" @onclick="@(() => _tab = tab)"><Icon Name="@icon" Size="13" /> @label</button>;
+
+    protected override void OnInitialized()
+    {
+        _subscription = Bus.Subscribe();
+        _ = PumpAsync();
+    }
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (_loadedRunId == RunId) return;
+        _loadedRunId = RunId;
+
+        _run = null;
+        _notFound = false;
+        _logs = [];
+        _prDraft = null;
+        _liveCall = null;
+        _liveCommand = null;
+        _selectedSubtaskId = null;
+        _selectedDiffId = null;
+        _error = null;
+
+        await ReloadAsync();
+        if (_run is null) return;
+
+        _tab = _run.Status switch
+        {
+            RunStatus.AwaitingPlanApproval or RunStatus.Queued or RunStatus.Ingesting or RunStatus.Decomposing => EditorTab.Plan,
+            RunStatus.ReadyToMerge or RunStatus.Merged or RunStatus.Closed => EditorTab.Summary,
+            _ => EditorTab.Subtask
+        };
+    }
+
+    private async Task ReloadAsync()
+    {
+        try
+        {
+            _run = await Store.GetRunAsync(RunId);
+        }
+        catch (InvalidOperationException)
+        {
+            _notFound = true;
+            return;
+        }
+
+        _subtasks = await Store.GetSubtasksAsync(RunId);
+        _diffs = await Store.GetDiffsAsync(RunId);
+        _logs.AddRange(await Store.GetLogsAsync(RunId, _logs.LastOrDefault()?.Id ?? 0));
+    }
+
+    // Events are applied in batches at about ten frames a second, which keeps token streams from flooding the circuit.
+    private async Task PumpAsync()
+    {
+        try
+        {
+            var reader = _subscription!.Reader;
+            while (await reader.WaitToReadAsync(_stop.Token))
+            {
+                await InvokeAsync(async () =>
+                {
+                    var reload = false;
+                    var relevant = false;
+                    while (reader.TryRead(out var evt))
+                    {
+                        if (evt.RunId != RunId) continue;
+                        relevant = true;
+                        reload |= Apply(evt);
+                    }
+
+                    if (reload) await ReloadAsync();
+                    if (relevant) StateHasChanged();
+                });
+                await Task.Delay(100, _stop.Token);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (ObjectDisposedException)
+        {
+        }
+    }
+
+    /// <summary>Returns true if durable state changed and should be reloaded.</summary>
+    private bool Apply(FactoryEvent evt)
+    {
+        switch (evt)
+        {
+            case LlmCallStarted started:
+                _liveCall = new LiveCall
+                {
+                    Id = started.CallId,
+                    Role = started.Role,
+                    Stage = started.Stage,
+                    ReasoningEffort = started.ReasoningEffort,
+                    Temperature = started.Temperature,
+                    Model = started.Model,
+                    SubtaskId = started.SubtaskId
+                };
+                return false;
+
+            case LlmDeltaReceived delta when _liveCall?.Id == delta.CallId:
+                (delta.IsThinking ? _liveCall.Thinking : _liveCall.Content).Append(delta.Text);
+                _liveCall.Deltas++;
+                return false;
+
+            case LlmCallFinished finished:
+                if (_liveCall?.Id == finished.CallId) _liveCall = null;
+                return true;
+
+            case CommandStarted started:
+                _liveCommand = new LiveCommand { Command = started.Command };
+                return false;
+
+            case CommandOutputReceived output:
+                _liveCommand?.AddLine(output.Line);
+                return false;
+
+            case CommandFinished:
+                _liveCommand = null;
+                return true;
+
+            case PauseRequested:
+                return false;
+
+            case RunStatusChanged changed:
+                _statusVersion++;
+                _liveCall = null;
+                if (changed.To == RunStatus.NeedsHuman || changed.To == RunStatus.Executing) _tab = EditorTab.Subtask;
+                if (changed.To == RunStatus.AwaitingPlanApproval) _tab = EditorTab.Plan;
+                if (changed.To == RunStatus.ReadyToMerge) _tab = EditorTab.Summary;
+                return true;
+
+            case SubtaskStatusChanged or StageChanged or PlanChanged or LogAppended or DiffCaptured:
+                return true;
+
+            default:
+                return false;
+        }
+    }
+
+    private void SelectSubtask(int id)
+    {
+        _selectedSubtaskId = id;
+        _selectedDiffId = null;
+        if (_tab is EditorTab.Plan or EditorTab.Spec or EditorTab.Summary) _tab = EditorTab.Subtask;
+    }
+
+    private async Task ActAsync(Func<Task> action)
+    {
+        _busy = true;
+        _error = null;
+        try
+        {
+            await action();
+        }
+        catch (FactoryValidationException ex)
+        {
+            _error = ex.Message;
+        }
+        catch (GitException ex)
+        {
+            _error = ex.Message;
+        }
+        finally
+        {
+            _busy = false;
+        }
+        await ReloadAsync();
+    }
+
+    private Task ApprovePlanAsync(IReadOnlyList<SubtaskEdit> plan) => ActAsync(() => Orchestrator.ApprovePlanAsync(RunId, plan));
+
+    private Task RegeneratePlanAsync(string? feedback) => ActAsync(() => Orchestrator.RegeneratePlanAsync(RunId, feedback));
+
+    private Task ResumeAsync((HumanDecision Decision, string? Guidance) choice) =>
+        ActAsync(() => Orchestrator.ResumeAsync(RunId, choice.Decision, choice.Guidance));
+
+    private Task PauseAsync(bool immediately) => ActAsync(() => Orchestrator.PauseAsync(RunId, immediately));
+
+    private Task CancelAsync() => ActAsync(() => Orchestrator.CancelAsync(RunId));
+
+    private Task MergeAsync() => ActAsync(() => Orchestrator.MergeAsync(RunId));
+
+    private Task CloseAsync() => ActAsync(() => Orchestrator.CloseAsync(RunId));
+
+    private Task PreparePrAsync() => ActAsync(async () =>
+    {
+        _prDraft = await Orchestrator.PreparePullRequestAsync(RunId);
+        _tab = EditorTab.Summary;
+    });
+
+    private Task RerunAsync() => ActAsync(async () =>
+    {
+        var run = await Orchestrator.RerunAsync(RunId);
+        Nav.NavigateTo($"/runs/{run.Id}");
+    });
+
+    public void Dispose()
+    {
+        _stop.Cancel();
+        _subscription?.Dispose();
+    }
+}

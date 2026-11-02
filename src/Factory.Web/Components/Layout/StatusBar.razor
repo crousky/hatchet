@@ -1,0 +1,102 @@
+@implements IDisposable
+@inject ModelHealthService Health
+@inject FactoryOrchestrator Orchestrator
+@inject IRunStore Store
+@inject FactoryEventBus Bus
+
+<footer class="status-bar">
+    <a class="status-item" href="/settings" title="@(Health.Current?.Error ?? "Model endpoint")">
+        <span class="dot @ModelDotClass"></span>
+        @ModelText
+    </a>
+    @if (Health.Current is { Reachable: true } current)
+    {
+        <span class="status-item muted">@current.BaseUrl</span>
+    }
+    <span class="status-spacer"></span>
+    @if (_tokensPerSecond > 0)
+    {
+        <span class="status-item accent"><Icon Name="sparkle" Size="12" /> ≈ @_tokensPerSecond tok/s</span>
+    }
+    @if (_activeRuns > 0)
+    {
+        <span class="status-item"><span class="spinner"></span> @_activeRuns @(_activeRuns == 1 ? "run" : "runs") working</span>
+    }
+    <span class="status-item muted" title="Hatchet only listens on this machine">localhost only</span>
+</footer>
+
+@code {
+    private readonly CancellationTokenSource _stop = new();
+    private FactoryEventBus.Subscription? _subscription;
+    private int _tokensPerSecond;
+    private int _activeRuns;
+
+    private string ModelDotClass => Health.Current switch
+    {
+        null => "dot-idle",
+        { Reachable: false } => "dot-bad",
+        { ModelAvailable: false } => "dot-warn",
+        { ContextLength: var context } when ContextWindow.IsTooSmall(context) => "dot-warn",
+        _ => "dot-good"
+    };
+
+    private string ModelText => Health.Current switch
+    {
+        null => "Checking model…",
+        { Reachable: false } => "Model server offline",
+        { ModelAvailable: false } s => $"{s.ConfiguredModel} not loaded",
+        { ContextLength: > 0 } s => $"{s.ConfiguredModel} · {s.ContextLength / 1024}k context",
+        var s => s.ConfiguredModel
+    };
+
+    protected override void OnInitialized()
+    {
+        Health.Changed += OnHealthChanged;
+        _subscription = Bus.Subscribe();
+        _ = PumpAsync();
+    }
+
+    private async Task PumpAsync()
+    {
+        try
+        {
+            using var timer = new PeriodicTimer(TimeSpan.FromSeconds(1));
+            await RefreshActiveRunsAsync();
+            while (await timer.WaitForNextTickAsync(_stop.Token))
+            {
+                var deltas = 0;
+                var statusChanged = false;
+                while (_subscription!.Reader.TryRead(out var evt))
+                {
+                    if (evt is LlmDeltaReceived) deltas++;
+                    if (evt is RunStatusChanged) statusChanged = true;
+                }
+
+                if (statusChanged) await RefreshActiveRunsAsync();
+                if (deltas == _tokensPerSecond && !statusChanged) continue;
+
+                _tokensPerSecond = deltas;
+                await InvokeAsync(StateHasChanged);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
+    }
+
+    private async Task RefreshActiveRunsAsync()
+    {
+        var runs = await Store.ListRunsAsync(_stop.Token);
+        _activeRuns = runs.Count(r => RunStateMachine.IsWorking(r.Status));
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private void OnHealthChanged() => _ = InvokeAsync(StateHasChanged);
+
+    public void Dispose()
+    {
+        Health.Changed -= OnHealthChanged;
+        _stop.Cancel();
+        _subscription?.Dispose();
+    }
+}

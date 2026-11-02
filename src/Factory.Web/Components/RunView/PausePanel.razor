@@ -1,0 +1,90 @@
+<div class="action-banner @(Run.PausedByUser ? "action-banner-paused" : "action-banner-warn")">
+    <div class="action-banner-main">
+        <Icon Name="@(Run.PausedByUser ? "pause" : "alert")" Size="18" />
+        <div class="action-banner-text">
+            <div class="action-banner-title">@Title</div>
+            <div class="action-banner-reason">@Run.PauseReason</div>
+        </div>
+    </div>
+
+    @if (Run.PausedByUser)
+    {
+        @* The user stopped a healthy run, so it only needs to carry on. *@
+        <div class="action-row">
+            <button class="btn btn-primary" disabled="@Busy" title="Carry on from the step that was paused" @onclick="@(() => Decide(HumanDecision.Resume))">
+                <Icon Name="play" Size="14" /> @ResumeLabel
+            </button>
+            @if (Paused is not null)
+            {
+                <ConfirmButton Text="Restart subtask" ConfirmText="Discard its changes?" IconName="rotate" Disabled="Busy" Title="Discard this subtask's uncommitted changes and redo Refine and Build" OnConfirmed="@(() => Decide(HumanDecision.RestartSubtask))" />
+                <ConfirmButton Text="Skip subtask" ConfirmText="Discard and skip?" IconName="skip" Disabled="Busy" Title="Discard this subtask's uncommitted changes and move to the next one" OnConfirmed="@(() => Decide(HumanDecision.SkipSubtask))" />
+            }
+        </div>
+    }
+    else if (Paused is not null)
+    {
+        <textarea autocomplete="off" data-1p-ignore data-lpignore="true" class="guidance" rows="2" placeholder="Guidance for the Fixer (optional). Name the root cause, or the approach you want." @bind="_guidance" @bind:event="oninput"></textarea>
+        <div class="action-row">
+            @if (Interrupted)
+            {
+                @* Nothing went wrong, so carrying on comes first, without resetting the fix budget. *@
+                <button class="btn btn-primary" disabled="@Busy" title="Carry on from the step Hatchet was on when it stopped" @onclick="@(() => Decide(HumanDecision.Resume))">
+                    <Icon Name="play" Size="14" /> Resume
+                </button>
+            }
+            @if (Paused.LastFailure is not null)
+            {
+                <button class="btn @(Interrupted ? "" : "btn-primary")" disabled="@Busy" title="Send the failure and your guidance to the Bug Fixer, with a fresh retry budget" @onclick="@(() => Decide(HumanDecision.RetryFixer))">
+                    <Icon Name="wrench" Size="14" /> Retry with Fixer
+                </button>
+            }
+            @if (Paused.SummaryOfChanges is not null)
+            {
+                <button class="btn" disabled="@Busy" title="Run verification on the working tree as it is now. Use this after fixing it by hand." @onclick="@(() => Decide(HumanDecision.Reverify))">
+                    <Icon Name="terminal" Size="14" /> I fixed it, re-verify
+                </button>
+            }
+            else if (!Interrupted)
+            {
+                <button class="btn btn-primary" disabled="@Busy" title="Continue this subtask from where it stopped" @onclick="@(() => Decide(HumanDecision.Resume))">
+                    <Icon Name="play" Size="14" /> Resume
+                </button>
+            }
+            <ConfirmButton Text="Restart subtask" ConfirmText="Discard its changes?" IconName="rotate" Disabled="Busy" Title="Discard this subtask's uncommitted changes and redo Refine and Build" OnConfirmed="@(() => Decide(HumanDecision.RestartSubtask))" />
+            <ConfirmButton Text="Skip subtask" ConfirmText="Discard and skip?" IconName="skip" Disabled="Busy" Title="Discard this subtask's uncommitted changes and move to the next one" OnConfirmed="@(() => Decide(HumanDecision.SkipSubtask))" />
+        </div>
+    }
+    else
+    {
+        <div class="action-row">
+            <button class="btn btn-primary" disabled="@Busy" @onclick="@(() => Decide(HumanDecision.Resume))">
+                <Icon Name="play" Size="14" /> @ResumeLabel
+            </button>
+        </div>
+    }
+</div>
+
+@code {
+    [Parameter, EditorRequired] public FactoryRun Run { get; set; } = null!;
+    [Parameter] public FactorySubtask? Paused { get; set; }
+    [Parameter] public bool Busy { get; set; }
+    [Parameter] public EventCallback<(HumanDecision Decision, string? Guidance)> OnDecision { get; set; }
+
+    private string? _guidance;
+
+    private bool Interrupted => Run.PauseReason == FactoryOrchestrator.InterruptedReason;
+
+    private string Title => Run.PausedByUser
+        ? Paused is not null ? $"Paused on \"{Paused.Title}\"" : "Paused"
+        : Paused is not null ? $"Stopped on \"{Paused.Title}\"" : "This run is paused";
+
+    private string ResumeLabel => Run.PausedStage switch
+    {
+        PipelineStage.Ingest => "Scan again",
+        PipelineStage.Decompose when !Run.PausedByUser => "Plan again",
+        PipelineStage.Integrate => "Run the final check again",
+        _ => "Resume"
+    };
+
+    private Task Decide(HumanDecision decision) => OnDecision.InvokeAsync((decision, _guidance));
+}

@@ -1,0 +1,40 @@
+@inject IRunStore Store
+
+<div class="pane-section">
+    <button class="pane-heading pane-heading-button" @onclick="() => _open = !_open">
+        <Icon Name="@(_open ? "chevron-down" : "chevron-right")" Size="12" /> Other runs
+    </button>
+    @if (_open)
+    {
+        <div class="tree tree-short scroll">
+            @foreach (var run in _runs)
+            {
+                <a class="tree-item @(run.Id == CurrentRunId ? "selected" : "")" href="/runs/@run.Id">
+                    <span class="tree-icon"><span class="dot dot-@Fmt.Tone(run.Status)"></span></span>
+                    <span class="tree-text">
+                        <span class="tree-title">@run.Task.Title</span>
+                        <span class="tree-sub">#@run.Id · @Fmt.Label(run.Status)</span>
+                    </span>
+                </a>
+            }
+        </div>
+    }
+</div>
+
+@code {
+    [Parameter] public int CurrentRunId { get; set; }
+
+    /// <summary>Changes whenever the parent saw a run change status.</summary>
+    [Parameter] public int RefreshKey { get; set; }
+
+    private IReadOnlyList<FactoryRun> _runs = [];
+    private int _loadedKey = -1;
+    private bool _open;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (_loadedKey == RefreshKey) return;
+        _loadedKey = RefreshKey;
+        _runs = await Store.ListRunsAsync();
+    }
+}

@@ -1,0 +1,236 @@
+@page "/runs/new"
+@implements IDisposable
+@inject FactoryOrchestrator Orchestrator
+@inject IRunStore Store
+@inject NavigationManager Nav
+
+<DocumentTitle Value="New run · Hatchet" />
+
+<div class="new-run">
+    <section class="spec-pane">
+        <div class="pane-title">
+            <Icon Name="file-text" Size="14" />
+            <span>ArchitectureSpec.md</span>
+            <span class="pane-title-spacer"></span>
+            @if (_spec.Length > 0)
+            {
+                <span class="muted small">@_spec.Length.ToString("N0") characters</span>
+            }
+            <label class="btn btn-ghost btn-small">
+                <Icon Name="upload" Size="13" /> Upload
+                <InputFile OnChange="UploadAsync" accept=".md,.markdown,.txt" hidden />
+            </label>
+        </div>
+        <textarea autocomplete="off" data-1p-ignore data-lpignore="true" class="spec-editor" spellcheck="false" placeholder="Paste the architecture and technical specification here. The more exact it is about structure, stack and behaviour, the better the plan." @bind="_spec" @bind:event="oninput"></textarea>
+    </section>
+
+    <aside class="config-pane">
+        <h1>New run</h1>
+        <ModelCard />
+
+        <div class="field">
+            <label for="repo">Repository path</label>
+            <div class="input-row">
+                <div class="input-with-icon">
+                    <Icon Name="folder" Size="14" />
+                    <input autocomplete="off" data-1p-ignore data-lpignore="true" id="repo" spellcheck="false" placeholder="C:\projects\my-app" value="@_path" @oninput="OnPathInput" />
+                </div>
+                <button class="btn" title="Browse for a folder" @onclick="() => _picking = true"><Icon Name="folder" Size="14" /> Browse</button>
+            </div>
+            <RepoProbeStatus Probe="_probe" Checking="_probing" OnInitialize="InitializeRepositoryAsync" />
+            @if (_recent.Count > 0)
+            {
+                <div class="chips">
+                    @foreach (var recent in _recent)
+                    {
+                        <button class="chip" title="@recent" @onclick="@(() => SetPathAsync(recent))">@Fmt.FolderName(recent)</button>
+                    }
+                </div>
+            }
+        </div>
+
+        <div class="field">
+            <label>Verification</label>
+            <div class="segmented">
+                <button class="@(_customCommand ? "" : "active")" @onclick="() => _customCommand = false">Detect automatically</button>
+                <button class="@(_customCommand ? "active" : "")" @onclick="UseCustomCommand">Custom command</button>
+            </div>
+            @if (_customCommand)
+            {
+                <input autocomplete="off" data-1p-ignore data-lpignore="true" id="command" class="mono" spellcheck="false" placeholder="dotnet build --no-incremental && dotnet test" @bind="_command" @bind:event="oninput" />
+                <div class="hint">Runs after each subtask and once more at the end. Must exit 0 for work to pass.</div>
+            }
+            else if (_probe?.Verification is { } detected)
+            {
+                <div class="detected">
+                    <div class="detected-head"><Icon Name="check" Size="13" /> Found @detected.Description</div>
+                    <code class="command-line">@detected.Command</code>
+                </div>
+                <div class="hint">Hatchet checks the repository again before each verification, so new projects added by the run are picked up.</div>
+            }
+            else if (RepositoryReady)
+            {
+                <div class="detected detected-none">
+                    <div class="detected-head"><Icon Name="hammer" Size="13" /> No build or tests yet</div>
+                    <div>The planner will make setting up the build and a test project the first subtask. Checks start as soon as Hatchet can detect them.</div>
+                </div>
+            }
+            else
+            {
+                <div class="hint">Hatchet works out how to build and test the repository, for .NET, Node, Python, Rust, Go, Maven and Gradle.</div>
+            }
+        </div>
+
+        <div class="field">
+            <label for="title">Title <span class="muted">(optional)</span></label>
+            <input autocomplete="off" data-1p-ignore data-lpignore="true" id="title" placeholder="Taken from the spec's first heading" @bind="_title" />
+        </div>
+
+        <label class="toggle-row">
+            <input autocomplete="off" data-1p-ignore data-lpignore="true" type="checkbox" class="toggle" @bind="_reviewPlan" />
+            <div>
+                <div class="toggle-title">Review the plan before building</div>
+                <div class="hint">Approve, edit or reorder subtasks first. Commands suggested by the model only run if you approve them here.</div>
+            </div>
+        </label>
+
+        @if (_error is not null)
+        {
+            <div class="notice notice-bad"><Icon Name="alert" Size="16" /><div class="notice-body">@_error</div></div>
+        }
+
+        <button class="btn btn-primary btn-large" disabled="@(!CanStart)" @onclick="StartAsync">
+            @if (_starting)
+            {
+                <span class="spinner"></span>
+            }
+            else
+            {
+                <Icon Name="play" Size="14" />
+            }
+            Start run
+        </button>
+        @if (StartBlockedReason is { } reason)
+        {
+            <div class="hint center">@reason</div>
+        }
+    </aside>
+</div>
+
+<FolderPicker Open="_picking" InitialPath="@_path" Recent="_recent" OnSelect="PickFolderAsync" OnCancel="() => _picking = false" />
+
+@code {
+    private const long MaxSpecBytes = 8 * 1024 * 1024;
+
+    private string _spec = "";
+    private string _path = "";
+    private string _command = "";
+    private string _title = "";
+    private bool _reviewPlan = true;
+    private bool _starting;
+    private bool _probing;
+    private string? _error;
+    private RepositoryProbe? _probe;
+    private List<string> _recent = [];
+    private bool _customCommand;
+    private bool _picking;
+    private CancellationTokenSource? _probeDelay;
+
+    private bool RepositoryReady => _probe is { IsGitRepository: true, IsClean: true, CurrentBranch: not null };
+    private bool CanStart => StartBlockedReason is null && !_starting;
+
+    private string? StartBlockedReason =>
+        string.IsNullOrWhiteSpace(_spec) ? "Add a spec to start." :
+        !RepositoryReady ? "Choose a clean Git repository to start." :
+        _customCommand && string.IsNullOrWhiteSpace(_command) ? "Enter a command, or switch to automatic detection." :
+        null;
+
+    protected override async Task OnInitializedAsync()
+    {
+        var runs = await Store.ListRunsAsync();
+        _recent = runs.Select(r => r.Task.RepositoryPath).Distinct(StringComparer.OrdinalIgnoreCase).Take(5).ToList();
+    }
+
+    private async Task OnPathInput(ChangeEventArgs e)
+    {
+        _path = e.Value?.ToString() ?? "";
+        _probing = _path.Trim().Length > 0;
+        _probe = null;
+
+        _probeDelay?.Cancel();
+        _probeDelay = new CancellationTokenSource();
+        var token = _probeDelay.Token;
+        try
+        {
+            await Task.Delay(300, token);
+            await ProbeAsync(token);
+        }
+        catch (OperationCanceledException)
+        {
+        }
+    }
+
+    private async Task SetPathAsync(string path)
+    {
+        _path = path;
+        _probing = true;
+        await ProbeAsync(CancellationToken.None);
+    }
+
+    private async Task ProbeAsync(CancellationToken ct)
+    {
+        var path = _path.Trim();
+        _probe = path.Length == 0 ? null : await GitWorkspace.ProbeAsync(path, ct);
+        _probing = false;
+    }
+
+    private void UseCustomCommand()
+    {
+        _customCommand = true;
+        if (_command.Length == 0) _command = _probe?.Verification?.Command ?? "";
+    }
+
+    private async Task PickFolderAsync(string path)
+    {
+        _picking = false;
+        await SetPathAsync(path);
+    }
+
+    private async Task InitializeRepositoryAsync()
+    {
+        await new GitWorkspace(_path.Trim()).InitializeAsync();
+        await ProbeAsync(CancellationToken.None);
+    }
+
+    private async Task UploadAsync(InputFileChangeEventArgs e)
+    {
+        _error = null;
+        try
+        {
+            using var reader = new StreamReader(e.File.OpenReadStream(MaxSpecBytes));
+            _spec = await reader.ReadToEndAsync();
+        }
+        catch (IOException ex)
+        {
+            _error = $"Could not read {e.File.Name}: {ex.Message}";
+        }
+    }
+
+    private async Task StartAsync()
+    {
+        _starting = true;
+        _error = null;
+        try
+        {
+            var run = await Orchestrator.StartRunAsync(new NewRunRequest(_path, _spec, _title, _customCommand ? _command : null, _reviewPlan));
+            Nav.NavigateTo($"/runs/{run.Id}");
+        }
+        catch (FactoryValidationException ex)
+        {
+            _error = ex.Message;
+            _starting = false;
+        }
+    }
+
+    public void Dispose() => _probeDelay?.Cancel();
+}

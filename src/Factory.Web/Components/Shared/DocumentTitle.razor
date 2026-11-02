@@ -1,0 +1,16 @@
+@inject IJSRuntime JS
+
+@code {
+    // Stands in for PageTitle. PageTitle needs an interactive HeadOutlet, and that keeps Blazor-managed
+    // nodes in <head>, where extensions such as Dark Reader rearrange things and break the circuit.
+    [Parameter, EditorRequired] public string Value { get; set; } = "";
+
+    private string? _applied;
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (Value == _applied) return;
+        _applied = Value;
+        await JS.InvokeVoidAsync("hatchet.setTitle", Value);
+    }
+}

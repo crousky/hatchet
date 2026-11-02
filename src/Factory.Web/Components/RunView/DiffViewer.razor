@@ -1,0 +1,107 @@
+<div class="diff">
+    <div class="diff-toolbar">
+        @if (Snapshots.Count > 0)
+        {
+            <select class="diff-select" value="@Selected?.Id" @onchange="OnSelectChanged">
+                @foreach (var snapshot in Snapshots)
+                {
+                    <option value="@snapshot.Id">@Describe(snapshot)</option>
+                }
+            </select>
+        }
+        <span class="toolbar-spacer"></span>
+        @if (_files.Count > 0)
+        {
+            <span class="muted small">@_files.Count @(_files.Count == 1 ? "file" : "files")</span>
+            <span class="diff-add small">+@_files.Sum(f => f.Additions)</span>
+            <span class="diff-del small">−@_files.Sum(f => f.Deletions)</span>
+        }
+    </div>
+
+    @if (Selected is null)
+    {
+        <div class="empty-state">
+            <div class="empty-title">No diff yet</div>
+            <div class="muted">Changes show up here after the Code Generator writes files.</div>
+        </div>
+    }
+    else if (_files.Count == 0)
+    {
+        <div class="empty-state"><div class="muted">This snapshot has no file changes.</div></div>
+    }
+    else
+    {
+        <div class="diff-files scroll">
+            @foreach (var file in _files)
+            {
+                <details class="diff-file" open>
+                    <summary>
+                        <Icon Name="chevron-right" Size="12" Class="diff-chevron" />
+                        <span class="diff-path">@file.Path</span>
+                        @if (file.Status is not null)
+                        {
+                            <span class="tag tag-small">@file.Status</span>
+                        }
+                        <span class="toolbar-spacer"></span>
+                        <span class="diff-add small">+@file.Additions</span>
+                        <span class="diff-del small">−@file.Deletions</span>
+                    </summary>
+                    <table class="diff-table">
+                        <tbody>
+                            @foreach (var line in file.Lines.Take(MaxLinesPerFile))
+                            {
+                                <tr class="diff-@line.Kind.ToString().ToLowerInvariant()">
+                                    <td class="diff-gutter">@line.OldNumber</td>
+                                    <td class="diff-gutter">@line.NewNumber</td>
+                                    <td class="diff-sign">@Sign(line.Kind)</td>
+                                    <td class="diff-text">@line.Text</td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                    @if (file.Lines.Count > MaxLinesPerFile)
+                    {
+                        <div class="diff-more muted small">@((file.Lines.Count - MaxLinesPerFile).ToString("N0")) more lines not shown. Use <code>git diff</code> to see the whole file.</div>
+                    }
+                </details>
+            }
+        </div>
+    }
+</div>
+
+@code {
+    private const int MaxLinesPerFile = 2000;
+
+    [Parameter] public IReadOnlyList<DiffSnapshot> Snapshots { get; set; } = [];
+    [Parameter] public DiffSnapshot? Selected { get; set; }
+    [Parameter] public EventCallback<long> OnSelect { get; set; }
+
+    private List<DiffFile> _files = [];
+    private long? _parsedId;
+
+    protected override void OnParametersSet()
+    {
+        if (_parsedId == Selected?.Id) return;
+        _parsedId = Selected?.Id;
+        _files = UnifiedDiff.Parse(Selected?.UnifiedDiff);
+    }
+
+    private Task OnSelectChanged(ChangeEventArgs e) =>
+        long.TryParse(e.Value?.ToString(), out var id) ? OnSelect.InvokeAsync(id) : Task.CompletedTask;
+
+    private static string Describe(DiffSnapshot snapshot) => snapshot.Stage switch
+    {
+        PipelineStage.Integrate => "Whole run, base to final",
+        PipelineStage.Build => "After build",
+        PipelineStage.Fix => $"After fix {snapshot.Attempt}",
+        PipelineStage.Review => $"Committed {Fmt.ShortSha(snapshot.CommitSha)}",
+        _ => snapshot.Stage.ToString()
+    };
+
+    private static string Sign(DiffLineKind kind) => kind switch
+    {
+        DiffLineKind.Added => "+",
+        DiffLineKind.Removed => "−",
+        _ => ""
+    };
+}

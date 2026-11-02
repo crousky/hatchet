@@ -1,0 +1,250 @@
+@inject IJSRuntime JS
+
+@if (Open)
+{
+    <div class="modal-backdrop" @onclick="CancelAsync">
+        <div class="modal folder-picker" role="dialog" aria-label="Choose a folder" tabindex="-1" @onclick:stopPropagation @onkeydown="OnKeyDown">
+            <header class="modal-header">
+                <span>Choose the repository folder</span>
+                <button class="icon-button" title="Close (Esc)" @onclick="CancelAsync"><Icon Name="x" Size="14" /></button>
+            </header>
+
+            <div class="picker-pathbar">
+                <button class="icon-button" title="Up one level" disabled="@(_listing.Path is null)" @onclick="UpAsync"><Icon Name="arrow-up" Size="14" /></button>
+                <input class="mono picker-path" autocomplete="off" data-1p-ignore data-lpignore="true" spellcheck="false"
+                       placeholder="Type a path and press Enter" value="@_pathInput"
+                       @oninput="@(e => _pathInput = e.Value?.ToString() ?? "")" @onkeydown="OnPathKeyDown" />
+            </div>
+
+            <div class="picker-body">
+                <nav class="picker-places">
+                    <div class="picker-heading">Places</div>
+                    @foreach (var place in _places)
+                    {
+                        <button class="picker-place @(Same(place.Path, _listing.Path) ? "active" : "")" title="@place.Path" @onclick="@(() => Navigate(place.Path))">
+                            <Icon Name="@place.Icon" Size="14" /> @place.Label
+                        </button>
+                    }
+                    <button class="picker-place @(_listing.Path is null ? "active" : "")" @onclick="ShowRoots">
+                        <Icon Name="cpu" Size="14" /> @(OperatingSystem.IsWindows() ? "This PC" : "Root")
+                    </button>
+                    @if (Recent.Count > 0)
+                    {
+                        <div class="picker-heading">Recent</div>
+                        @foreach (var recent in Recent)
+                        {
+                            <button class="picker-place" title="@recent" @onclick="@(() => SelectAsync(recent))">
+                                <Icon Name="git-branch" Size="14" /> @Fmt.FolderName(recent)
+                            </button>
+                        }
+                    }
+                </nav>
+
+                <div class="picker-main">
+                    <div class="picker-filter">
+                        <Icon Name="eye" Size="13" />
+                        <input id="folder-filter" autocomplete="off" data-1p-ignore data-lpignore="true" spellcheck="false" placeholder="Filter folders"
+                               value="@_filter" @oninput="@(e => _filter = e.Value?.ToString() ?? "")" />
+                    </div>
+                    <div class="picker-list scroll">
+                        @if (_listing.Error is not null)
+                        {
+                            <div class="picker-message probe-bad"><Icon Name="alert" Size="13" /> @_listing.Error</div>
+                        }
+                        else if (!Visible.Any())
+                        {
+                            <div class="picker-message muted">@(_filter.Length > 0 ? "No folders match." : "No subfolders here.")</div>
+                        }
+                        @foreach (var folder in Visible)
+                        {
+                            <button class="picker-row @(folder.FullPath == _selected ? "selected" : "")" title="@folder.FullPath"
+                                    @onclick="@(() => _selected = folder.FullPath)" @ondblclick="@(() => Navigate(folder.FullPath))">
+                                <Icon Name="@(folder.IsGitRepository ? "git-branch" : "folder")" Size="14" Class="@(folder.IsGitRepository ? "picker-git" : "muted")" />
+                                <span class="picker-name">@folder.Name</span>
+                                @if (folder.IsGitRepository)
+                                {
+                                    <span class="tag tag-small tag-good">Git</span>
+                                }
+                                <span class="picker-open" title="Open" @onclick="@(() => Navigate(folder.FullPath))" @onclick:stopPropagation><Icon Name="chevron-right" Size="13" /></span>
+                            </button>
+                        }
+                    </div>
+                </div>
+            </div>
+
+            <footer class="picker-footer">
+                @if (_listing.Path is not null)
+                {
+                    @if (_creating)
+                    {
+                        <div class="picker-new">
+                            <input id="new-folder" autocomplete="off" data-1p-ignore data-lpignore="true" spellcheck="false" placeholder="New folder name"
+                                   value="@_newName" @oninput="@(e => _newName = e.Value?.ToString() ?? "")" @onkeydown="OnNewFolderKeyDown" />
+                            <button class="btn btn-small" @onclick="CreateFolder">Create</button>
+                            <button class="btn btn-ghost btn-small" @onclick="() => _creating = false">Cancel</button>
+                        </div>
+                    }
+                    else
+                    {
+                        <button class="btn btn-ghost btn-small" @onclick="StartCreatingAsync"><Icon Name="plus" Size="13" /> New folder</button>
+                    }
+                }
+                <span class="toolbar-spacer"></span>
+                @if (_createError is not null)
+                {
+                    <span class="probe-bad small">@_createError</span>
+                }
+                <button class="btn" @onclick="CancelAsync">Cancel</button>
+                <button class="btn btn-primary" disabled="@(Target is null)" title="@Target" @onclick="@(() => SelectAsync(Target!))">
+                    Use @(Target is null ? "folder" : Fmt.FolderName(Target))
+                </button>
+            </footer>
+        </div>
+    </div>
+}
+
+@code {
+    [Parameter] public bool Open { get; set; }
+    [Parameter] public string? InitialPath { get; set; }
+    [Parameter] public IReadOnlyList<string> Recent { get; set; } = [];
+    [Parameter] public EventCallback<string> OnSelect { get; set; }
+    [Parameter] public EventCallback OnCancel { get; set; }
+
+    private FolderListing _listing = FolderBrowser.Roots();
+    private IReadOnlyList<FolderPlace> _places = [];
+    private string _pathInput = "";
+    private string _filter = "";
+    private string? _selected;
+    private bool _creating;
+    private string _newName = "";
+    private string? _createError;
+    private bool _wasOpen;
+    private bool _focusPending;
+
+    /// <summary>The highlighted subfolder, or the open folder itself.</summary>
+    private string? Target => _selected ?? _listing.Path;
+
+    private IEnumerable<FolderEntry> Visible => _filter.Length == 0
+        ? _listing.Folders
+        : _listing.Folders.Where(f => f.Name.Contains(_filter, StringComparison.OrdinalIgnoreCase));
+
+    protected override void OnParametersSet()
+    {
+        if (Open && !_wasOpen)
+        {
+            _places = FolderBrowser.Places();
+            var start = StartingFolder();
+            if (start is null) ShowRoots();
+            else Navigate(start);
+            _focusPending = true;
+        }
+        _wasOpen = Open;
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!_focusPending || !Open) return;
+        _focusPending = false;
+        await JS.InvokeVoidAsync("hatchet.focus", "#folder-filter");
+    }
+
+    // Open beside the typed path, with it highlighted, so reopening the picker doesn't lose the place.
+    private string? StartingFolder()
+    {
+        var fallback = _places.FirstOrDefault()?.Path;
+        if (string.IsNullOrWhiteSpace(InitialPath)) return fallback;
+        try
+        {
+            var path = Path.GetFullPath(InitialPath.Trim()).TrimEnd('\\', '/');
+            var parent = Path.GetDirectoryName(path);
+            return parent is not null && Directory.Exists(parent) ? parent : Directory.Exists(path) ? path : fallback;
+        }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            return fallback;
+        }
+    }
+
+    private void Navigate(string path)
+    {
+        var listing = FolderBrowser.List(path);
+        _listing = listing;
+        _pathInput = listing.Path ?? path;
+        _selected = listing.Folders.FirstOrDefault(f => Same(f.FullPath, InitialPath))?.FullPath;
+        _filter = "";
+        _creating = false;
+        _createError = null;
+    }
+
+    private void ShowRoots()
+    {
+        _listing = FolderBrowser.Roots();
+        _pathInput = "";
+        _selected = null;
+        _filter = "";
+        _creating = false;
+    }
+
+    private void UpAsync()
+    {
+        if (_listing.Parent is { } parent) Navigate(parent);
+        else ShowRoots();
+    }
+
+    private void OnPathKeyDown(KeyboardEventArgs e)
+    {
+        if (e.Key == "Enter" && _pathInput.Trim().Length > 0) Navigate(_pathInput);
+    }
+
+    private async Task OnKeyDown(KeyboardEventArgs e)
+    {
+        if (e.Key == "Escape") await CancelAsync();
+    }
+
+    private async Task StartCreatingAsync()
+    {
+        _creating = true;
+        _newName = "";
+        _createError = null;
+        StateHasChanged();
+        await Task.Yield();
+        await JS.InvokeVoidAsync("hatchet.focus", "#new-folder");
+    }
+
+    private void OnNewFolderKeyDown(KeyboardEventArgs e)
+    {
+        if (e.Key == "Enter") CreateFolder();
+        if (e.Key == "Escape") _creating = false;
+    }
+
+    private void CreateFolder()
+    {
+        try
+        {
+            var created = FolderBrowser.CreateFolder(_listing.Path!, _newName);
+            Navigate(_listing.Path!);
+            _selected = created;
+        }
+        catch (Exception ex) when (ex is ArgumentException or IOException or UnauthorizedAccessException)
+        {
+            _createError = ex.Message;
+        }
+    }
+
+    private Task SelectAsync(string path) => OnSelect.InvokeAsync(path);
+
+    private Task CancelAsync() => OnCancel.InvokeAsync();
+
+    private static bool Same(string? a, string? b)
+    {
+        if (string.IsNullOrWhiteSpace(a) || string.IsNullOrWhiteSpace(b)) return false;
+        try
+        {
+            return string.Equals(Path.GetFullPath(a.Trim()).TrimEnd('\\', '/'), Path.GetFullPath(b.Trim()).TrimEnd('\\', '/'), StringComparison.OrdinalIgnoreCase);
+        }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            return false;
+        }
+    }
+}

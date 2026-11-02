@@ -1,0 +1,29 @@
+@implements IDisposable
+@inject ModelHealthService Health
+@inject FactoryOrchestrator Orchestrator
+
+@* Reloads the model in LM Studio with the recommended context window. Other servers can't be told to over an API. *@
+@if (Health.Reloading)
+{
+    <button class="btn" disabled><span class="spinner"></span> Reloading…</button>
+}
+else
+{
+    <button class="btn btn-primary" disabled="@Orchestrator.HasActiveRuns" title="@Tooltip" @onclick="ReloadAsync">
+        <Icon Name="refresh" Size="13" /> Reload with @(ContextWindow.Recommended / 1024)k context
+    </button>
+}
+
+@code {
+    private string Tooltip => Orchestrator.HasActiveRuns
+        ? "A run is working and would lose its current model call. Reload once it pauses or finishes."
+        : $"Unloads the model in LM Studio and loads it again with a {ContextWindow.Recommended:N0}-token context, keeping its other load settings.";
+
+    protected override void OnInitialized() => Health.Changed += OnChanged;
+
+    private Task ReloadAsync() => Health.ReloadWithRecommendedContextAsync();
+
+    private void OnChanged() => _ = InvokeAsync(StateHasChanged);
+
+    public void Dispose() => Health.Changed -= OnChanged;
+}

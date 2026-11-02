@@ -1,0 +1,162 @@
+<div class="agent-panel">
+    <div class="panel-header">
+        <Icon Name="sparkle" Size="14" />
+        <span>Agents</span>
+        <span class="toolbar-spacer"></span>
+        <div class="segmented segmented-small">
+            <button class="@(_onlySelected ? "" : "active")" @onclick="() => _onlySelected = false">All</button>
+            <button class="@(_onlySelected ? "active" : "")" disabled="@(SelectedSubtaskId is null)" @onclick="() => _onlySelected = true">This subtask</button>
+        </div>
+    </div>
+
+    <div class="agent-feed scroll" data-stick-bottom>
+        @if (!Visible.Any() && Live is null)
+        {
+            <div class="empty-state">
+                <div class="muted">Agent activity will appear here.</div>
+            </div>
+        }
+
+        @foreach (var entry in Visible)
+        {
+            @if (entry.Kind == AgentLogKind.LlmCall)
+            {
+                var open = _expanded.Contains(entry.Id);
+                <div class="agent-card @(entry.Succeeded ? "" : "agent-card-failed")" @key="entry.Id">
+                    <button class="agent-card-head" @onclick="() => Toggle(entry.Id)">
+                        <span class="agent-avatar"><Icon Name="@Fmt.Icon(entry.Role ?? AgentRole.TaskPlanner)" Size="14" /></span>
+                        <span class="agent-name">
+                            @Fmt.Label(entry.Role ?? AgentRole.TaskPlanner)
+                            <span class="agent-params">@Fmt.CallParams(entry.Model, entry.ReasoningEffort, entry.Temperature)</span>
+                        </span>
+                        <span class="agent-stats">
+                            @if (entry.CompletionTokens > 0)
+                            {
+                                <span title="Prompt tokens → completion tokens">@Fmt.Tokens(entry.PromptTokens) → @Fmt.Tokens(entry.CompletionTokens)</span>
+                            }
+                            @if (entry.DurationMs > 0)
+                            {
+                                <span>@Fmt.Duration(entry.DurationMs)</span>
+                            }
+                        </span>
+                        <Icon Name="@(open ? "chevron-down" : "chevron-right")" Size="12" Class="muted" />
+                    </button>
+                    @if (!entry.Succeeded)
+                    {
+                        <div class="agent-error">@entry.Message</div>
+                    }
+                    @if (open)
+                    {
+                        <div class="agent-card-body">
+                            @if (!string.IsNullOrEmpty(entry.Thinking))
+                            {
+                                <details>
+                                    <summary>Thinking</summary>
+                                    <pre class="thinking-text">@entry.Thinking</pre>
+                                </details>
+                            }
+                            @if (!string.IsNullOrEmpty(entry.Response))
+                            {
+                                <details open>
+                                    <summary>Response</summary>
+                                    <pre class="code-block">@PrettyJson(entry.Response)</pre>
+                                </details>
+                            }
+                            @if (!string.IsNullOrEmpty(entry.Prompt))
+                            {
+                                <details>
+                                    <summary>Prompt</summary>
+                                    <pre class="code-block">@entry.Prompt</pre>
+                                </details>
+                            }
+                        </div>
+                    }
+                </div>
+            }
+            else if (entry.Kind == AgentLogKind.Command)
+            {
+                <div class="agent-line @(entry.Succeeded ? "agent-line-good" : "agent-line-bad")" @key="entry.Id">
+                    <Icon Name="terminal" Size="13" />
+                    <span class="agent-line-text mono-small" title="@entry.Command">@entry.Command</span>
+                    <span class="agent-line-meta">@(entry.Succeeded ? "passed" : $"exit {entry.ExitCode}") · @Fmt.Duration(entry.DurationMs)</span>
+                </div>
+            }
+            else
+            {
+                <div class="agent-line agent-line-@entry.Kind.ToString().ToLowerInvariant()" @key="entry.Id">
+                    <Icon Name="@(entry.Kind == AgentLogKind.Info ? "check" : "alert")" Size="13" />
+                    <span class="agent-line-text">@entry.Message</span>
+                </div>
+            }
+        }
+
+        @if (Live is { } live && (!_onlySelected || live.SubtaskId == SelectedSubtaskId))
+        {
+            <div class="agent-card agent-card-live">
+                <div class="agent-card-head">
+                    <span class="agent-avatar agent-avatar-live"><Icon Name="@Fmt.Icon(live.Role)" Size="14" /></span>
+                    <span class="agent-name">
+                        @Fmt.Label(live.Role)
+                        <span class="agent-params">@Fmt.CallParams(live.Model, live.ReasoningEffort, live.Temperature)</span>
+                    </span>
+                    <span class="agent-stats">
+                        <span class="spinner"></span>
+                        <span>@LiveStatus(live)</span>
+                    </span>
+                </div>
+                @if (live.Thinking.Length > 0)
+                {
+                    <div class="live-label"><Icon Name="sparkle" Size="12" /> Thinking</div>
+                    <pre class="thinking-text live-text">@Fmt.Tail(live.Thinking.ToString(), LiveTailChars)</pre>
+                }
+                @if (live.Content.Length > 0)
+                {
+                    <div class="live-label"><Icon Name="file-text" Size="12" /> Output</div>
+                    <pre class="code-block live-text">@Fmt.Tail(live.Content.ToString(), LiveTailChars)</pre>
+                }
+            </div>
+        }
+    </div>
+</div>
+
+@code {
+    private const int LiveTailChars = 4000;
+
+    [Parameter] public IReadOnlyList<AgentLogEntry> Logs { get; set; } = [];
+    [Parameter] public LiveCall? Live { get; set; }
+    [Parameter] public int? SelectedSubtaskId { get; set; }
+
+    private readonly HashSet<long> _expanded = [];
+    private bool _onlySelected;
+
+    private IEnumerable<AgentLogEntry> Visible => _onlySelected ? Logs.Where(l => l.SubtaskId == SelectedSubtaskId) : Logs;
+
+    private void Toggle(long id)
+    {
+        if (!_expanded.Add(id)) _expanded.Remove(id);
+    }
+
+    private static string LiveStatus(LiveCall live)
+    {
+        if (live.Deltas == 0) return "Waiting for model…";
+        var seconds = (DateTime.UtcNow - live.StartedAt).TotalSeconds;
+        return $"≈ {live.Deltas} tok · {Fmt.Duration(TimeSpan.FromSeconds(seconds))}";
+    }
+
+    private static string PrettyJson(string text)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(text);
+            return JsonSerializer.Serialize(document.RootElement, new JsonSerializerOptions
+            {
+                WriteIndented = true,
+                Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+            });
+        }
+        catch (JsonException)
+        {
+            return text;
+        }
+    }
+}

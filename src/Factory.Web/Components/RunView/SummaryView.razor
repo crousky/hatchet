@@ -1,0 +1,62 @@
+@inject IJSRuntime JS
+
+<div class="details">
+    <div class="stat-row">
+        <div class="stat"><div class="stat-value">@Completed<span class="stat-of">/@Subtasks.Count</span></div><div class="stat-label">subtasks done</div></div>
+        <div class="stat"><div class="stat-value">@Subtasks.Sum(s => s.FixAttempts)</div><div class="stat-label">fix attempts</div></div>
+        <div class="stat"><div class="stat-value">@Fmt.Tokens(Run.PromptTokens)</div><div class="stat-label">prompt tokens</div></div>
+        <div class="stat"><div class="stat-value">@Fmt.Tokens(Run.CompletionTokens)</div><div class="stat-label">completion tokens</div></div>
+        <div class="stat"><div class="stat-value">@Fmt.Duration((Run.CompletedAt ?? DateTime.UtcNow) - Run.CreatedAt)</div><div class="stat-label">elapsed</div></div>
+    </div>
+
+    @if (Draft is { } draft)
+    {
+        <h3>Pull request draft</h3>
+        @if (draft.HasRemote)
+        {
+            <p class="muted">Hatchet doesn't push anything for you. When you're ready, run these from the repository.</p>
+            <div class="copy-block">
+                <pre class="code-block">git push -u origin @draft.BranchName</pre>
+                <button class="icon-button" title="Copy" @onclick="@(() => CopyAsync($"git push -u origin {draft.BranchName}"))"><Icon Name="copy" Size="14" /></button>
+            </div>
+            <div class="copy-block">
+                <pre class="code-block">gh pr create --base @draft.BaseBranch --head @draft.BranchName --title "@draft.Title" --body-file pr.md</pre>
+                <button class="icon-button" title="Copy" @onclick="@(() => CopyAsync($"gh pr create --base {draft.BaseBranch} --head {draft.BranchName} --title \"{draft.Title}\" --body-file pr.md"))"><Icon Name="copy" Size="14" /></button>
+            </div>
+        }
+        else
+        {
+            <p class="muted">This repository has no remote yet. Add one before pushing <code>@draft.BranchName</code>.</p>
+        }
+        <div class="pr-body-head">
+            <span class="muted small">Description (save as pr.md)</span>
+            <button class="btn btn-ghost btn-small" @onclick="@(() => CopyAsync(draft.Body))"><Icon Name="copy" Size="13" /> Copy</button>
+        </div>
+        <pre class="code-block">@draft.Body</pre>
+    }
+
+    <h3>Subtasks</h3>
+    <table class="summary-table">
+        <tbody>
+            @foreach (var subtask in Subtasks)
+            {
+                <tr>
+                    <td class="muted">@subtask.Order</td>
+                    <td>@subtask.Title</td>
+                    <td class="muted">@Fmt.Label(subtask.Status)</td>
+                    <td class="mono-small muted">@Fmt.ShortSha(subtask.CommitSha)</td>
+                </tr>
+            }
+        </tbody>
+    </table>
+</div>
+
+@code {
+    [Parameter, EditorRequired] public FactoryRun Run { get; set; } = null!;
+    [Parameter] public IReadOnlyList<FactorySubtask> Subtasks { get; set; } = [];
+    [Parameter] public PullRequestDraft? Draft { get; set; }
+
+    private int Completed => Subtasks.Count(s => s.Status == SubtaskStatus.Completed);
+
+    private async Task CopyAsync(string text) => await JS.InvokeVoidAsync("hatchet.copy", text);
+}

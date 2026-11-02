@@ -1,0 +1,15 @@
+@inherits LayoutComponentBase
+
+<div class="workbench">
+    <nav class="activity-bar" aria-label="Main">
+        <a class="activity-logo" href="/" title="Hatchet"><HatchetLogo Size="24" /></a>
+        <NavLink class="activity-item" href="/" Match="NavLinkMatch.All" title="Runs"><Icon Name="layers" Size="20" /></NavLink>
+        <NavLink class="activity-item" href="/runs/new" title="New run"><Icon Name="plus" Size="20" /></NavLink>
+        <div class="activity-spacer"></div>
+        <NavLink class="activity-item" href="/settings" title="Settings"><Icon Name="settings" Size="20" /></NavLink>
+    </nav>
+    <div class="workbench-body">
+        @Body
+    </div>
+    <StatusBar />
+</div>

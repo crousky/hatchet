@@ -1,0 +1,45 @@
+@implements IDisposable
+
+<button class="btn @Class @(_armed ? "btn-danger" : "")" disabled="@Disabled" title="@Title" @onclick="ClickAsync">
+    @if (!string.IsNullOrEmpty(IconName))
+    {
+        <Icon Name="@IconName" Size="14" />
+    }
+    @(_armed ? ConfirmText : Text)
+</button>
+
+@code {
+    [Parameter, EditorRequired] public string Text { get; set; } = "";
+    [Parameter] public string ConfirmText { get; set; } = "Click again to confirm";
+    [Parameter] public string? IconName { get; set; }
+    [Parameter] public string? Class { get; set; }
+    [Parameter] public string? Title { get; set; }
+    [Parameter] public bool Disabled { get; set; }
+    [Parameter] public EventCallback OnConfirmed { get; set; }
+
+    private bool _armed;
+    private CancellationTokenSource? _disarm;
+
+    private async Task ClickAsync()
+    {
+        if (_armed)
+        {
+            _armed = false;
+            _disarm?.Cancel();
+            await OnConfirmed.InvokeAsync();
+            return;
+        }
+
+        _armed = true;
+        _disarm = new CancellationTokenSource();
+        var token = _disarm.Token;
+        _ = Task.Delay(TimeSpan.FromSeconds(4), token).ContinueWith(_ =>
+        {
+            if (token.IsCancellationRequested) return;
+            _armed = false;
+            InvokeAsync(StateHasChanged);
+        }, TaskScheduler.Default);
+    }
+
+    public void Dispose() => _disarm?.Cancel();
+}

@@ -1,0 +1,97 @@
+<div class="bottom-panel-inner">
+    <div class="panel-tabs">
+        <button class="panel-tab @(_tab == "terminal" ? "active" : "")" @onclick="@(() => _tab = "terminal")">
+            <Icon Name="terminal" Size="13" /> Terminal
+            @if (Live is not null)
+            {
+                <span class="spinner"></span>
+            }
+        </button>
+        <button class="panel-tab @(_tab == "logs" ? "active" : "")" @onclick="@(() => _tab = "logs")">
+            <Icon Name="clipboard" Size="13" /> Log
+            <span class="pane-count">@Logs.Count</span>
+        </button>
+        <span class="toolbar-spacer"></span>
+        <button class="icon-button" title="Toggle panel (Ctrl+J)" data-toggle="data-bottom-panel"><Icon Name="chevron-down" Size="14" /></button>
+    </div>
+
+    @if (_tab == "terminal")
+    {
+        <div class="terminal scroll" data-stick-bottom>
+            @if (Commands.Count == 0 && Live is null)
+            {
+                <div class="terminal-empty muted">Build and test output will stream here.</div>
+            }
+            @foreach (var entry in Commands)
+            {
+                var isLatest = entry.Id == Commands[^1].Id && Live is null;
+                var open = _opened.Contains(entry.Id) || (isLatest && !_closed.Contains(entry.Id));
+                <div class="terminal-block" @key="entry.Id">
+                    <button class="terminal-head" @onclick="() => Toggle(entry.Id, open)">
+                        <Icon Name="@(open ? "chevron-down" : "chevron-right")" Size="12" />
+                        <span class="terminal-prompt">$</span>
+                        <span class="terminal-command">@entry.Command</span>
+                        <span class="toolbar-spacer"></span>
+                        <span class="@(entry.Succeeded ? "text-good" : "text-bad")">@(entry.Succeeded ? "passed" : $"exit {entry.ExitCode}")</span>
+                        <span class="muted">@Fmt.Duration(entry.DurationMs)</span>
+                    </button>
+                    @if (open)
+                    {
+                        <pre class="terminal-output">@Fmt.Tail(entry.Output ?? "", MaxOutputChars)</pre>
+                    }
+                </div>
+            }
+            @if (Live is { } live)
+            {
+                <div class="terminal-block">
+                    <div class="terminal-head">
+                        <span class="spinner"></span>
+                        <span class="terminal-prompt">$</span>
+                        <span class="terminal-command">@live.Command</span>
+                    </div>
+                    <pre class="terminal-output">@Fmt.Tail(live.Output.ToString(), MaxOutputChars)</pre>
+                </div>
+            }
+        </div>
+    }
+    else
+    {
+        <div class="log-list scroll" data-stick-bottom>
+            @foreach (var entry in Logs)
+            {
+                <div class="log-row log-@entry.Kind.ToString().ToLowerInvariant()" @key="entry.Id">
+                    <span class="log-time">@entry.CreatedAt.ToLocalTime().ToString("HH:mm:ss")</span>
+                    <span class="log-stage">@entry.Stage</span>
+                    <span class="log-message">@(entry.Kind == AgentLogKind.Command ? $"$ {entry.Command}  ({entry.Message})" : entry.Message)</span>
+                </div>
+            }
+        </div>
+    }
+</div>
+
+@code {
+    private const int MaxOutputChars = 30_000;
+
+    [Parameter] public IReadOnlyList<AgentLogEntry> Logs { get; set; } = [];
+    [Parameter] public LiveCommand? Live { get; set; }
+
+    private readonly HashSet<long> _opened = [];
+    private readonly HashSet<long> _closed = [];
+    private string _tab = "terminal";
+
+    private List<AgentLogEntry> Commands => Logs.Where(l => l.Kind == AgentLogKind.Command).ToList();
+
+    private void Toggle(long id, bool isOpen)
+    {
+        if (isOpen)
+        {
+            _opened.Remove(id);
+            _closed.Add(id);
+        }
+        else
+        {
+            _closed.Remove(id);
+            _opened.Add(id);
+        }
+    }
+}

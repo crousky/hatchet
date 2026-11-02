@@ -1,0 +1,93 @@
+<div class="rail">
+    @Node(PipelineStage.Ingest, "Ingest", "folder")
+    <span class="rail-line"></span>
+    @Node(PipelineStage.Decompose, "Decompose", "map")
+    <span class="rail-line"></span>
+    <div class="rail-group" title="Repeats for each subtask">
+        <span class="rail-group-label">@GroupLabel</span>
+        @Node(PipelineStage.Refine, "Refine", "file-text")
+        <span class="rail-line"></span>
+        @Node(PipelineStage.Build, "Build", "hammer")
+        <span class="rail-line"></span>
+        @Node(PipelineStage.Verify, "Verify", "terminal")
+        <span class="rail-line"></span>
+        @Node(PipelineStage.Review, "Review", "eye")
+        <span class="rail-divider"></span>
+        @Node(PipelineStage.Fix, FixLabel, "wrench")
+    </div>
+    <span class="rail-line"></span>
+    @Node(PipelineStage.Integrate, "Integrate", "git-merge")
+</div>
+
+@code {
+    [Parameter, EditorRequired] public FactoryRun Run { get; set; } = null!;
+    [Parameter] public IReadOnlyList<FactorySubtask> Subtasks { get; set; } = [];
+
+    private FactorySubtask? Current => Subtasks.FirstOrDefault(s => s.Id == Run.CurrentSubtaskId);
+
+    private string GroupLabel
+    {
+        get
+        {
+            if (Subtasks.Count == 0) return "Per subtask";
+            var done = Subtasks.Count(s => s.Status is SubtaskStatus.Completed or SubtaskStatus.Skipped);
+            return Current is { } current ? $"Subtask {current.Order} of {Subtasks.Count}" : $"{done} of {Subtasks.Count} subtasks";
+        }
+    }
+
+    private string FixLabel => Current is { FixAttempts: > 0 } current ? $"Fix {current.FixAttempts}" : "Fix";
+
+    private RenderFragment Node(PipelineStage stage, string label, string icon) => @<span class="rail-node rail-@StateOf(stage)">
+        <span class="rail-dot">
+            @if (StateOf(stage) == "active")
+            {
+                <span class="spinner"></span>
+            }
+            else if (StateOf(stage) == "done")
+            {
+                <Icon Name="check" Size="12" />
+            }
+            else if (StateOf(stage) == "paused")
+            {
+                <Icon Name="alert" Size="12" />
+            }
+            else
+            {
+                <Icon Name="@icon" Size="12" />
+            }
+        </span>
+        @label
+    </span>;
+
+    private static int IndexOf(PipelineStage stage) => stage switch
+    {
+        PipelineStage.Ingest => 0,
+        PipelineStage.Decompose => 1,
+        PipelineStage.Refine => 2,
+        PipelineStage.Build => 3,
+        PipelineStage.Fix => 4,
+        PipelineStage.Verify => 5,
+        PipelineStage.Review => 6,
+        _ => 7
+    };
+
+    private string StateOf(PipelineStage stage)
+    {
+        if (Run.Status is RunStatus.ReadyToMerge or RunStatus.Merged or RunStatus.Closed)
+            return stage == PipelineStage.Fix ? "pending" : "done";
+
+        if (Run.CurrentStage is not { } current) return "pending";
+
+        if (stage == current)
+        {
+            return Run.Status switch
+            {
+                RunStatus.NeedsHuman or RunStatus.AwaitingPlanApproval or RunStatus.Failed or RunStatus.Cancelled => "paused",
+                _ => "active"
+            };
+        }
+
+        if (stage == PipelineStage.Fix) return "pending";
+        return IndexOf(stage) < IndexOf(current) ? "done" : "pending";
+    }
+}
