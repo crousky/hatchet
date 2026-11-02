@@ -67,10 +67,18 @@ public sealed class FactoryOrchestrator(
 
     // ---- Commands from the UI ----
 
-    public async Task<FactoryRun> StartRunAsync(NewRunRequest request, CancellationToken ct = default)
+    public Task<FactoryRun> StartRunAsync(NewRunRequest request, CancellationToken ct = default) => StartRunAsync(request, null, ct);
+
+    /// <summary>
+    /// Starts a run. With a <paramref name="plan"/>, for example one worked out with Claude over MCP, Hatchet's own
+    /// planner is skipped. Whoever supplied the plan has approved it, so its verification commands may run.
+    /// </summary>
+    public async Task<FactoryRun> StartRunAsync(NewRunRequest request, IReadOnlyList<SubtaskEdit>? plan, CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(request.ArchitectureSpec))
             throw new FactoryValidationException("The architecture spec is empty.");
+        if (plan is not null && (plan.Count == 0 || plan.Any(s => string.IsNullOrWhiteSpace(s.Title) || string.IsNullOrWhiteSpace(s.Description))))
+            throw new FactoryValidationException("A supplied plan needs at least one subtask, and every subtask needs a title and a description.");
 
         var command = request.VerificationCommand?.Trim() ?? "";
         var path = Path.GetFullPath(request.RepositoryPath.Trim());
@@ -86,9 +94,25 @@ public sealed class FactoryOrchestrator(
         };
 
         var run = await store.CreateRunAsync(null, task, ct);
+        // Saved before the pipeline starts, so a restart during the repository scan still finds it.
+        if (plan is not null) await store.ReplaceSubtasksAsync(run.Id, ToSubtasks(run.Id, plan), ct);
         Launch(run.Id, (context, token) => RunFromIngestAsync(context, token));
         return run;
     }
+
+    private static List<FactorySubtask> ToSubtasks(int runId, IReadOnlyList<SubtaskEdit> plan) =>
+        plan.Select((edit, index) => new FactorySubtask
+        {
+            RunId = runId,
+            Order = index + 1,
+            Title = edit.Title.Trim(),
+            Description = edit.Description,
+            TargetFilesToModify = edit.TargetFilesToModify,
+            TargetFilesToCreate = edit.TargetFilesToCreate,
+            ContextFilesToRead = edit.ContextFilesToRead,
+            VerificationCommand = edit.VerificationCommand.Trim(),
+            CommandApproved = true
+        }).ToList();
 
     /// <summary>Starts a fresh run of an earlier run's task.</summary>
     public async Task<FactoryRun> RerunAsync(int runId, CancellationToken ct = default)
@@ -106,20 +130,7 @@ public sealed class FactoryOrchestrator(
         RequireStatus(run, RunStatus.AwaitingPlanApproval);
         if (plan.Count == 0) throw new FactoryValidationException("The plan has no subtasks.");
 
-        var subtasks = plan.Select((edit, index) => new FactorySubtask
-        {
-            RunId = runId,
-            Order = index + 1,
-            Title = edit.Title.Trim(),
-            Description = edit.Description,
-            TargetFilesToModify = edit.TargetFilesToModify,
-            TargetFilesToCreate = edit.TargetFilesToCreate,
-            ContextFilesToRead = edit.ContextFilesToRead,
-            VerificationCommand = edit.VerificationCommand.Trim(),
-            CommandApproved = true
-        }).ToList();
-
-        await store.ReplaceSubtasksAsync(runId, subtasks, ct);
+        await store.ReplaceSubtasksAsync(runId, ToSubtasks(runId, plan), ct);
         bus.Publish(new PlanChanged(runId));
         Launch(runId, (context, token) => ExecuteAsync(context, null, token));
     }
@@ -355,7 +366,24 @@ public sealed class FactoryOrchestrator(
     private async Task RunFromIngestAsync(PipelineContext context, CancellationToken ct)
     {
         await IngestAsync(context, ct);
-        await DecomposeAndContinueAsync(context, null, ct);
+        if ((await store.GetSubtasksAsync(context.Run.Id, ct)).Count > 0) await UseSuppliedPlanAsync(context, ct);
+        else await DecomposeAndContinueAsync(context, null, ct);
+    }
+
+    private async Task UseSuppliedPlanAsync(PipelineContext context, CancellationToken ct)
+    {
+        var run = context.Run;
+        await SetRunStatusAsync(run, RunStatus.Decomposing, ct);
+        await SetStageAsync(run, PipelineStage.Decompose, null, ct);
+        var count = (await store.GetSubtasksAsync(run.Id, ct)).Count;
+        await LogAsync(run.Id, null, AgentLogKind.Info, PipelineStage.Decompose, $"Using the plan supplied with the run ({count} subtasks), so the Task Planner was skipped.", ct);
+
+        if (context.Task.RequirePlanApproval)
+        {
+            await SetRunStatusAsync(run, RunStatus.AwaitingPlanApproval, ct);
+            return;
+        }
+        await ExecuteAsync(context, null, ct);
     }
 
     private async Task IngestAsync(PipelineContext context, CancellationToken ct)

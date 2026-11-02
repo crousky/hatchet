@@ -3,6 +3,7 @@ using Factory.Engine.Orchestration;
 using Factory.Engine.Verification;
 using Factory.Web.Components;
 using Factory.Web.Data;
+using Factory.Web.Mcp;
 using Factory.Web.Services;
 using Microsoft.EntityFrameworkCore;
 
@@ -36,6 +37,11 @@ builder.Services.AddSingleton<ILlmClient>(_ => new RoutingLlmClient(
     new ClaudeCodeLlmClient(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Hatchet", "claude-code"))));
 builder.Services.AddSingleton(_ => new LmStudioModelLoader(new HttpClient { Timeout = Timeout.InfiniteTimeSpan }));
 
+// MCP endpoint for Claude Code and other clients. The tools never call back into the client, so no sessions are kept.
+builder.Services.AddMcpServer(options => options.ServerInfo = new() { Name = "hatchet", Version = "1.0.0" })
+    .WithHttpTransport(options => options.Stateless = true)
+    .WithTools<HatchetTools>();
+
 builder.Services.AddSingleton<ModelHealthService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<ModelHealthService>());
 builder.Services.AddHostedService<OrchestratorLifetime>();
@@ -54,8 +60,27 @@ if (!app.Environment.IsDevelopment())
     app.UseExceptionHandler("/error", createScopeForErrors: true);
 }
 
+// A web page in the user's browser could otherwise reach the MCP tools on localhost. MCP clients send no Origin;
+// browsers always do, so only Hatchet's own pages get through.
+app.Use(async (context, next) =>
+{
+    if (context.Request.Path.StartsWithSegments(McpPath) && context.Request.Headers.Origin is [{ } origin]
+        && !(Uri.TryCreate(origin, UriKind.Absolute, out var uri) && uri.IsLoopback))
+    {
+        context.Response.StatusCode = StatusCodes.Status403Forbidden;
+        return;
+    }
+    await next();
+});
+
 app.UseAntiforgery();
 app.MapStaticAssets();
 app.MapRazorComponents<App>().AddInteractiveServerRenderMode();
+app.MapMcp(McpPath);
 
 app.Run();
+
+public partial class Program
+{
+    public const string McpPath = "/mcp";
+}

@@ -482,6 +482,44 @@ public class OrchestratorTests : IAsyncLifetime
         Assert.False(File.Exists(_repo.File("alpha.txt")));
     }
 
+    private static SubtaskEdit Step(string title, string command = "") => new(null, title, $"Build {title}", [], [$"{title}.txt"], [], command);
+
+    [Fact]
+    public async Task A_supplied_plan_skips_the_planner_and_its_commands_are_trusted()
+    {
+        _llm.Enqueue(AgentRole.ContextSpecifier, Refined(), Refined());
+        _llm.Enqueue(AgentRole.CodeGenerator, Patch("alpha.txt"), Patch("beta.txt"));
+        _llm.Enqueue(AgentRole.StaticReviewer, Verdict(true), Verdict(true));
+
+        var run = await _orchestrator.StartRunAsync(new NewRunRequest(_repo.Path, "# Spec", null, "verify", false), [Step("alpha", "check alpha"), Step("beta")]);
+        run = await WaitForAsync(run.Id, RunStatus.ReadyToMerge);
+
+        Assert.DoesNotContain(_llm.Calls, c => c.Role == AgentRole.TaskPlanner);
+        Assert.Equal(["alpha", "beta"], (await _store.GetSubtasksAsync(run.Id)).Select(s => s.Title));
+        Assert.Contains("check alpha", _commands.Commands); // Its own command ran, without a plan review in Hatchet.
+        Assert.Contains(await _store.GetLogsAsync(run.Id), l => l.Message.Contains("Task Planner was skipped"));
+    }
+
+    [Fact]
+    public async Task A_supplied_plan_can_still_wait_for_review_in_hatchet()
+    {
+        var run = await _orchestrator.StartRunAsync(new NewRunRequest(_repo.Path, "# Spec", null, "verify", true), [Step("alpha")]);
+        run = await WaitForAsync(run.Id, RunStatus.AwaitingPlanApproval);
+
+        Assert.Empty(_llm.Calls);
+        Assert.Equal("alpha", (await _store.GetSubtasksAsync(run.Id)).Single().Title);
+    }
+
+    [Fact]
+    public async Task A_supplied_plan_must_have_titled_and_described_steps()
+    {
+        await Assert.ThrowsAsync<FactoryValidationException>(() =>
+            _orchestrator.StartRunAsync(new NewRunRequest(_repo.Path, "# Spec", null, null, false), []));
+        await Assert.ThrowsAsync<FactoryValidationException>(() =>
+            _orchestrator.StartRunAsync(new NewRunRequest(_repo.Path, "# Spec", null, null, false), [Step("alpha") with { Description = " " }]));
+        Assert.Empty(await _store.ListRunsAsync());
+    }
+
     [Fact]
     public async Task A_fix_that_fails_on_the_local_model_goes_to_claude_with_the_history()
     {
