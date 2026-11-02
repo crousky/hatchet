@@ -80,8 +80,9 @@ public sealed class HatchetTools(FactoryOrchestrator orchestrator, IRunStore sto
         [Description("True to stop after planning so the user can review or edit the plan in Hatchet's UI before building.")] bool reviewPlanInHatchet = false,
         CancellationToken ct = default)
     {
-        var edits = plan?.Select(step => new SubtaskEdit(null, step.Title, step.Description,
-            step.FilesToModify, step.FilesToCreate, step.FilesToRead, step.VerificationCommand ?? "")).ToList();
+        // A client may send null for a list or field it leaves empty.
+        var edits = plan?.Select(step => new SubtaskEdit(null, step.Title ?? "", step.Description ?? "",
+            step.FilesToModify ?? [], step.FilesToCreate ?? [], step.FilesToRead ?? [], step.VerificationCommand ?? "")).ToList();
         var run = await Do(() => orchestrator.StartRunAsync(new NewRunRequest(repositoryPath, spec, title, verificationCommand, reviewPlanInHatchet), edits, ct));
         return await DescribeRunAsync(run.Id, ct);
     }
@@ -96,9 +97,8 @@ public sealed class HatchetTools(FactoryOrchestrator orchestrator, IRunStore sto
             .Where(r => includeFinished || !RunStateMachine.IsTerminal(r.Status))
             .OrderByDescending(r => r.Id)
             .ToList();
-        var summaries = new List<RunSummary>();
-        foreach (var run in runs) summaries.Add(Summarize(run, await store.GetSubtasksAsync(run.Id, ct)));
-        return summaries;
+        var subtasks = (await store.GetSubtasksForRunsAsync(runs.Select(r => r.Id).ToList(), ct)).ToLookup(s => s.RunId);
+        return runs.Select(run => Summarize(run, subtasks[run.Id].ToList())).ToList();
     }
 
     [McpServerTool(Name = "get_run", ReadOnly = true)]
@@ -124,13 +124,18 @@ public sealed class HatchetTools(FactoryOrchestrator orchestrator, IRunStore sto
     }
 
     [McpServerTool(Name = "approve_plan")]
-    [Description("Approves the plan of a run waiting for plan review, exactly as it stands, and starts building.")]
+    [Description("""
+        Approves the plan of a run waiting for plan review, as it stands, and starts building.
+        Verification commands proposed by Hatchet's own planner are dropped, because only the user can approve those, in Hatchet's UI.
+        Those subtasks are checked with the run's verification command instead. Commands in a plan you supplied with start_run are kept.
+        """)]
     public async Task<RunDetails> ApprovePlan([Description("The run's id.")] int runId, CancellationToken ct = default)
     {
         await RequireRunAsync(runId, ct);
         var plan = (await store.GetSubtasksAsync(runId, ct))
             .OrderBy(s => s.Order)
-            .Select(s => new SubtaskEdit(s.Id, s.Title, s.Description, s.TargetFilesToModify, s.TargetFilesToCreate, s.ContextFilesToRead, s.VerificationCommand))
+            .Select(s => new SubtaskEdit(s.Id, s.Title, s.Description, s.TargetFilesToModify, s.TargetFilesToCreate, s.ContextFilesToRead,
+                s.CommandApproved ? s.VerificationCommand : ""))
             .ToList();
         await Do(() => orchestrator.ApprovePlanAsync(runId, plan, ct));
         return await DescribeRunAsync(runId, ct);
@@ -143,6 +148,7 @@ public sealed class HatchetTools(FactoryOrchestrator orchestrator, IRunStore sto
         [Description("Stop the current step now rather than after it finishes.")] bool immediately = false,
         CancellationToken ct = default)
     {
+        await RequireRunAsync(runId, ct);
         await Do(() => orchestrator.PauseAsync(runId, immediately, ct));
         return await DescribeRunAsync(runId, ct);
     }
@@ -172,6 +178,7 @@ public sealed class HatchetTools(FactoryOrchestrator orchestrator, IRunStore sto
             "skip_subtask" => HumanDecision.SkipSubtask,
             _ => throw new McpException($"Unknown action \"{action}\". Use resume, retry_fixer, reverify, restart_subtask or skip_subtask.")
         };
+        await RequireRunAsync(runId, ct);
         await Do(() => orchestrator.ResumeAsync(runId, decision, guidance, ct));
         return await DescribeRunAsync(runId, ct);
     }
@@ -180,6 +187,7 @@ public sealed class HatchetTools(FactoryOrchestrator orchestrator, IRunStore sto
     [Description("Cancels a run for good: discards uncommitted changes and returns the repository to its base branch. Commits stay on the run's branch. Prefer pause_run unless the user wants to abandon the run.")]
     public async Task<RunDetails> CancelRun([Description("The run's id.")] int runId, CancellationToken ct = default)
     {
+        await RequireRunAsync(runId, ct);
         await Do(() => orchestrator.CancelAsync(runId, ct));
         return await DescribeRunAsync(runId, ct);
     }
@@ -188,11 +196,7 @@ public sealed class HatchetTools(FactoryOrchestrator orchestrator, IRunStore sto
     {
         var run = await RequireRunAsync(runId, ct);
         var subtasks = await store.GetSubtasksAsync(runId, ct);
-        var events = (await store.GetLogsAsync(runId, ct: ct))
-            .Where(l => l.Kind != AgentLogKind.LlmCall || !l.Succeeded)
-            .TakeLast(12)
-            .Select(l => $"{l.CreatedAt:HH:mm:ss} {l.Message}")
-            .ToList();
+        var events = (await store.GetRecentEventsAsync(runId, 12, ct)).Select(l => $"{l.CreatedAt:HH:mm:ss} {l.Message}").ToList();
 
         return new RunDetails(Summarize(run, subtasks), run.BranchName, run.BaseBranch, run.IntegrationPassed,
             run.PromptTokens + run.CompletionTokens,
@@ -210,10 +214,8 @@ public sealed class HatchetTools(FactoryOrchestrator orchestrator, IRunStore sto
         return new RunSummary(run.Id, run.Task.Title, status, run.Task.RepositoryPath,
             subtasks.Count(s => SubtaskStateMachine.IsFinished(s.Status) && s.Status != SubtaskStatus.Cancelled), subtasks.Count,
             RunStateMachine.IsWorking(run.Status) || run.Status == RunStatus.NeedsHuman ? step : null,
-            run.PauseReason, $"{BaseUrl()}/runs/{run.Id}");
+            run.PauseReason, $"{Program.BaseUrl(configuration)}/runs/{run.Id}");
     }
-
-    private string BaseUrl() => (configuration["Urls"] ?? "http://localhost:5199").Split(';')[0].TrimEnd('/');
 
     private async Task<FactoryRun> RequireRunAsync(int runId, CancellationToken ct)
     {

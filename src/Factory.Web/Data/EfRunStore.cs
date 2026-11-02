@@ -44,6 +44,12 @@ public sealed class EfRunStore(IDbContextFactory<FactoryDbContext> factory) : IR
         return await db.Subtasks.AsNoTracking().Where(s => s.RunId == runId).OrderBy(s => s.Order).ToListAsync(ct);
     }
 
+    public async Task<IReadOnlyList<FactorySubtask>> GetSubtasksForRunsAsync(IReadOnlyCollection<int> runIds, CancellationToken ct = default)
+    {
+        await using var db = await factory.CreateDbContextAsync(ct);
+        return await db.Subtasks.AsNoTracking().Where(s => runIds.Contains(s.RunId)).OrderBy(s => s.RunId).ThenBy(s => s.Order).ToListAsync(ct);
+    }
+
     public async Task UpdateSubtaskAsync(FactorySubtask subtask, CancellationToken ct = default)
     {
         await using var db = await factory.CreateDbContextAsync(ct);
@@ -74,6 +80,16 @@ public sealed class EfRunStore(IDbContextFactory<FactoryDbContext> factory) : IR
     {
         await using var db = await factory.CreateDbContextAsync(ct);
         return await db.AgentLogs.AsNoTracking().Where(l => l.RunId == runId && l.Id > afterId).OrderBy(l => l.Id).ToListAsync(ct);
+    }
+
+    public async Task<IReadOnlyList<AgentLogEntry>> GetRecentEventsAsync(int runId, int count, CancellationToken ct = default)
+    {
+        await using var db = await factory.CreateDbContextAsync(ct);
+        var latest = await db.AgentLogs.AsNoTracking()
+            .Where(l => l.RunId == runId && (l.Kind != AgentLogKind.LlmCall || !l.Succeeded))
+            .OrderByDescending(l => l.Id).Take(count).ToListAsync(ct);
+        latest.Reverse();
+        return latest;
     }
 
     public async Task<DiffSnapshot> AddDiffAsync(DiffSnapshot diff, CancellationToken ct = default)

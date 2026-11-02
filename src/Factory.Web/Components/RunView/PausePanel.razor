@@ -81,7 +81,7 @@
     private string ResumeLabel => Run.PausedStage switch
     {
         PipelineStage.Ingest => "Scan again",
-        PipelineStage.Decompose when !Run.PausedByUser => "Plan again",
+        PipelineStage.Decompose when !Run.PausedByUser && Run.Task.SuppliedPlanJson is null => "Plan again",
         PipelineStage.Integrate => "Run the final check again",
         _ => "Resume"
     };

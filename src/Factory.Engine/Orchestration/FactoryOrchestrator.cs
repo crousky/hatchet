@@ -90,12 +90,12 @@ public sealed class FactoryOrchestrator(
             RepositoryPath = path,
             ArchitectureSpec = request.ArchitectureSpec,
             VerificationCommand = command,
-            RequirePlanApproval = request.RequirePlanApproval
+            RequirePlanApproval = request.RequirePlanApproval,
+            SuppliedPlanJson = plan is null ? null : JsonSerializer.Serialize(plan)
         };
 
-        var run = await store.CreateRunAsync(null, task, ct);
-        // Saved before the pipeline starts, so a restart during the repository scan still finds it.
-        if (plan is not null) await store.ReplaceSubtasksAsync(run.Id, ToSubtasks(run.Id, plan), ct);
+        // Once the run is saved it has to be launched, or it would sit queued with no pipeline behind it.
+        var run = await store.CreateRunAsync(null, task, CancellationToken.None);
         Launch(run.Id, (context, token) => RunFromIngestAsync(context, token));
         return run;
     }
@@ -153,7 +153,7 @@ public sealed class FactoryOrchestrator(
                 Launch(runId, (context, token) => RunFromIngestAsync(context, token));
                 return;
             case PipelineStage.Decompose:
-                Launch(runId, (context, token) => DecomposeAndContinueAsync(context, null, token));
+                Launch(runId, (context, token) => PlanAsync(context, token));
                 return;
             case PipelineStage.Integrate:
                 Launch(runId, (context, token) => IntegrateAsync(context, token));
@@ -366,17 +366,27 @@ public sealed class FactoryOrchestrator(
     private async Task RunFromIngestAsync(PipelineContext context, CancellationToken ct)
     {
         await IngestAsync(context, ct);
-        if ((await store.GetSubtasksAsync(context.Run.Id, ct)).Count > 0) await UseSuppliedPlanAsync(context, ct);
-        else await DecomposeAndContinueAsync(context, null, ct);
+        await PlanAsync(context, ct);
     }
+
+    /// <summary>Uses the plan handed over with the task, if there is one, and otherwise has the Task Planner make one.</summary>
+    private Task PlanAsync(PipelineContext context, CancellationToken ct) =>
+        context.Task.SuppliedPlanJson is null ? DecomposeAndContinueAsync(context, null, ct) : UseSuppliedPlanAsync(context, ct);
 
     private async Task UseSuppliedPlanAsync(PipelineContext context, CancellationToken ct)
     {
         var run = context.Run;
         await SetRunStatusAsync(run, RunStatus.Decomposing, ct);
         await SetStageAsync(run, PipelineStage.Decompose, null, ct);
-        var count = (await store.GetSubtasksAsync(run.Id, ct)).Count;
-        await LogAsync(run.Id, null, AgentLogKind.Info, PipelineStage.Decompose, $"Using the plan supplied with the run ({count} subtasks), so the Task Planner was skipped.", ct);
+
+        // A run resumed here may already hold the plan, edited at plan review perhaps, so only a fresh run copies it.
+        if ((await store.GetSubtasksAsync(run.Id, ct)).Count == 0)
+        {
+            var plan = JsonSerializer.Deserialize<List<SubtaskEdit>>(context.Task.SuppliedPlanJson!)!;
+            await store.ReplaceSubtasksAsync(run.Id, ToSubtasks(run.Id, plan), ct);
+            bus.Publish(new PlanChanged(run.Id));
+            await LogAsync(run.Id, null, AgentLogKind.Info, PipelineStage.Decompose, $"Using the plan supplied with the run ({plan.Count} subtasks), so the Task Planner was skipped.", ct);
+        }
 
         if (context.Task.RequirePlanApproval)
         {

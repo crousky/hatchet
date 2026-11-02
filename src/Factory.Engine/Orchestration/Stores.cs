@@ -11,12 +11,16 @@ public interface IRunStore
     Task UpdateRunAsync(FactoryRun run, CancellationToken ct = default);
 
     Task<IReadOnlyList<FactorySubtask>> GetSubtasksAsync(int runId, CancellationToken ct = default);
+    /// <summary>The subtasks of several runs in one query, ordered by run and then by order.</summary>
+    Task<IReadOnlyList<FactorySubtask>> GetSubtasksForRunsAsync(IReadOnlyCollection<int> runIds, CancellationToken ct = default);
     Task UpdateSubtaskAsync(FactorySubtask subtask, CancellationToken ct = default);
     Task ReplaceSubtasksAsync(int runId, IReadOnlyList<FactorySubtask> subtasks, CancellationToken ct = default);
 
     Task<AgentLogEntry> AppendLogAsync(AgentLogEntry entry, CancellationToken ct = default);
     /// <summary>Entries with an id above <paramref name="afterId"/>, so live views can fetch only what is new.</summary>
     Task<IReadOnlyList<AgentLogEntry>> GetLogsAsync(int runId, long afterId = 0, CancellationToken ct = default);
+    /// <summary>The latest <paramref name="count"/> entries, oldest first, leaving out model calls that succeeded.</summary>
+    Task<IReadOnlyList<AgentLogEntry>> GetRecentEventsAsync(int runId, int count, CancellationToken ct = default);
 
     Task<DiffSnapshot> AddDiffAsync(DiffSnapshot diff, CancellationToken ct = default);
     Task<IReadOnlyList<DiffSnapshot>> GetDiffsAsync(int runId, CancellationToken ct = default);

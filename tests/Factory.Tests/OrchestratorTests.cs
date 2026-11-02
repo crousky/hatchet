@@ -521,6 +521,38 @@ public class OrchestratorTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Resuming_a_pause_while_planning_keeps_the_supplied_plan()
+    {
+        var run = await _orchestrator.StartRunAsync(new NewRunRequest(_repo.Path, "# Spec", null, "verify", true), [Step("alpha")]);
+        await WaitForAsync(run.Id, RunStatus.AwaitingPlanApproval);
+        _llm.Offline = AgentRole.TaskPlanner;
+        await _orchestrator.RegeneratePlanAsync(run.Id, null);
+        run = await WaitForAsync(run.Id, RunStatus.NeedsHuman);
+        Assert.Equal(PipelineStage.Decompose, run.PausedStage);
+
+        _llm.Offline = null;
+        await _orchestrator.ResumeAsync(run.Id, HumanDecision.Resume, null);
+        await WaitForAsync(run.Id, RunStatus.AwaitingPlanApproval); // The planner has nothing queued, so calling it would pause again.
+
+        Assert.Equal("alpha", (await _store.GetSubtasksAsync(run.Id)).Single().Title);
+    }
+
+    [Fact]
+    public async Task A_rerun_uses_the_plan_supplied_with_the_task()
+    {
+        var first = await _orchestrator.StartRunAsync(new NewRunRequest(_repo.Path, "# Spec", null, "verify", true), [Step("alpha", "check alpha")]);
+        await WaitForAsync(first.Id, RunStatus.AwaitingPlanApproval);
+        await _orchestrator.CancelAsync(first.Id);
+
+        var rerun = await _orchestrator.RerunAsync(first.Id);
+        await WaitForAsync(rerun.Id, RunStatus.AwaitingPlanApproval);
+
+        Assert.Empty(_llm.Calls);
+        var subtask = (await _store.GetSubtasksAsync(rerun.Id)).Single();
+        Assert.Equal(("alpha", "check alpha", true), (subtask.Title, subtask.VerificationCommand, subtask.CommandApproved));
+    }
+
+    [Fact]
     public async Task A_fix_that_fails_on_the_local_model_goes_to_claude_with_the_history()
     {
         _llm.Enqueue(AgentRole.TaskPlanner, Plan("alpha"));
@@ -878,6 +910,11 @@ public class OrchestratorTests : IAsyncLifetime
             lock (_gate) return Task.FromResult<IReadOnlyList<FactorySubtask>>(_subtasks.Where(s => s.RunId == runId).OrderBy(s => s.Order).Select(Clone).ToList());
         }
 
+        public Task<IReadOnlyList<FactorySubtask>> GetSubtasksForRunsAsync(IReadOnlyCollection<int> runIds, CancellationToken ct = default)
+        {
+            lock (_gate) return Task.FromResult<IReadOnlyList<FactorySubtask>>(_subtasks.Where(s => runIds.Contains(s.RunId)).OrderBy(s => s.RunId).ThenBy(s => s.Order).Select(Clone).ToList());
+        }
+
         public Task UpdateSubtaskAsync(FactorySubtask subtask, CancellationToken ct = default)
         {
             lock (_gate) _subtasks[_subtasks.FindIndex(s => s.Id == subtask.Id)] = Clone(subtask);
@@ -911,6 +948,11 @@ public class OrchestratorTests : IAsyncLifetime
         public Task<IReadOnlyList<AgentLogEntry>> GetLogsAsync(int runId, long afterId = 0, CancellationToken ct = default)
         {
             lock (_gate) return Task.FromResult<IReadOnlyList<AgentLogEntry>>(_logs.Where(l => l.RunId == runId && l.Id > afterId).ToList());
+        }
+
+        public Task<IReadOnlyList<AgentLogEntry>> GetRecentEventsAsync(int runId, int count, CancellationToken ct = default)
+        {
+            lock (_gate) return Task.FromResult<IReadOnlyList<AgentLogEntry>>(_logs.Where(l => l.RunId == runId && (l.Kind != AgentLogKind.LlmCall || !l.Succeeded)).TakeLast(count).ToList());
         }
 
         public Task<DiffSnapshot> AddDiffAsync(DiffSnapshot diff, CancellationToken ct = default)

@@ -12,6 +12,10 @@ public sealed class FactoryTask
     public string VerificationCommand { get; set; } = "";
 
     public bool RequirePlanApproval { get; set; } = true;
+
+    /// <summary>The plan handed over with the task, as JSON <see cref="SubtaskEdit"/>s. Null when Hatchet's planner makes the plan.</summary>
+    public string? SuppliedPlanJson { get; set; }
+
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
     public List<FactoryRun> Runs { get; set; } = [];
 }

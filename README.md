@@ -57,7 +57,7 @@ Then plan a change with Claude in conversation and ask it to hand the plan to Ha
 | `start_run` | Starts a run from a spec, with a ready-made plan or with Hatchet's planner |
 | `list_runs`, `get_run` | Status, progress, subtasks and recent events |
 | `get_subtask` | One subtask in full: last failure, fix history, review verdict, diff |
-| `approve_plan` | Approves a plan waiting for review in Hatchet |
+| `approve_plan` | Approves a plan waiting for review in Hatchet, without the commands Hatchet's planner proposed |
 | `pause_run`, `resume_run` | Pause now or after the current step; resume, retry the fixer with guidance, re-verify, restart or skip |
 | `cancel_run` | Abandons a run |
 
@@ -71,9 +71,9 @@ What it does to limit the damage:
 
 - **Clean tree required.** A run won't start with uncommitted changes, so rollbacks can't touch your work.
 - **Separate branch.** Work stays on `factory/run-N`. Rollback refuses to run on any other branch, and nothing merges until you click Merge.
-- **No unreviewed commands.** Verification commands proposed by Hatchet's planner only run if you approved them at plan review. Otherwise Hatchet runs your own command, or one it detects from the repository. A plan handed over through MCP counts as approved by whoever handed it over.
+- **No unreviewed commands.** Verification commands proposed by Hatchet's planner only run if you approved them at plan review. Otherwise Hatchet runs your own command, or one it detects from the repository. A plan handed over through MCP counts as approved by whoever handed it over, but an MCP client can't approve commands proposed by Hatchet's planner.
 - **Writes stay inside the repo.** A patch with an absolute path, a `..`, a symlink on the way, or a target in `.git` is rejected whole, before anything is written.
-- **Local only.** The server binds to `localhost` and rejects other host names. The MCP endpoint also refuses requests from web pages. It has no login, so don't expose it.
+- **Local only.** The server binds to `localhost` and rejects other host names. The MCP endpoint also refuses requests from web pages other than Hatchet's own. It has no login, so don't expose it.
 - **Nothing is pushed.** Prepare PR gives you the commands and the description, and you run them yourself.
 
 ## Project layout

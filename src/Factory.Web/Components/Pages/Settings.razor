@@ -273,6 +273,7 @@
                 <div class="hint">
                     Hatchet has to be running for Claude to reach it. The endpoint only answers on this machine, and it refuses requests from web pages.
                     A plan Claude hands over counts as approved, so its verification commands run. Ask Claude to set <code>reviewPlanInHatchet</code> if you want to check it here first.
+                    Claude can't approve commands proposed by Hatchet's own planner. Only you can, here.
                 </div>
             </section>
 
@@ -358,7 +359,7 @@
 
     public void Dispose() => Health.Changed -= OnHealthChanged;
 
-    private string McpCommand => $"claude mcp add --transport http --scope user hatchet {(Configuration["Urls"] ?? "http://localhost:5199").Split(';')[0].TrimEnd('/')}{Program.McpPath}";
+    private string McpCommand => $"claude mcp add --transport http --scope user hatchet {Program.BaseUrl(Configuration)}{Program.McpPath}";
 
     private readonly HashSet<AgentRole> _openPrompts = [];
 

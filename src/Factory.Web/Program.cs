@@ -60,12 +60,12 @@ if (!app.Environment.IsDevelopment())
     app.UseExceptionHandler("/error", createScopeForErrors: true);
 }
 
-// A web page in the user's browser could otherwise reach the MCP tools on localhost. MCP clients send no Origin;
-// browsers always do, so only Hatchet's own pages get through.
+// A web page in the user's browser could otherwise reach the MCP tools, including pages of apps Hatchet builds and
+// serves on other localhost ports. MCP clients send no Origin; browsers always do, so only Hatchet's own pages get through.
 app.Use(async (context, next) =>
 {
-    if (context.Request.Path.StartsWithSegments(McpPath) && context.Request.Headers.Origin is [{ } origin]
-        && !(Uri.TryCreate(origin, UriKind.Absolute, out var uri) && uri.IsLoopback))
+    if (context.Request.Path.StartsWithSegments(McpPath) && context.Request.Headers.Origin.Count > 0
+        && !string.Equals(context.Request.Headers.Origin.ToString(), $"{context.Request.Scheme}://{context.Request.Host}", StringComparison.OrdinalIgnoreCase))
     {
         context.Response.StatusCode = StatusCodes.Status403Forbidden;
         return;
@@ -83,4 +83,8 @@ app.Run();
 public partial class Program
 {
     public const string McpPath = "/mcp";
+
+    /// <summary>The first address Hatchet listens on, for links and setup commands.</summary>
+    public static string BaseUrl(IConfiguration configuration) =>
+        (configuration["Urls"] ?? "http://localhost:5199").Split(';')[0].TrimEnd('/');
 }
