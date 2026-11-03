@@ -37,9 +37,31 @@ You need the [.NET SDK](https://dotnet.microsoft.com/download) (9 or 10) and Git
 | Fix | Bug Fixer | `xhigh` | 0.2 | Runs only after a failed Verify or a rejected Review. Shares a budget of 3 attempts per subtask. |
 | Integrate | | | | Runs the full check once more, then offers one-click merge or a PR draft. |
 
-The model is never swapped. Roles differ only by system prompt, JSON schema, temperature and `reasoning_effort`. Effort and temperature can be changed in Settings.
+Roles differ by system prompt, JSON schema, temperature and `reasoning_effort`, all of which can be changed in Settings. Each role runs on the local model by default, or on Claude through the Claude Code CLI, which uses your Claude login rather than an API key. When a fix fails on the local model, the next attempt goes to Claude, and so does a local fix still running after 90 minutes. While any agent is working, you can stop its call and hand it to another model from its card in the agent pane.
 
 If a subtask runs out of attempts, or the model server goes away, the run pauses and asks you what to do. You can retry the Fixer with your own guidance, re-verify after fixing it by hand, restart the subtask, skip it, or cancel the run. Runs interrupted by a restart pause the same way and can be resumed.
+
+## Driving Hatchet from Claude Code
+
+Hatchet is also an MCP server at `http://localhost:5199/mcp`. Add it to Claude Code once, for every project:
+
+```bash
+claude mcp add --transport http --scope user hatchet http://localhost:5199/mcp
+```
+
+Then plan a change with Claude in conversation and ask it to hand the plan to Hatchet. Hatchet skips its own planner and builds, verifies, fixes and reviews each step on your local model, while Claude follows along and helps when a run pauses.
+
+| Tool | Does |
+|---|---|
+| `probe_repository` | Checks a folder is a clean Git repository and how it would be verified |
+| `start_run` | Starts a run from a spec, with a ready-made plan or with Hatchet's planner |
+| `list_runs`, `get_run` | Status, progress, subtasks and recent events |
+| `get_subtask` | One subtask in full: last failure, fix history, review verdict, diff |
+| `approve_plan` | Approves a plan waiting for review in Hatchet, without the commands Hatchet's planner proposed |
+| `pause_run`, `resume_run` | Pause now or after the current step; resume, retry the fixer with guidance, re-verify, restart or skip |
+| `cancel_run` | Abandons a run |
+
+Hatchet has to be running for Claude to reach it.
 
 ## Safety
 
@@ -49,9 +71,9 @@ What it does to limit the damage:
 
 - **Clean tree required.** A run won't start with uncommitted changes, so rollbacks can't touch your work.
 - **Separate branch.** Work stays on `factory/run-N`. Rollback refuses to run on any other branch, and nothing merges until you click Merge.
-- **No unreviewed commands.** Verification commands proposed by the model only run if you approved them at plan review. With plan review off, only your own command runs.
+- **No unreviewed commands.** Verification commands proposed by Hatchet's planner only run if you approved them at plan review. Otherwise Hatchet runs your own command, or one it detects from the repository. A plan handed over through MCP counts as approved by whoever handed it over, but an MCP client can't approve commands proposed by Hatchet's planner.
 - **Writes stay inside the repo.** A patch with an absolute path, a `..`, a symlink on the way, or a target in `.git` is rejected whole, before anything is written.
-- **Local only.** The server binds to `localhost` and rejects other host names. It has no login, so don't expose it.
+- **Local only.** The server binds to `localhost` and rejects other host names. The MCP endpoint also refuses requests from web pages other than Hatchet's own. It has no login, so don't expose it.
 - **Nothing is pushed.** Prepare PR gives you the commands and the description, and you run them yourself.
 
 ## Project layout

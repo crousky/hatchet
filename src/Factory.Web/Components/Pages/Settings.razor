@@ -2,6 +2,8 @@
 @implements IDisposable
 @inject EfSettingsStore SettingsStore
 @inject ModelHealthService Health
+@inject IConfiguration Configuration
+@inject IJSRuntime JS
 
 <DocumentTitle Value="Settings · Hatchet" />
 
@@ -258,6 +260,24 @@
             </section>
 
             <section class="settings-section">
+                <h2>Connect Claude Code</h2>
+                <div class="hint">
+                    Hatchet is also an MCP server, so Claude Code can drive it. Plan a change with Claude in conversation, have it hand the plan to Hatchet with <code>start_run</code>,
+                    and let Hatchet build, verify, fix and review on your local model. Claude can follow the run with <code>get_run</code> and help when it pauses with <code>resume_run</code>.
+                    Run this once in a terminal to add Hatchet to Claude Code in every project:
+                </div>
+                <div class="copy-block">
+                    <pre class="code-block">@McpCommand</pre>
+                    <button class="icon-button" title="Copy" @onclick="@(() => JS.InvokeVoidAsync("hatchet.copy", McpCommand))"><Icon Name="copy" Size="14" /></button>
+                </div>
+                <div class="hint">
+                    Hatchet has to be running for Claude to reach it. The endpoint only answers on this machine, and it refuses requests from web pages.
+                    A plan Claude hands over counts as approved, so its verification commands run. Ask Claude to set <code>reviewPlanInHatchet</code> if you want to check it here first.
+                    Claude can't approve commands proposed by Hatchet's own planner. Only you can, here.
+                </div>
+            </section>
+
+            <section class="settings-section">
                 <h2>Limits</h2>
                 <div class="field-grid">
                     <div class="field">
@@ -269,6 +289,11 @@
                         <label for="escalate">Hand stubborn fixes to Claude after</label>
                         <input autocomplete="off" data-1p-ignore data-lpignore="true" id="escalate" type="number" min="0" max="20" @bind="_settings.EscalateFixesToClaudeAfter" />
                         <div class="hint">Failed fix attempts on the local model before the Bug Fixer switches to Claude Code for that subtask. Local models often guess library APIs wrong. 0 keeps fixes local.</div>
+                    </div>
+                    <div class="field">
+                        <label for="fix-limit">Hand a slow local fix to Claude after (minutes)</label>
+                        <input autocomplete="off" data-1p-ignore data-lpignore="true" id="fix-limit" type="number" min="0" step="1" @bind="_settings.LocalFixTimeLimitMinutes" />
+                        <div class="hint">A local model can keep thinking for hours without failing, so it never hands over. After this long the fix stops and Claude Code takes it. 0 sets no limit.</div>
                     </div>
                     <div class="field">
                         <label for="attempts">Attempts per model call</label>
@@ -338,6 +363,8 @@
     });
 
     public void Dispose() => Health.Changed -= OnHealthChanged;
+
+    private string McpCommand => $"claude mcp add --transport http --scope user hatchet {Program.BaseUrl(Configuration)}{Program.McpPath}";
 
     private readonly HashSet<AgentRole> _openPrompts = [];
 

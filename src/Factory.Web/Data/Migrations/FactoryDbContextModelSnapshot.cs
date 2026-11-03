@@ -291,6 +291,9 @@ namespace Factory.Web.Data.Migrations
                     b.Property<bool>("RequirePlanApproval")
                         .HasColumnType("INTEGER");
 
+                    b.Property<string>("SuppliedPlanJson")
+                        .HasColumnType("TEXT");
+
                     b.Property<string>("Title")
                         .IsRequired()
                         .HasColumnType("TEXT");

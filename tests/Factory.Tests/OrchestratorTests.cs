@@ -482,6 +482,76 @@ public class OrchestratorTests : IAsyncLifetime
         Assert.False(File.Exists(_repo.File("alpha.txt")));
     }
 
+    private static SubtaskEdit Step(string title, string command = "") => new(null, title, $"Build {title}", [], [$"{title}.txt"], [], command);
+
+    [Fact]
+    public async Task A_supplied_plan_skips_the_planner_and_its_commands_are_trusted()
+    {
+        _llm.Enqueue(AgentRole.ContextSpecifier, Refined(), Refined());
+        _llm.Enqueue(AgentRole.CodeGenerator, Patch("alpha.txt"), Patch("beta.txt"));
+        _llm.Enqueue(AgentRole.StaticReviewer, Verdict(true), Verdict(true));
+
+        var run = await _orchestrator.StartRunAsync(new NewRunRequest(_repo.Path, "# Spec", null, "verify", false), [Step("alpha", "check alpha"), Step("beta")]);
+        run = await WaitForAsync(run.Id, RunStatus.ReadyToMerge);
+
+        Assert.DoesNotContain(_llm.Calls, c => c.Role == AgentRole.TaskPlanner);
+        Assert.Equal(["alpha", "beta"], (await _store.GetSubtasksAsync(run.Id)).Select(s => s.Title));
+        Assert.Contains("check alpha", _commands.Commands); // Its own command ran, without a plan review in Hatchet.
+        Assert.Contains(await _store.GetLogsAsync(run.Id), l => l.Message.Contains("Task Planner was skipped"));
+    }
+
+    [Fact]
+    public async Task A_supplied_plan_can_still_wait_for_review_in_hatchet()
+    {
+        var run = await _orchestrator.StartRunAsync(new NewRunRequest(_repo.Path, "# Spec", null, "verify", true), [Step("alpha")]);
+        run = await WaitForAsync(run.Id, RunStatus.AwaitingPlanApproval);
+
+        Assert.Empty(_llm.Calls);
+        Assert.Equal("alpha", (await _store.GetSubtasksAsync(run.Id)).Single().Title);
+    }
+
+    [Fact]
+    public async Task A_supplied_plan_must_have_titled_and_described_steps()
+    {
+        await Assert.ThrowsAsync<FactoryValidationException>(() =>
+            _orchestrator.StartRunAsync(new NewRunRequest(_repo.Path, "# Spec", null, null, false), []));
+        await Assert.ThrowsAsync<FactoryValidationException>(() =>
+            _orchestrator.StartRunAsync(new NewRunRequest(_repo.Path, "# Spec", null, null, false), [Step("alpha") with { Description = " " }]));
+        Assert.Empty(await _store.ListRunsAsync());
+    }
+
+    [Fact]
+    public async Task Resuming_a_pause_while_planning_keeps_the_supplied_plan()
+    {
+        var run = await _orchestrator.StartRunAsync(new NewRunRequest(_repo.Path, "# Spec", null, "verify", true), [Step("alpha")]);
+        await WaitForAsync(run.Id, RunStatus.AwaitingPlanApproval);
+        _llm.Offline = AgentRole.TaskPlanner;
+        await _orchestrator.RegeneratePlanAsync(run.Id, null);
+        run = await WaitForAsync(run.Id, RunStatus.NeedsHuman);
+        Assert.Equal(PipelineStage.Decompose, run.PausedStage);
+
+        _llm.Offline = null;
+        await _orchestrator.ResumeAsync(run.Id, HumanDecision.Resume, null);
+        await WaitForAsync(run.Id, RunStatus.AwaitingPlanApproval); // The planner has nothing queued, so calling it would pause again.
+
+        Assert.Equal("alpha", (await _store.GetSubtasksAsync(run.Id)).Single().Title);
+    }
+
+    [Fact]
+    public async Task A_rerun_uses_the_plan_supplied_with_the_task()
+    {
+        var first = await _orchestrator.StartRunAsync(new NewRunRequest(_repo.Path, "# Spec", null, "verify", true), [Step("alpha", "check alpha")]);
+        await WaitForAsync(first.Id, RunStatus.AwaitingPlanApproval);
+        await _orchestrator.CancelAsync(first.Id);
+
+        var rerun = await _orchestrator.RerunAsync(first.Id);
+        await WaitForAsync(rerun.Id, RunStatus.AwaitingPlanApproval);
+
+        Assert.Empty(_llm.Calls);
+        var subtask = (await _store.GetSubtasksAsync(rerun.Id)).Single();
+        Assert.Equal(("alpha", "check alpha", true), (subtask.Title, subtask.VerificationCommand, subtask.CommandApproved));
+    }
+
     [Fact]
     public async Task A_fix_that_fails_on_the_local_model_goes_to_claude_with_the_history()
     {
@@ -529,6 +599,57 @@ public class OrchestratorTests : IAsyncLifetime
         await WaitForAsync(run.Id, RunStatus.ReadyToMerge);
 
         Assert.Equal([false, true], _llm.Engines.Where(e => e.Role == AgentRole.BugFixer).Select(e => e.OnClaude));
+    }
+
+    [Fact]
+    public async Task A_local_fix_that_runs_past_the_time_limit_goes_to_claude()
+    {
+        _settings.Settings.LocalFixTimeLimitMinutes = 0.02; // 1.2 seconds.
+        _llm.Enqueue(AgentRole.TaskPlanner, Plan("alpha"));
+        _llm.Enqueue(AgentRole.ContextSpecifier, Refined());
+        _llm.Enqueue(AgentRole.CodeGenerator, Patch("alpha.txt"));
+        _llm.Enqueue(AgentRole.BugFixer, Patch("alpha.txt", "v2"));
+        _llm.Enqueue(AgentRole.StaticReviewer, Verdict(true));
+        _commands.Results.Enqueue((1, "error one"));
+        _llm.Hold = AgentRole.BugFixer;
+
+        var run = await StartAsync();
+        await _llm.HoldStarted.Task.WaitAsync(TimeSpan.FromSeconds(30));
+        _llm.Hold = null; // Only the local call is held, so Claude's answers at once.
+        run = await WaitForAsync(run.Id, RunStatus.ReadyToMerge);
+
+        Assert.Equal([false, true], _llm.Engines.Where(e => e.Role == AgentRole.BugFixer).Select(e => e.OnClaude));
+        Assert.Equal(1, (await _store.GetSubtasksAsync(run.Id)).Single().FixAttempts);
+        Assert.Contains(await _store.GetLogsAsync(run.Id), l => l.Kind == AgentLogKind.Warning && l.Message.Contains("so it was stopped and Claude Opus takes this fix"));
+    }
+
+    [Fact]
+    public async Task A_call_handed_to_another_model_starts_over_there_without_using_an_attempt()
+    {
+        _settings.Settings.MaxLlmAttempts = 1;
+        _llm.Enqueue(AgentRole.TaskPlanner, Plan("alpha"));
+        _llm.Enqueue(AgentRole.ContextSpecifier, Refined());
+        _llm.Enqueue(AgentRole.CodeGenerator, Patch("alpha.txt"));
+        _llm.Enqueue(AgentRole.StaticReviewer, Verdict(true));
+        _llm.Hold = AgentRole.TaskPlanner;
+
+        var run = await StartAsync();
+        await _llm.HoldStarted.Task.WaitAsync(TimeSpan.FromSeconds(30));
+        _llm.Hold = null;
+        await _orchestrator.HandOverCallAsync(run.Id, AgentEngine.ClaudeCode, "sonnet");
+        run = await WaitForAsync(run.Id, RunStatus.ReadyToMerge);
+
+        Assert.Equal([false, true], _llm.Engines.Where(e => e.Role == AgentRole.TaskPlanner).Select(e => e.OnClaude));
+        var logs = await _store.GetLogsAsync(run.Id);
+        Assert.Contains(logs, l => l.Message == "You handed the Task Planner from the local model to Claude Sonnet, so it starts over.");
+        Assert.Equal("sonnet", logs.Single(l => l is { Kind: AgentLogKind.LlmCall, Role: AgentRole.TaskPlanner }).Model);
+        Assert.Null(logs.Single(l => l is { Kind: AgentLogKind.LlmCall, Role: AgentRole.CodeGenerator }).Model); // Later calls keep their model.
+    }
+
+    [Fact]
+    public async Task Handing_over_needs_a_call_in_progress()
+    {
+        await Assert.ThrowsAsync<FactoryValidationException>(() => _orchestrator.HandOverCallAsync(1, AgentEngine.ClaudeCode));
     }
 
     [Fact]
@@ -840,6 +961,11 @@ public class OrchestratorTests : IAsyncLifetime
             lock (_gate) return Task.FromResult<IReadOnlyList<FactorySubtask>>(_subtasks.Where(s => s.RunId == runId).OrderBy(s => s.Order).Select(Clone).ToList());
         }
 
+        public Task<IReadOnlyList<FactorySubtask>> GetSubtasksForRunsAsync(IReadOnlyCollection<int> runIds, CancellationToken ct = default)
+        {
+            lock (_gate) return Task.FromResult<IReadOnlyList<FactorySubtask>>(_subtasks.Where(s => runIds.Contains(s.RunId)).OrderBy(s => s.RunId).ThenBy(s => s.Order).Select(Clone).ToList());
+        }
+
         public Task UpdateSubtaskAsync(FactorySubtask subtask, CancellationToken ct = default)
         {
             lock (_gate) _subtasks[_subtasks.FindIndex(s => s.Id == subtask.Id)] = Clone(subtask);
@@ -873,6 +999,11 @@ public class OrchestratorTests : IAsyncLifetime
         public Task<IReadOnlyList<AgentLogEntry>> GetLogsAsync(int runId, long afterId = 0, CancellationToken ct = default)
         {
             lock (_gate) return Task.FromResult<IReadOnlyList<AgentLogEntry>>(_logs.Where(l => l.RunId == runId && l.Id > afterId).ToList());
+        }
+
+        public Task<IReadOnlyList<AgentLogEntry>> GetRecentEventsAsync(int runId, int count, CancellationToken ct = default)
+        {
+            lock (_gate) return Task.FromResult<IReadOnlyList<AgentLogEntry>>(_logs.Where(l => l.RunId == runId && (l.Kind != AgentLogKind.LlmCall || !l.Succeeded)).TakeLast(count).ToList());
         }
 
         public Task<DiffSnapshot> AddDiffAsync(DiffSnapshot diff, CancellationToken ct = default)

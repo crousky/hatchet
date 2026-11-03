@@ -104,6 +104,20 @@
                         <span>@LiveStatus(live)</span>
                     </span>
                 </div>
+                @if (OnHandOver.HasDelegate)
+                {
+                    <div class="hand-over-row">
+                        <label for="hand-over">Hand this call to</label>
+                        <select id="hand-over" value="" disabled="@HandingOver" title="Stop this call and make it again on another model"
+                                @onchange="e => OnHandOver.InvokeAsync(e.Value?.ToString())">
+                            <option value="" disabled>Choose a model</option>
+                            @foreach (var (value, label) in HandOverTargets(live))
+                            {
+                                <option value="@value">@label</option>
+                            }
+                        </select>
+                    </div>
+                }
                 @if (live.Thinking.Length > 0)
                 {
                     <div class="live-label"><Icon Name="sparkle" Size="12" /> Thinking</div>
@@ -125,6 +139,19 @@
     [Parameter] public IReadOnlyList<AgentLogEntry> Logs { get; set; } = [];
     [Parameter] public LiveCall? Live { get; set; }
     [Parameter] public int? SelectedSubtaskId { get; set; }
+
+    /// <summary>Hands the live call to another model: "local", or a Claude model name.</summary>
+    [Parameter] public EventCallback<string?> OnHandOver { get; set; }
+    [Parameter] public bool HandingOver { get; set; }
+
+    public const string LocalTarget = "local";
+
+    private static IEnumerable<(string Value, string Label)> HandOverTargets(LiveCall live)
+    {
+        if (live.Model is not null) yield return (LocalTarget, "Local model");
+        foreach (var model in ClaudeCodeOptions.Models.Where(m => m != live.Model))
+            yield return (model, ClaudeCodeOptions.ModelLabel(model));
+    }
 
     private readonly HashSet<long> _expanded = [];
     private bool _onlySelected;
