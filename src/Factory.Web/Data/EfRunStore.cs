@@ -92,6 +92,16 @@ public sealed class EfRunStore(IDbContextFactory<FactoryDbContext> factory) : IR
         return latest;
     }
 
+    public async Task<IReadOnlyDictionary<int, TimeSpan>> GetWorkBySubtaskAsync(int runId, CancellationToken ct = default)
+    {
+        await using var db = await factory.CreateDbContextAsync(ct);
+        return await db.AgentLogs.AsNoTracking()
+            .Where(l => l.RunId == runId && l.SubtaskId != null)
+            .GroupBy(l => l.SubtaskId!.Value)
+            .Select(g => new { SubtaskId = g.Key, Milliseconds = g.Sum(l => l.DurationMs) })
+            .ToDictionaryAsync(w => w.SubtaskId, w => TimeSpan.FromMilliseconds(w.Milliseconds), ct);
+    }
+
     public async Task<DiffSnapshot> AddDiffAsync(DiffSnapshot diff, CancellationToken ct = default)
     {
         await using var db = await factory.CreateDbContextAsync(ct);

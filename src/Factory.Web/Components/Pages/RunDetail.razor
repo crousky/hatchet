@@ -39,6 +39,10 @@ else
                     {
                         <span class="meta-item mono-small"><Icon Name="git-branch" Size="12" /> @_run.BaseBranch ← @_run.BranchName</span>
                     }
+                    @if (_estimate is not null && RunStateMachine.IsUnderway(_run.Status))
+                    {
+                        <span class="meta-item" title="@EstimateDetail(_estimate)"><Icon Name="clock" Size="12" /> about @Fmt.Range(_estimate.Low, _estimate.High) left</span>
+                    }
                     <span class="meta-item" title="Prompt and completion tokens so far"><Icon Name="sparkle" Size="12" /> @Fmt.Tokens(_run.PromptTokens + _run.CompletionTokens) tokens</span>
                 </div>
                 <div class="run-actions">
@@ -195,6 +199,7 @@ else
     private LiveCall? _liveCall;
     private LiveCommand? _liveCommand;
     private PullRequestDraft? _prDraft;
+    private WorkEstimate? _estimate;
 
     private EditorTab _tab = EditorTab.Subtask;
     private int? _selectedSubtaskId;
@@ -253,12 +258,15 @@ else
         _notFound = false;
         _logs = [];
         _prDraft = null;
+        _estimate = null;
         _liveCall = null;
         _liveCommand = null;
         _selectedSubtaskId = null;
         _selectedDiffId = null;
         _error = null;
 
+        // A call that started before the page opened sent its start event, and maybe some of its stream, too early to be seen here.
+        if (Orchestrator.GetLiveCall(RunId) is { } live) _liveCall = ToLiveCall(live);
         await ReloadAsync();
         if (_run is null) return;
 
@@ -285,6 +293,18 @@ else
         _subtasks = await Store.GetSubtasksAsync(RunId);
         _diffs = await Store.GetDiffsAsync(RunId);
         _logs.AddRange(await Store.GetLogsAsync(RunId, _logs.LastOrDefault()?.Id ?? 0));
+        _estimate = RunStateMachine.IsUnderway(_run.Status)
+            ? WorkEstimator.Estimate(_subtasks, await Store.GetWorkBySubtaskAsync(RunId),
+                _liveCall is { SubtaskId: { } subtaskId } ? (subtaskId, DateTime.UtcNow - _liveCall.StartedAt) : null)
+            : null;
+    }
+
+    private string EstimateDetail(WorkEstimate estimate)
+    {
+        var detail = Fmt.WorkLeft(estimate);
+        if (_run?.Status != RunStatus.Executing || _run.PausedByUser) return detail;
+        var now = DateTime.Now;
+        return $"{detail} If it keeps running, it should finish between {Fmt.When(now + estimate.Low)} and {Fmt.When(now + estimate.High)}.";
     }
 
     // Events are applied in batches at about ten frames a second, which keeps token streams from flooding the circuit.
@@ -320,27 +340,39 @@ else
         }
     }
 
+    private static LiveCall ToLiveCall(LlmCallStarted started, DateTime startedAt) => new()
+    {
+        Id = started.CallId,
+        Role = started.Role,
+        Stage = started.Stage,
+        ReasoningEffort = started.ReasoningEffort,
+        Temperature = started.Temperature,
+        Model = started.Model,
+        SubtaskId = started.SubtaskId,
+        StartedAt = startedAt
+    };
+
+    private static LiveCall ToLiveCall(LiveCallInfo info)
+    {
+        var live = ToLiveCall(info.Call, info.StartedAt);
+        live.Thinking.Append(info.Thinking);
+        live.Content.Append(info.Content);
+        live.Deltas = info.Deltas;
+        return live;
+    }
+
     /// <summary>Returns true if durable state changed and should be reloaded.</summary>
     private bool Apply(FactoryEvent evt)
     {
         switch (evt)
         {
             case LlmCallStarted started:
-                _liveCall = new LiveCall
-                {
-                    Id = started.CallId,
-                    Role = started.Role,
-                    Stage = started.Stage,
-                    ReasoningEffort = started.ReasoningEffort,
-                    Temperature = started.Temperature,
-                    Model = started.Model,
-                    SubtaskId = started.SubtaskId
-                };
+                _liveCall = ToLiveCall(started, DateTime.UtcNow);
                 return false;
 
-            case LlmDeltaReceived delta when _liveCall?.Id == delta.CallId:
+            case LlmDeltaReceived delta when _liveCall?.Id == delta.CallId && delta.Sequence > _liveCall.Deltas:
                 (delta.IsThinking ? _liveCall.Thinking : _liveCall.Content).Append(delta.Text);
-                _liveCall.Deltas++;
+                _liveCall.Deltas = delta.Sequence;
                 return false;
 
             case LlmCallFinished finished:
@@ -410,9 +442,7 @@ else
 
     private Task HandOverAsync(string? target) => string.IsNullOrEmpty(target)
         ? Task.CompletedTask
-        : ActAsync(() => target == AgentPanel.LocalTarget
-            ? Orchestrator.HandOverCallAsync(RunId, AgentEngine.Local)
-            : Orchestrator.HandOverCallAsync(RunId, AgentEngine.ClaudeCode, target));
+        : ActAsync(() => Orchestrator.HandOverCallAsync(RunId, target));
 
     private Task ApprovePlanAsync(IReadOnlyList<SubtaskEdit> plan) => ActAsync(() => Orchestrator.ApprovePlanAsync(RunId, plan));
 

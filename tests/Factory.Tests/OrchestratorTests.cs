@@ -620,7 +620,34 @@ public class OrchestratorTests : IAsyncLifetime
 
         Assert.Equal([false, true], _llm.Engines.Where(e => e.Role == AgentRole.BugFixer).Select(e => e.OnClaude));
         Assert.Equal(1, (await _store.GetSubtasksAsync(run.Id)).Single().FixAttempts);
-        Assert.Contains(await _store.GetLogsAsync(run.Id), l => l.Kind == AgentLogKind.Warning && l.Message.Contains("so it was stopped and Claude Opus takes this fix"));
+        var logs = await _store.GetLogsAsync(run.Id);
+        Assert.Contains(logs, l => l.Kind == AgentLogKind.Warning && l.Message.Contains("so it was stopped and Claude Opus takes this fix"));
+        var stopped = logs.Single(l => l is { Kind: AgentLogKind.LlmCall, Role: AgentRole.BugFixer, Succeeded: false });
+        Assert.Contains("at its time limit", stopped.Message);
+        Assert.InRange(stopped.DurationMs, 1000, 30_000); // Counted towards the run's working time.
+    }
+
+    [Fact]
+    public async Task A_local_fix_handed_to_claude_is_no_longer_under_the_local_time_limit()
+    {
+        _settings.Settings.LocalFixTimeLimitMinutes = 0.05; // 3 seconds.
+        _llm.Enqueue(AgentRole.TaskPlanner, Plan("alpha"));
+        _llm.Enqueue(AgentRole.ContextSpecifier, Refined());
+        _llm.Enqueue(AgentRole.CodeGenerator, Patch("alpha.txt"));
+        _llm.Enqueue(AgentRole.BugFixer, Patch("alpha.txt", "v2"));
+        _llm.Enqueue(AgentRole.StaticReviewer, Verdict(true));
+        _commands.Results.Enqueue((1, "error one"));
+        _llm.Hold = AgentRole.BugFixer;
+
+        var run = await StartAsync();
+        await _llm.HoldStarted.Task.WaitAsync(TimeSpan.FromSeconds(30));
+        _llm.Hold = null;
+        _llm.ClaudeDelay = TimeSpan.FromSeconds(4); // Longer than the limit has left.
+        await _orchestrator.HandOverCallAsync(run.Id, "opus");
+        run = await WaitForAsync(run.Id, RunStatus.ReadyToMerge);
+
+        Assert.Equal([false, true], _llm.Engines.Where(e => e.Role == AgentRole.BugFixer).Select(e => e.OnClaude));
+        Assert.DoesNotContain(await _store.GetLogsAsync(run.Id), l => l.Message.Contains("time limit") || l.Message.Contains("still working after"));
     }
 
     [Fact]
@@ -636,13 +663,21 @@ public class OrchestratorTests : IAsyncLifetime
         var run = await StartAsync();
         await _llm.HoldStarted.Task.WaitAsync(TimeSpan.FromSeconds(30));
         _llm.Hold = null;
+        // A page opened now can still show the call and what it has streamed.
+        var live = _orchestrator.GetLiveCall(run.Id);
+        Assert.Equal(AgentRole.TaskPlanner, live?.Call.Role);
+        Assert.Equal(("Thinking so far", 1), (live?.Thinking, live?.Deltas));
         await _orchestrator.HandOverCallAsync(run.Id, AgentEngine.ClaudeCode, "sonnet");
         run = await WaitForAsync(run.Id, RunStatus.ReadyToMerge);
+        Assert.Null(_orchestrator.GetLiveCall(run.Id));
 
         Assert.Equal([false, true], _llm.Engines.Where(e => e.Role == AgentRole.TaskPlanner).Select(e => e.OnClaude));
         var logs = await _store.GetLogsAsync(run.Id);
-        Assert.Contains(logs, l => l.Message == "You handed the Task Planner from the local model to Claude Sonnet, so it starts over.");
-        Assert.Equal("sonnet", logs.Single(l => l is { Kind: AgentLogKind.LlmCall, Role: AgentRole.TaskPlanner }).Model);
+        // The call that was stopped is logged too, on the model it ran on.
+        var stopped = logs.Single(l => l is { Kind: AgentLogKind.LlmCall, Role: AgentRole.TaskPlanner, Succeeded: false });
+        Assert.Equal("You handed the Task Planner from the local model to Claude Sonnet, so it starts over.", stopped.Message);
+        Assert.Null(stopped.Model);
+        Assert.Equal("sonnet", logs.Single(l => l is { Kind: AgentLogKind.LlmCall, Role: AgentRole.TaskPlanner, Succeeded: true }).Model);
         Assert.Null(logs.Single(l => l is { Kind: AgentLogKind.LlmCall, Role: AgentRole.CodeGenerator }).Model); // Later calls keep their model.
     }
 
@@ -650,6 +685,29 @@ public class OrchestratorTests : IAsyncLifetime
     public async Task Handing_over_needs_a_call_in_progress()
     {
         await Assert.ThrowsAsync<FactoryValidationException>(() => _orchestrator.HandOverCallAsync(1, AgentEngine.ClaudeCode));
+    }
+
+    [Fact]
+    public async Task A_call_cannot_be_handed_to_the_model_it_is_on_or_to_an_unknown_one()
+    {
+        _llm.Enqueue(AgentRole.TaskPlanner, Plan("alpha"));
+        _llm.Enqueue(AgentRole.ContextSpecifier, Refined());
+        _llm.Enqueue(AgentRole.CodeGenerator, Patch("alpha.txt"));
+        _llm.Enqueue(AgentRole.StaticReviewer, Verdict(true));
+        _llm.Hold = AgentRole.TaskPlanner;
+
+        var run = await StartAsync();
+        await _llm.HoldStarted.Task.WaitAsync(TimeSpan.FromSeconds(30));
+
+        var same = await Assert.ThrowsAsync<FactoryValidationException>(() => _orchestrator.HandOverCallAsync(run.Id, " Local "));
+        Assert.Equal("The call is already running on the local model.", same.Message);
+        await Assert.ThrowsAsync<FactoryValidationException>(() => _orchestrator.HandOverCallAsync(run.Id, "gpt"));
+        Assert.NotNull(_orchestrator.GetLiveCall(run.Id)); // Still running.
+
+        _llm.Hold = null;
+        _llm.Release.TrySetResult();
+        await WaitForAsync(run.Id, RunStatus.ReadyToMerge);
+        Assert.Equal([false], _llm.Engines.Where(e => e.Role == AgentRole.TaskPlanner).Select(e => e.OnClaude));
     }
 
     [Fact]
@@ -840,6 +898,9 @@ public class OrchestratorTests : IAsyncLifetime
         public TaskCompletionSource HoldStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
+        /// <summary>How long each Claude call takes.</summary>
+        public TimeSpan ClaudeDelay { get; set; }
+
         public void Enqueue(AgentRole role, params string[] responses)
         {
             lock (_responses)
@@ -862,9 +923,11 @@ public class OrchestratorTests : IAsyncLifetime
             if (request.Profile.UsesClaude && ClaudeOffline) throw new LlmException("Claude Code isn't logged in.");
             if (role == Hold)
             {
+                onDelta?.Invoke(new LlmDelta("Thinking so far", true));
                 HoldStarted.TrySetResult();
                 await Release.Task.WaitAsync(ct);
             }
+            if (request.Profile.UsesClaude && ClaudeDelay > TimeSpan.Zero) await Task.Delay(ClaudeDelay, ct);
 
             string content;
             lock (_responses)
@@ -1004,6 +1067,15 @@ public class OrchestratorTests : IAsyncLifetime
         public Task<IReadOnlyList<AgentLogEntry>> GetRecentEventsAsync(int runId, int count, CancellationToken ct = default)
         {
             lock (_gate) return Task.FromResult<IReadOnlyList<AgentLogEntry>>(_logs.Where(l => l.RunId == runId && (l.Kind != AgentLogKind.LlmCall || !l.Succeeded)).TakeLast(count).ToList());
+        }
+
+        public Task<IReadOnlyDictionary<int, TimeSpan>> GetWorkBySubtaskAsync(int runId, CancellationToken ct = default)
+        {
+            lock (_gate)
+                return Task.FromResult<IReadOnlyDictionary<int, TimeSpan>>(_logs
+                    .Where(l => l.RunId == runId && l.SubtaskId is not null)
+                    .GroupBy(l => l.SubtaskId!.Value)
+                    .ToDictionary(g => g.Key, g => TimeSpan.FromMilliseconds(g.Sum(l => l.DurationMs))));
         }
 
         public Task<DiffSnapshot> AddDiffAsync(DiffSnapshot diff, CancellationToken ct = default)

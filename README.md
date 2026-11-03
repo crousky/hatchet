@@ -39,6 +39,8 @@ You need the [.NET SDK](https://dotnet.microsoft.com/download) (9 or 10) and Git
 
 Roles differ by system prompt, JSON schema, temperature and `reasoning_effort`, all of which can be changed in Settings. Each role runs on the local model by default, or on Claude through the Claude Code CLI, which uses your Claude login rather than an API key. When a fix fails on the local model, the next attempt goes to Claude, and so does a local fix still running after 90 minutes. While any agent is working, you can stop its call and hand it to another model from its card in the agent pane.
 
+Once three subtasks are done, the run header shows a likely range for the working time left. It's based on how long the finished subtasks took, and time paused doesn't count. It narrows as more subtasks finish.
+
 If a subtask runs out of attempts, or the model server goes away, the run pauses and asks you what to do. You can retry the Fixer with your own guidance, re-verify after fixing it by hand, restart the subtask, skip it, or cancel the run. Runs interrupted by a restart pause the same way and can be resumed.
 
 ## Driving Hatchet from Claude Code
@@ -55,10 +57,11 @@ Then plan a change with Claude in conversation and ask it to hand the plan to Ha
 |---|---|
 | `probe_repository` | Checks a folder is a clean Git repository and how it would be verified |
 | `start_run` | Starts a run from a spec, with a ready-made plan or with Hatchet's planner |
-| `list_runs`, `get_run` | Status, progress, subtasks and recent events |
+| `list_runs`, `get_run` | Status, progress, subtasks, recent events and working time left |
 | `get_subtask` | One subtask in full: last failure, fix history, review verdict, diff |
 | `approve_plan` | Approves a plan waiting for review in Hatchet, without the commands Hatchet's planner proposed |
 | `pause_run`, `resume_run` | Pause now or after the current step; resume, retry the fixer with guidance, re-verify, restart or skip |
+| `hand_over_call` | Stops the call an agent is making and makes it again on the local model or a Claude model |
 | `cancel_run` | Abandons a run |
 
 Hatchet has to be running for Claude to reach it.

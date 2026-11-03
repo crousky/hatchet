@@ -13,7 +13,7 @@ public sealed class LiveCall
     public required double Temperature { get; init; }
     public string? Model { get; init; }
     public int? SubtaskId { get; init; }
-    public DateTime StartedAt { get; } = DateTime.UtcNow;
+    public DateTime StartedAt { get; init; } = DateTime.UtcNow;
     public StringBuilder Thinking { get; } = new();
     public StringBuilder Content { get; } = new();
     public int Deltas { get; set; }

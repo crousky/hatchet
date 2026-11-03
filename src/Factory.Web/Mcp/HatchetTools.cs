@@ -2,6 +2,7 @@ using System.ComponentModel;
 using Factory.Contracts;
 using Factory.Engine.Orchestration;
 using Factory.Engine.Workspace;
+using Factory.Web.Services;
 using ModelContextProtocol;
 using ModelContextProtocol.Server;
 
@@ -33,7 +34,7 @@ public sealed record RunSummary(int RunId, string Title, string Status, string R
 
 public sealed record SubtaskSummary(int Order, string Title, string Status, int FixAttempts);
 
-public sealed record RunDetails(RunSummary Run, string? Branch, string? BaseBranch, bool? FinalCheckPassed, int Tokens, IReadOnlyList<SubtaskSummary> Subtasks, IReadOnlyList<string> RecentEvents);
+public sealed record RunDetails(RunSummary Run, string? Branch, string? BaseBranch, bool? FinalCheckPassed, int Tokens, string? WorkLeft, IReadOnlyList<SubtaskSummary> Subtasks, IReadOnlyList<string> RecentEvents);
 
 public sealed record SubtaskDetails(
     int Order, string Title, string Status, string Description, int FixAttempts,
@@ -102,7 +103,7 @@ public sealed class HatchetTools(FactoryOrchestrator orchestrator, IRunStore sto
     }
 
     [McpServerTool(Name = "get_run", ReadOnly = true)]
-    [Description("Shows a run's status, its subtasks and recent events. If it is paused, pauseReason says why; use get_subtask for the details and resume_run to continue.")]
+    [Description("Shows a run's status, its subtasks, recent events and, once a few subtasks are done, how much working time is likely left. If it is paused, pauseReason says why; use get_subtask for the details and resume_run to continue.")]
     public Task<RunDetails> GetRun([Description("The run's id.")] int runId, CancellationToken ct = default) =>
         DescribeRunAsync(runId, ct);
 
@@ -183,6 +184,22 @@ public sealed class HatchetTools(FactoryOrchestrator orchestrator, IRunStore sto
         return await DescribeRunAsync(runId, ct);
     }
 
+    [McpServerTool(Name = "hand_over_call")]
+    [Description("""
+        Stops the model call a working run is making and makes it again on another model. Use it when an agent is taking far too long,
+        for example a local Bug Fixer thinking for an hour. The call starts over on the new model without using an attempt;
+        later calls keep the model set in Hatchet's settings. get_run's currentStep and recentEvents show what is running.
+        """)]
+    public async Task<RunDetails> HandOverCall(
+        [Description("The run's id.")] int runId,
+        [Description("local for the local model, or a Claude model: opus, sonnet or haiku.")] string to,
+        CancellationToken ct = default)
+    {
+        await RequireRunAsync(runId, ct);
+        await Do(() => orchestrator.HandOverCallAsync(runId, to));
+        return await DescribeRunAsync(runId, ct);
+    }
+
     [McpServerTool(Name = "cancel_run", Destructive = true)]
     [Description("Cancels a run for good: discards uncommitted changes and returns the repository to its base branch. Commits stay on the run's branch. Prefer pause_run unless the user wants to abandon the run.")]
     public async Task<RunDetails> CancelRun([Description("The run's id.")] int runId, CancellationToken ct = default)
@@ -197,9 +214,14 @@ public sealed class HatchetTools(FactoryOrchestrator orchestrator, IRunStore sto
         var run = await RequireRunAsync(runId, ct);
         var subtasks = await store.GetSubtasksAsync(runId, ct);
         var events = (await store.GetRecentEventsAsync(runId, 12, ct)).Select(l => $"{l.CreatedAt:HH:mm:ss} {l.Message}").ToList();
+        var live = orchestrator.GetLiveCall(runId);
+        var estimate = RunStateMachine.IsUnderway(run.Status)
+            ? WorkEstimator.Estimate(subtasks, await store.GetWorkBySubtaskAsync(runId, ct),
+                live?.Call.SubtaskId is { } subtaskId ? (subtaskId, DateTime.UtcNow - live.StartedAt) : null)
+            : null;
 
         return new RunDetails(Summarize(run, subtasks), run.BranchName, run.BaseBranch, run.IntegrationPassed,
-            run.PromptTokens + run.CompletionTokens,
+            run.PromptTokens + run.CompletionTokens, estimate is null ? null : Fmt.WorkLeft(estimate),
             subtasks.OrderBy(s => s.Order).Select(s => new SubtaskSummary(s.Order, s.Title, s.Status.ToString(), s.FixAttempts)).ToList(),
             events);
     }
@@ -213,7 +235,7 @@ public sealed class HatchetTools(FactoryOrchestrator orchestrator, IRunStore sto
         var status = run.PausedByUser ? "Paused" : run.Status.ToString();
         return new RunSummary(run.Id, run.Task.Title, status, run.Task.RepositoryPath,
             subtasks.Count(s => SubtaskStateMachine.IsFinished(s.Status) && s.Status != SubtaskStatus.Cancelled), subtasks.Count,
-            RunStateMachine.IsWorking(run.Status) || run.Status == RunStatus.NeedsHuman ? step : null,
+            RunStateMachine.IsUnderway(run.Status) ? step : null,
             run.PauseReason, $"{Program.BaseUrl(configuration)}/runs/{run.Id}");
     }
 

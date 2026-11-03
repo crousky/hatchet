@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using Factory.Contracts;
@@ -44,14 +45,48 @@ public sealed class FactoryOrchestrator(
         /// <summary>Set when the user pauses. The pipeline stops at its next step, or at once if Cancellation fires too.</summary>
         public volatile bool PauseRequested;
 
+        private const int MaxStreamedChars = 200_000;
+
         private readonly object _callGate = new();
         private CancellationTokenSource? _call;
         private HandOver? _handOver;
+        private LlmCallStarted? _started;
+        private DateTime _startedAt;
+        private readonly StringBuilder _thinking = new();
+        private readonly StringBuilder _content = new();
+        private int _deltas;
+
+        /// <summary>The model call in progress and what it has streamed, so a page opened partway through it can still show it.</summary>
+        public LiveCallInfo? LiveCall
+        {
+            get
+            {
+                lock (_callGate)
+                    return _started is null ? null : new LiveCallInfo(_started, _startedAt, _thinking.ToString(), _content.ToString(), _deltas);
+            }
+        }
 
         /// <summary>Marks the start of a model call, which the user can then hand to another model.</summary>
-        public void CallStarted(CancellationTokenSource call)
+        public void CallStarted(CancellationTokenSource call, LlmCallStarted started)
         {
-            lock (_callGate) (_call, _handOver) = (call, null);
+            lock (_callGate)
+            {
+                (_call, _handOver, _started, _startedAt, _deltas) = (call, null, started, DateTime.UtcNow, 0);
+                _thinking.Clear();
+                _content.Clear();
+            }
+        }
+
+        /// <summary>Keeps the end of what the current call has streamed. <paramref name="sequence"/> counts the deltas so far.</summary>
+        public void Streamed(LlmDelta delta, int sequence)
+        {
+            lock (_callGate)
+            {
+                var text = delta.IsThinking ? _thinking : _content;
+                text.Append(delta.Text);
+                if (text.Length > MaxStreamedChars) text.Remove(0, text.Length - MaxStreamedChars / 2);
+                _deltas = sequence;
+            }
         }
 
         /// <summary>Marks the end of the current call. Returns the hand-over the user asked for, if that is why it ended.</summary>
@@ -60,7 +95,9 @@ public sealed class FactoryOrchestrator(
             lock (_callGate)
             {
                 var handOver = _handOver;
-                (_call, _handOver) = (null, null);
+                (_call, _handOver, _started) = (null, null, null);
+                _thinking.Clear();
+                _content.Clear();
                 return handOver;
             }
         }
@@ -80,8 +117,14 @@ public sealed class FactoryOrchestrator(
 
     private sealed record HandOver(AgentEngine Engine, string ClaudeModel);
 
+    /// <summary>The model call a run is making, if any.</summary>
+    public LiveCallInfo? GetLiveCall(int runId) => _active.TryGetValue(runId, out var active) ? active.LiveCall : null;
+
     /// <summary>Thrown at a step boundary to stop a pipeline the user paused.</summary>
     private sealed class PausedByUserException : Exception;
+
+    /// <summary>Thrown when a call on the local model runs past the time limit it was given.</summary>
+    private sealed class TimeLimitException : Exception;
 
     public const string PausedByUserReason = "You paused this run. Resume picks up where it stopped.";
 
@@ -238,9 +281,27 @@ public sealed class FactoryOrchestrator(
     public Task HandOverCallAsync(int runId, AgentEngine engine, string? claudeModel = null)
     {
         var handOver = new HandOver(engine, claudeModel ?? ClaudeCodeOptions.DefaultModel);
-        if (!_active.TryGetValue(runId, out var active) || !active.RequestHandOver(handOver))
+        if (!_active.TryGetValue(runId, out var active) || active.LiveCall is not { } live)
+            throw new FactoryValidationException("This run isn't waiting on a model right now.");
+        // Making the same call again on the same model would only throw away what it has done so far.
+        var target = engine == AgentEngine.Local ? null : handOver.ClaudeModel;
+        if (live.Call.Model == target)
+            throw new FactoryValidationException($"The call is already running on {(target is null ? "the local model" : ClaudeCodeOptions.ModelLabel(target))}.");
+        if (!active.RequestHandOver(handOver))
             throw new FactoryValidationException("This run isn't waiting on a model right now.");
         return Task.CompletedTask;
+    }
+
+    /// <summary>Names the local model as a hand-over target. Claude models are named as in <see cref="ClaudeCodeOptions.Models"/>.</summary>
+    public const string LocalHandOverTarget = "local";
+
+    /// <summary>Hands the current call to <see cref="LocalHandOverTarget"/> or a Claude model such as "opus".</summary>
+    public Task HandOverCallAsync(int runId, string target)
+    {
+        var name = target.Trim().ToLowerInvariant();
+        if (name == LocalHandOverTarget) return HandOverCallAsync(runId, AgentEngine.Local);
+        if (ClaudeCodeOptions.Models.Contains(name)) return HandOverCallAsync(runId, AgentEngine.ClaudeCode, name);
+        throw new FactoryValidationException($"Unknown model \"{target}\". Use {LocalHandOverTarget}, {string.Join(", ", ClaudeCodeOptions.Models)}.");
     }
 
     /// <summary>Called between steps: stops the pipeline here if the user asked it to pause.</summary>
@@ -670,13 +731,11 @@ public sealed class FactoryOrchestrator(
         else if (CanEscalateFixes(settings) && settings.LocalFixTimeLimitMinutes > 0)
         {
             var limit = TimeSpan.FromMinutes(settings.LocalFixTimeLimitMinutes);
-            using var timeLimit = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            timeLimit.CancelAfter(limit);
             try
             {
-                patch = await InvokeAgentAsync(context, AgentRole.BugFixer, subtask.Id, prompt, validate, timeLimit.Token);
+                patch = await InvokeAgentAsync(context, AgentRole.BugFixer, subtask.Id, prompt, validate, ct, localTimeLimit: limit);
             }
-            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+            catch (TimeLimitException)
             {
                 // Claude is the way out here, so there's no falling back to the local model if it can't take the fix.
                 await LogAsync(run.Id, subtask.Id, AgentLogKind.Warning, PipelineStage.Fix,
@@ -861,7 +920,10 @@ public sealed class FactoryOrchestrator(
 
     // ---- Agents and commands ----
 
-    private async Task<T> InvokeAgentAsync<T>(PipelineContext context, AgentRole role, int? subtaskId, string prompt, Func<T, string?>? validate, CancellationToken ct, bool onClaude = false)
+    /// <param name="localTimeLimit">How long the calls on the local model may take in all, counted from now. Past it, a
+    /// <see cref="TimeLimitException"/> is thrown. A call handed to Claude isn't limited.</param>
+    private async Task<T> InvokeAgentAsync<T>(PipelineContext context, AgentRole role, int? subtaskId, string prompt, Func<T, string?>? validate, CancellationToken ct,
+        bool onClaude = false, TimeSpan? localTimeLimit = null)
     {
         var (run, settings) = (context.Run, context.Settings);
         var profile = AgentProfiles.Resolve(settings, role);
@@ -869,6 +931,7 @@ public sealed class FactoryOrchestrator(
         var schema = LlmSchemas.For<T>();
         var attemptPrompt = prompt;
         var lastError = "";
+        var deadline = DateTime.UtcNow + localTimeLimit;
         _active.TryGetValue(run.Id, out var active);
 
         for (var attempt = 1; attempt <= settings.MaxLlmAttempts; attempt++)
@@ -882,31 +945,54 @@ public sealed class FactoryOrchestrator(
             var gate = profile.UsesClaude ? null : _modelGate;
             if (gate is not null) await gate.WaitAsync(ct);
             using var call = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            active?.CallStarted(call);
+            if (deadline is { } end && !profile.UsesClaude)
+            {
+                var left = end - DateTime.UtcNow;
+                call.CancelAfter(left > TimeSpan.Zero ? left : TimeSpan.Zero);
+            }
+            var started = new LlmCallStarted(run.Id, subtaskId, callId, role, profile.Stage, EffortOf(profile), profile.Temperature, ModelOf(profile));
+            active?.CallStarted(call, started);
+            var elapsed = Stopwatch.StartNew();
+            var deltas = 0;
             try
             {
-                bus.Publish(new LlmCallStarted(run.Id, subtaskId, callId, role, profile.Stage, EffortOf(profile), profile.Temperature, ModelOf(profile)));
-                result = await llm.StreamAsync(settings, new LlmRequest(profile, attemptPrompt, schema),
-                    delta => bus.Publish(new LlmDeltaReceived(run.Id, callId, delta.Text, delta.IsThinking)), call.Token);
+                bus.Publish(started);
+                result = await llm.StreamAsync(settings, new LlmRequest(profile, attemptPrompt, schema), delta =>
+                {
+                    active?.Streamed(delta, ++deltas);
+                    bus.Publish(new LlmDeltaReceived(run.Id, callId, delta.Text, delta.IsThinking, deltas));
+                }, call.Token);
             }
+            // A call that is stopped is still logged with how long it ran, as that time counts towards the run's.
             catch (OperationCanceledException) when (!ct.IsCancellationRequested && active?.CallEnded() is { } handOver)
             {
-                bus.Publish(new LlmCallFinished(run.Id, callId));
-                var from = ModelName(profile);
+                var from = profile;
                 profile = profile with { Engine = handOver.Engine, ClaudeModel = handOver.ClaudeModel };
-                await LogAsync(run.Id, subtaskId, AgentLogKind.Info, profile.Stage, $"You handed the {profile.DisplayName} from {from} to {ModelName(profile)}, so it starts over.", ct);
+                await AppendLlmLogAsync(from, run.Id, subtaskId, attemptPrompt, null, false,
+                    $"You handed the {profile.DisplayName} from {ModelName(from)} to {ModelName(profile)}, so it starts over.", ct, elapsed.Elapsed);
+                bus.Publish(new LlmCallFinished(run.Id, callId));
                 attempt--; // The user's choice, so it doesn't count against the attempts.
                 continue;
             }
             catch (LlmException ex)
             {
                 lastError = ex.Message;
-                await AppendLlmLogAsync(profile, run.Id, subtaskId, attemptPrompt, null, false, ex.Message, ct);
+                await AppendLlmLogAsync(profile, run.Id, subtaskId, attemptPrompt, null, false, ex.Message, ct, elapsed.Elapsed);
                 bus.Publish(new LlmCallFinished(run.Id, callId));
                 continue;
             }
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+            {
+                // Not handed over and not stopped from outside, so the call ran out of time.
+                await AppendLlmLogAsync(profile, run.Id, subtaskId, attemptPrompt, null, false,
+                    $"The {profile.DisplayName} was stopped after {DescribeDuration(elapsed.Elapsed)}, at its time limit.", ct, elapsed.Elapsed);
+                bus.Publish(new LlmCallFinished(run.Id, callId));
+                throw new TimeLimitException();
+            }
             catch (OperationCanceledException)
             {
+                await AppendLlmLogAsync(profile, run.Id, subtaskId, attemptPrompt, null, false,
+                    $"The {profile.DisplayName} was stopped after {DescribeDuration(elapsed.Elapsed)}.", CancellationToken.None, elapsed.Elapsed);
                 bus.Publish(new LlmCallFinished(run.Id, callId));
                 throw;
             }
@@ -974,7 +1060,9 @@ public sealed class FactoryOrchestrator(
         }
     }
 
-    private async Task AppendLlmLogAsync(AgentProfile profile, int runId, int? subtaskId, string prompt, LlmResult? result, bool succeeded, string message, CancellationToken ct)
+    /// <param name="duration">How long the call ran, for a call that has no result.</param>
+    private async Task AppendLlmLogAsync(AgentProfile profile, int runId, int? subtaskId, string prompt, LlmResult? result, bool succeeded, string message, CancellationToken ct,
+        TimeSpan? duration = null)
     {
         var entry = await store.AppendLogAsync(new AgentLogEntry
         {
@@ -992,7 +1080,7 @@ public sealed class FactoryOrchestrator(
             Response = result?.Content,
             PromptTokens = result?.PromptTokens ?? 0,
             CompletionTokens = result?.CompletionTokens ?? 0,
-            DurationMs = (long)(result?.Duration.TotalMilliseconds ?? 0),
+            DurationMs = (long)(result?.Duration ?? duration ?? TimeSpan.Zero).TotalMilliseconds,
             Succeeded = succeeded
         }, CancellationToken.None);
         bus.Publish(new LogAppended(runId, entry.Id));

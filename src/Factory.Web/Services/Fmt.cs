@@ -1,4 +1,5 @@
 using Factory.Contracts;
+using Factory.Engine.Orchestration;
 
 namespace Factory.Web.Services;
 
@@ -75,6 +76,30 @@ public static class Fmt
         $"{(int)span.TotalHours}h {span.Minutes}m";
 
     public static string Duration(long milliseconds) => Duration(TimeSpan.FromMilliseconds(milliseconds));
+
+    /// <summary>"31–71h", "1.5–3h" or "20–45m", rounded to what an estimate can say.</summary>
+    public static string Range(TimeSpan low, TimeSpan high)
+    {
+        // Rounded first, so that 59.7 minutes reads as an hour rather than "60m".
+        var (lowMinutes, highMinutes) = (Math.Round(low.TotalMinutes), Math.Ceiling(high.TotalMinutes));
+        if (highMinutes < 60) return $"{lowMinutes:0}–{highMinutes:0}m";
+        var hours = highMinutes < 600 ? "0.#" : "0";
+        return lowMinutes < 60
+            ? $"{lowMinutes:0}m–{(highMinutes / 60).ToString(hours)}h"
+            : $"{(lowMinutes / 60).ToString(hours)}–{(highMinutes / 60).ToString(hours)}h";
+    }
+
+    /// <summary>What a work estimate is and what it is based on, in a sentence or two.</summary>
+    public static string WorkLeft(WorkEstimate estimate) =>
+        $"About {Range(estimate.Low, estimate.High)} of working time left for {estimate.SubtasksLeft} subtask{(estimate.SubtasksLeft == 1 ? "" : "s")}, " +
+        $"judged by the {estimate.FinishedSubtasks} finished so far, which took {Duration(estimate.AveragePerSubtask)} each on average. " +
+        "Time paused or waiting for you doesn't count.";
+
+    /// <summary>"3:40 PM" today, otherwise "Thu 3:40 PM", or the date beyond a week.</summary>
+    public static string When(DateTime local) =>
+        local.Date == DateTime.Today ? local.ToString("h:mm tt") :
+        local.Date < DateTime.Today.AddDays(7) ? local.ToString("ddd h:mm tt") :
+        local.ToString("MMM d h:mm tt");
 
     public static string Ago(DateTime utc)
     {
