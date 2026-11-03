@@ -37,7 +37,7 @@ You need the [.NET SDK](https://dotnet.microsoft.com/download) (9 or 10) and Git
 | Fix | Bug Fixer | `xhigh` | 0.2 | Runs only after a failed Verify or a rejected Review. Shares a budget of 3 attempts per subtask. |
 | Integrate | | | | Runs the full check once more, then offers one-click merge or a PR draft. |
 
-Roles differ by system prompt, JSON schema, temperature and `reasoning_effort`, all of which can be changed in Settings. Each role runs on the local model by default, or on Claude through the Claude Code CLI, which uses your Claude login rather than an API key. When a fix fails on the local model, the next attempt goes to Claude.
+Roles differ by system prompt, JSON schema, temperature and `reasoning_effort`, all of which can be changed in Settings. Each role runs on the local model by default, or on Claude through the Claude Code CLI, which uses your Claude login rather than an API key. When a fix fails on the local model, the next attempt goes to Claude, and so does a local fix still running after 90 minutes. While any agent is working, you can stop its call and hand it to another model from its card in the agent pane.
 
 If a subtask runs out of attempts, or the model server goes away, the run pauses and asks you what to do. You can retry the Fixer with your own guidance, re-verify after fixing it by hand, restart the subtask, skip it, or cancel the run. Runs interrupted by a restart pause the same way and can be resumed.
 

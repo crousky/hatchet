@@ -43,7 +43,42 @@ public sealed class FactoryOrchestrator(
 
         /// <summary>Set when the user pauses. The pipeline stops at its next step, or at once if Cancellation fires too.</summary>
         public volatile bool PauseRequested;
+
+        private readonly object _callGate = new();
+        private CancellationTokenSource? _call;
+        private HandOver? _handOver;
+
+        /// <summary>Marks the start of a model call, which the user can then hand to another model.</summary>
+        public void CallStarted(CancellationTokenSource call)
+        {
+            lock (_callGate) (_call, _handOver) = (call, null);
+        }
+
+        /// <summary>Marks the end of the current call. Returns the hand-over the user asked for, if that is why it ended.</summary>
+        public HandOver? CallEnded()
+        {
+            lock (_callGate)
+            {
+                var handOver = _handOver;
+                (_call, _handOver) = (null, null);
+                return handOver;
+            }
+        }
+
+        /// <summary>Stops the current call so it can be made again on another model. False if no call is running.</summary>
+        public bool RequestHandOver(HandOver handOver)
+        {
+            lock (_callGate)
+            {
+                if (_call is null) return false;
+                _handOver = handOver;
+                _call.Cancel();
+                return true;
+            }
+        }
     }
+
+    private sealed record HandOver(AgentEngine Engine, string ClaudeModel);
 
     /// <summary>Thrown at a step boundary to stop a pipeline the user paused.</summary>
     private sealed class PausedByUserException : Exception;
@@ -194,6 +229,18 @@ public sealed class FactoryOrchestrator(
 
         await active.Cancellation.CancelAsync();
         await active.Completion;
+    }
+
+    /// <summary>
+    /// Stops the model call a run is making and makes it again on another model: the local one, or a Claude model
+    /// through Claude Code. The call starts over and doesn't use up an attempt. Later calls keep their configured model.
+    /// </summary>
+    public Task HandOverCallAsync(int runId, AgentEngine engine, string? claudeModel = null)
+    {
+        var handOver = new HandOver(engine, claudeModel ?? ClaudeCodeOptions.DefaultModel);
+        if (!_active.TryGetValue(runId, out var active) || !active.RequestHandOver(handOver))
+            throw new FactoryValidationException("This run isn't waiting on a model right now.");
+        return Task.CompletedTask;
     }
 
     /// <summary>Called between steps: stops the pipeline here if the user asked it to pause.</summary>
@@ -603,13 +650,13 @@ public sealed class FactoryOrchestrator(
         var prompt = PromptBuilder.Fix(subtask, subtask.LastFailure ?? "(no failure was recorded)", RepositoryScanner.Render(files), subtask.HumanGuidance);
 
         Func<FilePatchSetResponse, string?> validate = p => p.Operations.Count == 0 ? "The operations list is empty, so nothing would change and the failure would repeat." : null;
+        var claude = ClaudeCodeOptions.ModelLabel(AgentProfiles.Resolve(settings, AgentRole.BugFixer).ClaudeModel);
         FilePatchSetResponse patch;
         var failedLocalFixes = await CountFailedLocalFixesAsync(run.Id, subtask.Id, ct);
         if (ShouldEscalateFix(settings, failedLocalFixes))
         {
-            var fixer = AgentProfiles.Resolve(settings, AgentRole.BugFixer);
             await LogAsync(run.Id, subtask.Id, AgentLogKind.Info, PipelineStage.Fix,
-                $"{failedLocalFixes} fix {(failedLocalFixes == 1 ? "attempt" : "attempts")} on the local model didn't work, so {ClaudeCodeOptions.ModelLabel(fixer.ClaudeModel)} takes this one.", ct);
+                $"{failedLocalFixes} fix {(failedLocalFixes == 1 ? "attempt" : "attempts")} on the local model didn't work, so {claude} takes this one.", ct);
             try
             {
                 patch = await InvokeAgentAsync(context, AgentRole.BugFixer, subtask.Id, prompt, validate, ct, onClaude: true);
@@ -620,6 +667,23 @@ public sealed class FactoryOrchestrator(
                 patch = await InvokeAgentAsync(context, AgentRole.BugFixer, subtask.Id, prompt, validate, ct);
             }
         }
+        else if (CanEscalateFixes(settings) && settings.LocalFixTimeLimitMinutes > 0)
+        {
+            var limit = TimeSpan.FromMinutes(settings.LocalFixTimeLimitMinutes);
+            using var timeLimit = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            timeLimit.CancelAfter(limit);
+            try
+            {
+                patch = await InvokeAgentAsync(context, AgentRole.BugFixer, subtask.Id, prompt, validate, timeLimit.Token);
+            }
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+            {
+                // Claude is the way out here, so there's no falling back to the local model if it can't take the fix.
+                await LogAsync(run.Id, subtask.Id, AgentLogKind.Warning, PipelineStage.Fix,
+                    $"The local Bug Fixer was still working after {DescribeDuration(limit)}, so it was stopped and {claude} takes this fix.", ct);
+                patch = await InvokeAgentAsync(context, AgentRole.BugFixer, subtask.Id, prompt, validate, ct, onClaude: true);
+            }
+        }
         else
         {
             patch = await InvokeAgentAsync(context, AgentRole.BugFixer, subtask.Id, prompt, validate, ct);
@@ -627,11 +691,16 @@ public sealed class FactoryOrchestrator(
         return await ApplyPatchAsync(context, subtask, patch, PipelineStage.Fix, ct);
     }
 
+    private static string DescribeDuration(TimeSpan span) =>
+        span.TotalMinutes >= 1 ? $"{span.TotalMinutes:0.#} minutes" : $"{span.TotalSeconds:0} seconds";
+
+    /// <summary>True when a fix on the local model can be handed to Claude.</summary>
+    private static bool CanEscalateFixes(FactorySettings settings) =>
+        settings.EscalateFixesToClaudeAfter > 0 && !AgentProfiles.Resolve(settings, AgentRole.BugFixer).UsesClaude;
+
     /// <summary>True once enough local fixes have failed that this attempt should go to Claude.</summary>
     internal static bool ShouldEscalateFix(FactorySettings settings, int failedLocalFixes) =>
-        settings.EscalateFixesToClaudeAfter > 0
-        && !AgentProfiles.Resolve(settings, AgentRole.BugFixer).UsesClaude
-        && failedLocalFixes >= settings.EscalateFixesToClaudeAfter;
+        CanEscalateFixes(settings) && failedLocalFixes >= settings.EscalateFixesToClaudeAfter;
 
     /// <summary>
     /// Local fixes applied since the subtask's latest build. A new fix is only needed because they didn't work.
@@ -800,6 +869,7 @@ public sealed class FactoryOrchestrator(
         var schema = LlmSchemas.For<T>();
         var attemptPrompt = prompt;
         var lastError = "";
+        _active.TryGetValue(run.Id, out var active);
 
         for (var attempt = 1; attempt <= settings.MaxLlmAttempts; attempt++)
         {
@@ -811,11 +881,22 @@ public sealed class FactoryOrchestrator(
             // Only the local model is shared. Claude calls from separate runs can overlap.
             var gate = profile.UsesClaude ? null : _modelGate;
             if (gate is not null) await gate.WaitAsync(ct);
+            using var call = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            active?.CallStarted(call);
             try
             {
                 bus.Publish(new LlmCallStarted(run.Id, subtaskId, callId, role, profile.Stage, EffortOf(profile), profile.Temperature, ModelOf(profile)));
                 result = await llm.StreamAsync(settings, new LlmRequest(profile, attemptPrompt, schema),
-                    delta => bus.Publish(new LlmDeltaReceived(run.Id, callId, delta.Text, delta.IsThinking)), ct);
+                    delta => bus.Publish(new LlmDeltaReceived(run.Id, callId, delta.Text, delta.IsThinking)), call.Token);
+            }
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested && active?.CallEnded() is { } handOver)
+            {
+                bus.Publish(new LlmCallFinished(run.Id, callId));
+                var from = ModelName(profile);
+                profile = profile with { Engine = handOver.Engine, ClaudeModel = handOver.ClaudeModel };
+                await LogAsync(run.Id, subtaskId, AgentLogKind.Info, profile.Stage, $"You handed the {profile.DisplayName} from {from} to {ModelName(profile)}, so it starts over.", ct);
+                attempt--; // The user's choice, so it doesn't count against the attempts.
+                continue;
             }
             catch (LlmException ex)
             {
@@ -824,8 +905,14 @@ public sealed class FactoryOrchestrator(
                 bus.Publish(new LlmCallFinished(run.Id, callId));
                 continue;
             }
+            catch (OperationCanceledException)
+            {
+                bus.Publish(new LlmCallFinished(run.Id, callId));
+                throw;
+            }
             finally
             {
+                active?.CallEnded();
                 gate?.Release();
             }
 
@@ -851,6 +938,8 @@ public sealed class FactoryOrchestrator(
     }
 
     private static string EffortOf(AgentProfile profile) => profile.UsesClaude ? profile.ClaudeEffort : profile.ReasoningEffort;
+
+    private static string ModelName(AgentProfile profile) => profile.UsesClaude ? ClaudeCodeOptions.ModelLabel(profile.ClaudeModel) : "the local model";
 
     private static string? ModelOf(AgentProfile profile) => profile.UsesClaude ? profile.ClaudeModel : null;
 

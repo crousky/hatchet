@@ -291,6 +291,11 @@
                         <div class="hint">Failed fix attempts on the local model before the Bug Fixer switches to Claude Code for that subtask. Local models often guess library APIs wrong. 0 keeps fixes local.</div>
                     </div>
                     <div class="field">
+                        <label for="fix-limit">Hand a slow local fix to Claude after (minutes)</label>
+                        <input autocomplete="off" data-1p-ignore data-lpignore="true" id="fix-limit" type="number" min="0" step="1" @bind="_settings.LocalFixTimeLimitMinutes" />
+                        <div class="hint">A local model can keep thinking for hours without failing, so it never hands over. After this long the fix stops and Claude Code takes it. 0 sets no limit.</div>
+                    </div>
+                    <div class="field">
                         <label for="attempts">Attempts per model call</label>
                         <input autocomplete="off" data-1p-ignore data-lpignore="true" id="attempts" type="number" min="1" max="10" @bind="_settings.MaxLlmAttempts" />
                         <div class="hint">Retries for connection errors and unparseable output.</div>

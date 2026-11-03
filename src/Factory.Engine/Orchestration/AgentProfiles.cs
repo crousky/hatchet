@@ -73,7 +73,11 @@ public static class AgentProfiles
         Rules:
         - Find the root cause in the failure output before changing anything. Fix the cause, not the symptom.
         - Fix every error listed, in every file, in this one response. The check only runs again after your change, so an error left for later costs a whole attempt.
+        - Keep your reasoning short. Each error names a file, a line and the problem, and most need a small, local change: settle each fix in a sentence or two, then write the files. Don't redesign the subtask or weigh alternatives at length.
         - Use only library APIs you are certain exist in the referenced package versions: the exact method names, overloads and namespaces. If you are unsure, choose the simplest widely documented API, or write the code without that library feature. Never guess at an overload.
+        - An error saying a name, type, member or element doesn't exist means the code uses an API that isn't there. Replace it with one you know exists, or with plain code or markup. Don't try to recall a near match.
+        - Fix an ambiguous reference by fully qualifying the name or adding a using alias.
+        - Change only the files the errors point to and any file that holds the root cause. Leave the rest of the subtask's files as they are.
         - If earlier fix attempts are listed, they failed. Don't repeat them; take a different approach.
         - Never make a check pass by deleting or weakening tests, or by suppressing errors, unless the test itself is wrong.
         - Each operation holds the COMPLETE new content of one file. There are no partial edits, so reproduce all unchanged code too. Never use placeholders.

@@ -602,6 +602,57 @@ public class OrchestratorTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task A_local_fix_that_runs_past_the_time_limit_goes_to_claude()
+    {
+        _settings.Settings.LocalFixTimeLimitMinutes = 0.02; // 1.2 seconds.
+        _llm.Enqueue(AgentRole.TaskPlanner, Plan("alpha"));
+        _llm.Enqueue(AgentRole.ContextSpecifier, Refined());
+        _llm.Enqueue(AgentRole.CodeGenerator, Patch("alpha.txt"));
+        _llm.Enqueue(AgentRole.BugFixer, Patch("alpha.txt", "v2"));
+        _llm.Enqueue(AgentRole.StaticReviewer, Verdict(true));
+        _commands.Results.Enqueue((1, "error one"));
+        _llm.Hold = AgentRole.BugFixer;
+
+        var run = await StartAsync();
+        await _llm.HoldStarted.Task.WaitAsync(TimeSpan.FromSeconds(30));
+        _llm.Hold = null; // Only the local call is held, so Claude's answers at once.
+        run = await WaitForAsync(run.Id, RunStatus.ReadyToMerge);
+
+        Assert.Equal([false, true], _llm.Engines.Where(e => e.Role == AgentRole.BugFixer).Select(e => e.OnClaude));
+        Assert.Equal(1, (await _store.GetSubtasksAsync(run.Id)).Single().FixAttempts);
+        Assert.Contains(await _store.GetLogsAsync(run.Id), l => l.Kind == AgentLogKind.Warning && l.Message.Contains("so it was stopped and Claude Opus takes this fix"));
+    }
+
+    [Fact]
+    public async Task A_call_handed_to_another_model_starts_over_there_without_using_an_attempt()
+    {
+        _settings.Settings.MaxLlmAttempts = 1;
+        _llm.Enqueue(AgentRole.TaskPlanner, Plan("alpha"));
+        _llm.Enqueue(AgentRole.ContextSpecifier, Refined());
+        _llm.Enqueue(AgentRole.CodeGenerator, Patch("alpha.txt"));
+        _llm.Enqueue(AgentRole.StaticReviewer, Verdict(true));
+        _llm.Hold = AgentRole.TaskPlanner;
+
+        var run = await StartAsync();
+        await _llm.HoldStarted.Task.WaitAsync(TimeSpan.FromSeconds(30));
+        _llm.Hold = null;
+        await _orchestrator.HandOverCallAsync(run.Id, AgentEngine.ClaudeCode, "sonnet");
+        run = await WaitForAsync(run.Id, RunStatus.ReadyToMerge);
+
+        Assert.Equal([false, true], _llm.Engines.Where(e => e.Role == AgentRole.TaskPlanner).Select(e => e.OnClaude));
+        var logs = await _store.GetLogsAsync(run.Id);
+        Assert.Contains(logs, l => l.Message == "You handed the Task Planner from the local model to Claude Sonnet, so it starts over.");
+        Assert.Equal("sonnet", logs.Single(l => l is { Kind: AgentLogKind.LlmCall, Role: AgentRole.TaskPlanner }).Model);
+        Assert.Null(logs.Single(l => l is { Kind: AgentLogKind.LlmCall, Role: AgentRole.CodeGenerator }).Model); // Later calls keep their model.
+    }
+
+    [Fact]
+    public async Task Handing_over_needs_a_call_in_progress()
+    {
+        await Assert.ThrowsAsync<FactoryValidationException>(() => _orchestrator.HandOverCallAsync(1, AgentEngine.ClaudeCode));
+    }
+
+    [Fact]
     public async Task Without_claude_the_escalated_fix_falls_back_to_the_local_model()
     {
         _llm.ClaudeOffline = true;

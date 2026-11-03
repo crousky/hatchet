@@ -173,7 +173,7 @@ else
 
         <div class="resizer resizer-agent" data-resize="--agent-w" data-sign="-1" data-min="280" data-max="760"></div>
         <aside class="agent-pane">
-            <AgentPanel Logs="_logs" Live="_liveCall" SelectedSubtaskId="SelectedSubtask?.Id" />
+            <AgentPanel Logs="_logs" Live="_liveCall" SelectedSubtaskId="SelectedSubtask?.Id" OnHandOver="HandOverAsync" HandingOver="_busy" />
         </aside>
     </div>
 }
@@ -407,6 +407,12 @@ else
         }
         await ReloadAsync();
     }
+
+    private Task HandOverAsync(string? target) => string.IsNullOrEmpty(target)
+        ? Task.CompletedTask
+        : ActAsync(() => target == AgentPanel.LocalTarget
+            ? Orchestrator.HandOverCallAsync(RunId, AgentEngine.Local)
+            : Orchestrator.HandOverCallAsync(RunId, AgentEngine.ClaudeCode, target));
 
     private Task ApprovePlanAsync(IReadOnlyList<SubtaskEdit> plan) => ActAsync(() => Orchestrator.ApprovePlanAsync(RunId, plan));
 

@@ -18,6 +18,12 @@ public sealed class FactorySettings
     /// </summary>
     public int EscalateFixesToClaudeAfter { get; set; } = 1;
 
+    /// <summary>
+    /// A fix on the local model still running after this many minutes is abandoned and handed to Claude, since a model
+    /// that keeps thinking never fails and so never escalates. Applies only when fixes can escalate. 0 sets no limit.
+    /// </summary>
+    public double LocalFixTimeLimitMinutes { get; set; } = 90;
+
     /// <summary>Attempts per LLM call, covering transport errors and unparseable output.</summary>
     public int MaxLlmAttempts { get; set; } = 3;
 
