@@ -2,6 +2,7 @@ using System.ComponentModel;
 using Factory.Contracts;
 using Factory.Engine.Orchestration;
 using Factory.Engine.Workspace;
+using Factory.Web.Services;
 using ModelContextProtocol;
 using ModelContextProtocol.Server;
 
@@ -33,7 +34,7 @@ public sealed record RunSummary(int RunId, string Title, string Status, string R
 
 public sealed record SubtaskSummary(int Order, string Title, string Status, int FixAttempts);
 
-public sealed record RunDetails(RunSummary Run, string? Branch, string? BaseBranch, bool? FinalCheckPassed, int Tokens, IReadOnlyList<SubtaskSummary> Subtasks, IReadOnlyList<string> RecentEvents);
+public sealed record RunDetails(RunSummary Run, string? Branch, string? BaseBranch, bool? FinalCheckPassed, int Tokens, string? WorkLeft, IReadOnlyList<SubtaskSummary> Subtasks, IReadOnlyList<string> RecentEvents);
 
 public sealed record SubtaskDetails(
     int Order, string Title, string Status, string Description, int FixAttempts,
@@ -102,7 +103,7 @@ public sealed class HatchetTools(FactoryOrchestrator orchestrator, IRunStore sto
     }
 
     [McpServerTool(Name = "get_run", ReadOnly = true)]
-    [Description("Shows a run's status, its subtasks and recent events. If it is paused, pauseReason says why; use get_subtask for the details and resume_run to continue.")]
+    [Description("Shows a run's status, its subtasks, recent events and, once a few subtasks are done, how much working time is likely left. If it is paused, pauseReason says why; use get_subtask for the details and resume_run to continue.")]
     public Task<RunDetails> GetRun([Description("The run's id.")] int runId, CancellationToken ct = default) =>
         DescribeRunAsync(runId, ct);
 
@@ -218,9 +219,12 @@ public sealed class HatchetTools(FactoryOrchestrator orchestrator, IRunStore sto
         var run = await RequireRunAsync(runId, ct);
         var subtasks = await store.GetSubtasksAsync(runId, ct);
         var events = (await store.GetRecentEventsAsync(runId, 12, ct)).Select(l => $"{l.CreatedAt:HH:mm:ss} {l.Message}").ToList();
+        var estimate = RunStateMachine.IsWorking(run.Status) || run.Status == RunStatus.NeedsHuman
+            ? WorkEstimator.Estimate(subtasks, await store.GetWorkBySubtaskAsync(runId, ct))
+            : null;
 
         return new RunDetails(Summarize(run, subtasks), run.BranchName, run.BaseBranch, run.IntegrationPassed,
-            run.PromptTokens + run.CompletionTokens,
+            run.PromptTokens + run.CompletionTokens, estimate is null ? null : Fmt.WorkLeft(estimate),
             subtasks.OrderBy(s => s.Order).Select(s => new SubtaskSummary(s.Order, s.Title, s.Status.ToString(), s.FixAttempts)).ToList(),
             events);
     }

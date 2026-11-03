@@ -1008,6 +1008,11 @@ public class OrchestratorTests : IAsyncLifetime
             lock (_gate) return Task.FromResult<IReadOnlyList<AgentLogEntry>>(_logs.Where(l => l.RunId == runId && (l.Kind != AgentLogKind.LlmCall || !l.Succeeded)).TakeLast(count).ToList());
         }
 
+        public Task<IReadOnlyDictionary<int, TimeSpan>> GetWorkBySubtaskAsync(int runId, CancellationToken ct = default)
+        {
+            lock (_gate) return Task.FromResult(WorkEstimator.WorkBySubtask(_logs.Where(l => l.RunId == runId)));
+        }
+
         public Task<DiffSnapshot> AddDiffAsync(DiffSnapshot diff, CancellationToken ct = default)
         {
             lock (_gate)
