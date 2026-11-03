@@ -43,6 +43,15 @@ Once three subtasks are done, the run header shows a likely range for the workin
 
 If a subtask runs out of attempts, or the model server goes away, the run pauses and asks you what to do. You can retry the Fixer with your own guidance, re-verify after fixing it by hand, restart the subtask, skip it, or cancel the run. Runs interrupted by a restart pause the same way and can be resumed.
 
+### Projects and the queue
+
+The runs list groups runs by project, which is the repository they build in. You can start as many runs as you like, and the ones past the limit wait in line:
+
+- **Runs at once.** A run counts as a local run if any of its agents uses the local model. Local runs go one at a time by default, because the model answers one request at a time. Runs whose agents are all set to Claude go up to 4 at a time. Both limits are in Settings.
+- **One run per project.** Runs in the same repository go one at a time, because they share its working tree. A run waits until the one before it in that project is merged, closed or cancelled. A run waiting for its project doesn't hold up runs in other projects.
+
+A queued run starts by itself when its turn comes. Stop waiting takes it out of the line, and Resume puts it back at the end. Runs still in line when Hatchet stops join it again when Hatchet starts.
+
 ## Driving Hatchet from Claude Code
 
 Hatchet is also an MCP server at `http://localhost:5199/mcp`. Add it to Claude Code once, for every project:
@@ -57,7 +66,7 @@ Then plan a change with Claude in conversation and ask it to hand the plan to Ha
 |---|---|
 | `probe_repository` | Checks a folder is a clean Git repository and how it would be verified |
 | `start_run` | Starts a run from a spec, with a ready-made plan or with Hatchet's planner |
-| `list_runs`, `get_run` | Status, progress, subtasks, recent events and working time left |
+| `list_runs`, `get_run` | Status, project, place in line, progress, subtasks, recent events and working time left |
 | `get_subtask` | One subtask in full: last failure, fix history, review verdict, diff |
 | `approve_plan` | Approves a plan waiting for review in Hatchet, without the commands Hatchet's planner proposed |
 | `pause_run`, `resume_run` | Pause now or after the current step; resume, retry the fixer with guidance, re-verify, restart or skip |

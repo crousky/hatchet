@@ -135,10 +135,51 @@ public sealed class FactoryOrchestrator(
     // One local model serves every agent, so requests from separate runs take turns.
     private readonly SemaphoreSlim _modelGate = new(1, 1);
 
+    // Runs past the parallel limits wait here. Letting runs in reads the database, so one pass runs at a time.
+    private readonly WorkerQueue _queue = new();
+    private readonly SemaphoreSlim _queueGate = new(1, 1);
+
     public bool IsActive(int runId) => _active.ContainsKey(runId);
 
     /// <summary>True while a run is finishing its current step before it pauses.</summary>
     public bool IsPausing(int runId) => _active.TryGetValue(runId, out var active) && active.PauseRequested;
+
+    /// <summary>Where a run is in line for a worker, or null if it isn't waiting for one.</summary>
+    public QueueSpot? GetQueueSpot(int runId) => _queue.SpotOf(runId);
+
+    /// <summary>
+    /// Lets waiting runs start where a worker and their repository are free. Runs call it as they finish; call it too
+    /// after changing the parallel limits.
+    /// </summary>
+    public async Task RefreshQueueAsync()
+    {
+        await _queueGate.WaitAsync();
+        try
+        {
+            var settings = await settingsStore.GetAsync();
+            // A run that has started has its branch checked out until it finishes, even while it waits for the user.
+            var holders = (await store.ListRunsAsync())
+                .Where(r => !RunStateMachine.IsTerminal(r.Status) && r.BranchName is not null)
+                .GroupBy(r => RepositoryKey(r.Task.RepositoryPath), StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(g => g.Key, g => (IReadOnlySet<int>)g.Select(r => r.Id).ToHashSet(), StringComparer.OrdinalIgnoreCase);
+            var touched = _queue.Admit(pool => pool == WorkerPool.Claude ? settings.MaxParallelClaudeRuns : settings.MaxParallelLocalRuns, holders);
+            foreach (var runId in touched) bus.Publish(new QueueChanged(runId));
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Could not let queued runs start");
+        }
+        finally
+        {
+            _queueGate.Release();
+        }
+    }
+
+    /// <summary>Runs that use the local model for any agent share its workers, and runs entirely on Claude share Claude's.</summary>
+    internal static WorkerPool PoolFor(FactorySettings settings) =>
+        Enum.GetValues<AgentRole>().All(role => AgentProfiles.Resolve(settings, role).UsesClaude) ? WorkerPool.Claude : WorkerPool.Local;
+
+    private static string RepositoryKey(string path) => Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
 
     /// <summary>True while any pipeline is working, and so may be waiting on the model.</summary>
     public bool HasActiveRuns => !_active.IsEmpty;
@@ -227,7 +268,8 @@ public sealed class FactoryOrchestrator(
 
         switch (run.PausedStage)
         {
-            case PipelineStage.Ingest:
+            // No stage means it was paused while waiting in line, before it started.
+            case PipelineStage.Ingest or null:
                 Launch(runId, (context, token) => RunFromIngestAsync(context, token));
                 return;
             case PipelineStage.Decompose:
@@ -268,7 +310,8 @@ public sealed class FactoryOrchestrator(
 
         active.PauseRequested = true;
         bus.Publish(new PauseRequested(runId));
-        if (!immediately) return;
+        // A run still waiting for a worker has no step to finish, so it leaves the line now.
+        if (!immediately && _queue.SpotOf(runId) is null) return;
 
         await active.Cancellation.CancelAsync();
         await active.Completion;
@@ -393,13 +436,19 @@ public sealed class FactoryOrchestrator(
         return new PullRequestDraft(run.Task.Title, body.ToString(), run.BranchName ?? "", run.BaseBranch ?? "", hasRemote);
     }
 
-    /// <summary>A run left mid-work by a previous process has no pipeline behind it, so it pauses for a resume.</summary>
+    /// <summary>
+    /// A run left mid-work by a previous process has no pipeline behind it, so it pauses for a resume. Runs that were
+    /// still waiting in line hadn't started, so they join the line again, in the order they were started.
+    /// </summary>
     public async Task RecoverInterruptedRunsAsync(CancellationToken ct = default)
     {
-        foreach (var run in await store.ListRunsAsync(ct))
+        foreach (var run in (await store.ListRunsAsync(ct)).OrderBy(r => r.Id))
         {
             if (!RunStateMachine.IsWorking(run.Status) || IsActive(run.Id)) continue;
-            await PauseRunAsync(run, InterruptedReason, ct);
+            if (run is { Status: RunStatus.Queued, BranchName: null })
+                Launch(run.Id, (context, token) => RunFromIngestAsync(context, token));
+            else
+                await PauseRunAsync(run, InterruptedReason, ct);
         }
     }
 
@@ -424,6 +473,8 @@ public sealed class FactoryOrchestrator(
             PipelineContext? context = null;
             try
             {
+                await WaitForWorkerAsync(runId, token);
+                // Read after the wait, which can be long, so the run starts with current settings.
                 var run = await store.GetRunAsync(runId, token);
                 context = new PipelineContext(run, await settingsStore.GetAsync(token));
                 await body(context, token);
@@ -444,8 +495,23 @@ public sealed class FactoryOrchestrator(
             finally
             {
                 _active.TryRemove(runId, out _);
+                _queue.Release(runId);
+                bus.Publish(new QueueChanged(runId));
+                await RefreshQueueAsync();
             }
         }, CancellationToken.None);
+    }
+
+    /// <summary>Waits in line until the run's pool has a worker free and no other run has its repository.</summary>
+    private async Task WaitForWorkerAsync(int runId, CancellationToken ct)
+    {
+        var run = await store.GetRunAsync(runId, ct);
+        var pool = PoolFor(await settingsStore.GetAsync(ct));
+        var wait = _queue.WaitAsync(runId, RepositoryKey(run.Task.RepositoryPath), pool, ct);
+        await RefreshQueueAsync();
+        await wait;
+        // A pause asked for while it waited takes effect before it starts.
+        PauseIfRequested(runId);
     }
 
     private async Task HandlePipelineFailureAsync(int runId, PipelineContext? context, Exception ex)
@@ -510,6 +576,8 @@ public sealed class FactoryOrchestrator(
         await SetRunStatusAsync(run, RunStatus.Ingesting, ct);
         await SetStageAsync(run, PipelineStage.Ingest, null, ct);
 
+        // A run that waited in line may have been started while another run had the repository, so its tree is checked now.
+        RequireCleanCheckout(await GitWorkspace.ProbeAsync(task.RepositoryPath, ct));
         await git.EnsureInitialCommitAsync(ct);
         run.BaseBranch = await git.GetCurrentBranchAsync(ct);
         run.BaseCommit = await git.GetHeadShaAsync(ct);
@@ -1250,6 +1318,8 @@ public sealed class FactoryOrchestrator(
 
         await store.UpdateRunAsync(run, ct);
         bus.Publish(new RunStatusChanged(run.Id, from, to));
+        // A finished run gives up its repository, which a queued run may be waiting for.
+        if (RunStateMachine.IsTerminal(to)) await RefreshQueueAsync();
     }
 
     private async Task SetSubtaskStatusAsync(FactorySubtask subtask, SubtaskStatus to, CancellationToken ct)
@@ -1300,14 +1370,27 @@ public sealed class FactoryOrchestrator(
         var probe = await GitWorkspace.ProbeAsync(path, ct);
         if (!probe.Exists) throw new FactoryValidationException($"The folder {path} does not exist.");
         if (!probe.IsGitRepository) throw new FactoryValidationException($"{path} is not a Git repository.");
+
+        // Another open run has the working tree, so this one waits in line for it, and the tree is checked when its turn comes.
+        if (await GetOpenRunAsync(path, ct) is null) RequireCleanCheckout(probe);
+    }
+
+    /// <summary>
+    /// The latest run in a repository that isn't finished, if any. It has the repository's working tree, so a run
+    /// started there now waits in line until it finishes.
+    /// </summary>
+    public async Task<FactoryRun?> GetOpenRunAsync(string repositoryPath, CancellationToken ct = default)
+    {
+        var key = RepositoryKey(repositoryPath);
+        return (await store.ListRunsAsync(ct))
+            .Where(r => !RunStateMachine.IsTerminal(r.Status) && string.Equals(RepositoryKey(r.Task.RepositoryPath), key, StringComparison.OrdinalIgnoreCase))
+            .MaxBy(r => r.Id);
+    }
+
+    private static void RequireCleanCheckout(RepositoryProbe probe)
+    {
         if (!probe.IsClean) throw new FactoryValidationException("The repository has uncommitted changes. Commit or stash them first, so Hatchet's commits and rollbacks can't touch your work.");
         if (probe.CurrentBranch is null) throw new FactoryValidationException("The repository is in detached HEAD state. Check out a branch first.");
-
-        foreach (var run in await store.ListRunsAsync(ct))
-        {
-            if (!RunStateMachine.IsTerminal(run.Status) && string.Equals(Path.GetFullPath(run.Task.RepositoryPath), path, StringComparison.OrdinalIgnoreCase))
-                throw new FactoryValidationException($"Run #{run.Id} is still open on this repository. Finish or cancel it first.");
-        }
     }
 
     private static void RequireStatus(FactoryRun run, RunStatus expected)

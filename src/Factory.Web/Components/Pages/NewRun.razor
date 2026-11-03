@@ -37,7 +37,16 @@
                 </div>
                 <button class="btn" title="Browse for a folder" @onclick="() => _picking = true"><Icon Name="folder" Size="14" /> Browse</button>
             </div>
-            <RepoProbeStatus Probe="_probe" Checking="_probing" OnInitialize="InitializeRepositoryAsync" />
+            @if (_openRun is not null && !_probing)
+            {
+                <div class="probe probe-good">
+                    <Icon Name="clock" Size="13" /> <a href="/runs/@_openRun.Id">Run #@_openRun.Id</a> is open in this project, so this run waits in line and starts once that one finishes.
+                </div>
+            }
+            else
+            {
+                <RepoProbeStatus Probe="_probe" Checking="_probing" OnInitialize="InitializeRepositoryAsync" />
+            }
             @if (_recent.Count > 0)
             {
                 <div class="chips">
@@ -131,12 +140,14 @@
     private bool _probing;
     private string? _error;
     private RepositoryProbe? _probe;
+    // An open run in the same repository has its working tree, so a new run queues behind it rather than needing it clean.
+    private FactoryRun? _openRun;
     private List<string> _recent = [];
     private bool _customCommand;
     private bool _picking;
     private CancellationTokenSource? _probeDelay;
 
-    private bool RepositoryReady => _probe is { IsGitRepository: true, IsClean: true, CurrentBranch: not null };
+    private bool RepositoryReady => _probe is { IsGitRepository: true } && (_openRun is not null || _probe is { IsClean: true, CurrentBranch: not null });
     private bool CanStart => StartBlockedReason is null && !_starting;
 
     private string? StartBlockedReason =>
@@ -181,6 +192,7 @@
     {
         var path = _path.Trim();
         _probe = path.Length == 0 ? null : await GitWorkspace.ProbeAsync(path, ct);
+        _openRun = _probe is { IsGitRepository: true } ? await Orchestrator.GetOpenRunAsync(path, ct) : null;
         _probing = false;
     }
 

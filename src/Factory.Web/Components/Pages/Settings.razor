@@ -1,6 +1,7 @@
 @page "/settings"
 @implements IDisposable
 @inject EfSettingsStore SettingsStore
+@inject FactoryOrchestrator Orchestrator
 @inject ModelHealthService Health
 @inject IConfiguration Configuration
 @inject IJSRuntime JS
@@ -281,6 +282,16 @@
                 <h2>Limits</h2>
                 <div class="field-grid">
                     <div class="field">
+                        <label for="local-runs">Runs at once on the local model</label>
+                        <input autocomplete="off" data-1p-ignore data-lpignore="true" id="local-runs" type="number" min="1" max="8" @bind="_settings.MaxParallelLocalRuns" />
+                        <div class="hint">For runs where any agent uses the local model. It answers one request at a time, so more runs only take turns. Others wait in line.</div>
+                    </div>
+                    <div class="field">
+                        <label for="claude-runs">Runs at once on Claude</label>
+                        <input autocomplete="off" data-1p-ignore data-lpignore="true" id="claude-runs" type="number" min="1" max="16" @bind="_settings.MaxParallelClaudeRuns" />
+                        <div class="hint">For runs where every agent is set to Claude. Others wait in line. Runs in the same repository always go one at a time.</div>
+                    </div>
+                    <div class="field">
                         <label for="retries">Fix attempts per subtask</label>
                         <input autocomplete="off" data-1p-ignore data-lpignore="true" id="retries" type="number" min="0" max="20" @bind="_settings.MaxFixRetries" />
                         <div class="hint">Build failures and review rejections share this budget. Then the run pauses for you.</div>
@@ -452,6 +463,8 @@
         _settings!.ProfileOverrides = _profiles.Values.ToList();
         await SettingsStore.SaveAsync(_settings);
         _saved = true;
+        // A higher limit may let queued runs start now.
+        await Orchestrator.RefreshQueueAsync();
         await TestAsync();
         StateHasChanged();
         await Task.Delay(1800);

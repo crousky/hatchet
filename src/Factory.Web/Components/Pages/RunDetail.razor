@@ -31,7 +31,7 @@ else
             <header class="run-header">
                 <div class="run-heading">
                     <h1 title="@_run.Task.Title">@_run.Task.Title</h1>
-                    <StatusBadge Status="_run.Status" PausedByUser="_run.PausedByUser" />
+                    <StatusBadge Status="_run.Status" PausedByUser="_run.PausedByUser" Queue="_spot" />
                 </div>
                 <div class="run-meta">
                     <span class="meta-item" title="@_run.Task.RepositoryPath"><Icon Name="folder" Size="12" /> @Fmt.FolderName(_run.Task.RepositoryPath)</span>
@@ -52,7 +52,13 @@ else
                     }
                     else if (_run.Status != RunStatus.ReadyToMerge)
                     {
-                        @if (RunStateMachine.IsWorking(_run.Status) && Orchestrator.IsPausing(_run.Id))
+                        @if (_spot is not null)
+                        {
+                            <button class="btn" disabled="@_busy" title="Leave the line. Resume puts it back at the end." @onclick="() => PauseAsync(true)">
+                                <Icon Name="pause" Size="14" /> Stop waiting
+                            </button>
+                        }
+                        else if (RunStateMachine.IsWorking(_run.Status) && Orchestrator.IsPausing(_run.Id))
                         {
                             <span class="pausing"><span class="spinner"></span> Pausing after this step</span>
                             <button class="btn" disabled="@_busy" title="Stop the current step now. It runs again from its start when you resume." @onclick="() => PauseAsync(true)">
@@ -83,7 +89,28 @@ else
                 </div>
             }
 
-            @if (_run.Status == RunStatus.NeedsHuman)
+            @if (_spot is not null)
+            {
+                <div class="action-banner">
+                    <div class="action-banner-main">
+                        <Icon Name="clock" Size="18" />
+                        <div class="action-banner-text">
+                            <div class="action-banner-title">Waiting in line</div>
+                            <div class="action-banner-reason">
+                                @if (_spot.BlockedByRunId is { } blocker)
+                                {
+                                    <span>Waiting for <a href="/runs/@blocker">run #@blocker</a> to finish, as it has this repository checked out. This run starts by itself after that.</span>
+                                }
+                                else
+                                {
+                                    <span>@Fmt.Queue(_spot). It starts by itself when one is free. The number of runs that work at once is set in Settings.</span>
+                                }
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            }
+            else if (_run.Status == RunStatus.NeedsHuman)
             {
                 <PausePanel Run="_run" Paused="PausedSubtask" Busy="_busy" OnDecision="ResumeAsync" />
             }
@@ -148,6 +175,7 @@ else
                                 <PlanEditor Subtasks="_subtasks"
                                             Editable="@(_run.Status == RunStatus.AwaitingPlanApproval)"
                                             Planning="@(_run.Status is RunStatus.Queued or RunStatus.Ingesting or RunStatus.Decomposing)"
+                                            Queued="@(_spot is not null)"
                                             Busy="_busy"
                                             DefaultCommand="@_run.Task.VerificationCommand"
                                             OnApprove="ApprovePlanAsync"
@@ -200,6 +228,7 @@ else
     private LiveCommand? _liveCommand;
     private PullRequestDraft? _prDraft;
     private WorkEstimate? _estimate;
+    private QueueSpot? _spot;
 
     private EditorTab _tab = EditorTab.Subtask;
     private int? _selectedSubtaskId;
@@ -290,6 +319,7 @@ else
             return;
         }
 
+        _spot = Orchestrator.GetQueueSpot(RunId);
         _subtasks = await Store.GetSubtasksAsync(RunId);
         _diffs = await Store.GetDiffsAsync(RunId);
         _logs.AddRange(await Store.GetLogsAsync(RunId, _logs.LastOrDefault()?.Id ?? 0));
@@ -393,6 +423,10 @@ else
 
             case PauseRequested:
                 return false;
+
+            case QueueChanged:
+                _statusVersion++;
+                return true;
 
             case RunStatusChanged changed:
                 _statusVersion++;

@@ -51,8 +51,36 @@ public class OrchestratorTests : IAsyncLifetime
     private static string Verdict(bool passed, params string[] issues) => JsonSerializer.Serialize(
         new ReviewVerdictResponse(passed, 90, issues.ToList(), []), LlmSchemas.SerializerOptions);
 
-    private Task<FactoryRun> StartAsync(bool approval = false, string command = "verify") =>
-        _orchestrator.StartRunAsync(new NewRunRequest(_repo.Path, "# Spec", null, command, approval));
+    private Task<FactoryRun> StartAsync(bool approval = false, string command = "verify", string? repository = null) =>
+        _orchestrator.StartRunAsync(new NewRunRequest(repository ?? _repo.Path, "# Spec", null, command, approval));
+
+    /// <summary>A second repository, for runs that shouldn't share the first one's working tree.</summary>
+    private async Task<TempDirectory> SecondRepositoryAsync()
+    {
+        var repo = new TempDirectory();
+        var git = new GitWorkspace(repo.Path);
+        await git.InitializeAsync();
+        await git.EnsureInitialCommitAsync();
+        return repo;
+    }
+
+    private void RunEveryAgentOnClaude()
+    {
+        foreach (var role in Enum.GetValues<AgentRole>())
+            _settings.Settings.ProfileOverrides.Add(new AgentProfileOverride { Role = role, Engine = AgentEngine.ClaudeCode, ClaudeModel = "opus" });
+    }
+
+    /// <summary>Waits until a run has joined the line for a worker.</summary>
+    private async Task<QueueSpot> WaitForQueueAsync(int runId)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(30);
+        while (DateTime.UtcNow < deadline)
+        {
+            if (_orchestrator.GetQueueSpot(runId) is { } spot) return spot;
+            await Task.Delay(10);
+        }
+        throw new TimeoutException($"Run {runId} never joined the line.");
+    }
 
     private async Task<FactoryRun> WaitForAsync(int runId, params RunStatus[] statuses)
     {
@@ -811,14 +839,112 @@ public class OrchestratorTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task A_second_run_on_a_repository_with_an_open_run_is_refused()
+    public async Task A_second_run_on_a_repository_waits_until_the_open_run_finishes()
     {
+        _llm.Enqueue(AgentRole.TaskPlanner, Plan("alpha"), Plan("beta"));
+        var first = await WaitForAsync((await StartAsync(approval: true)).Id, RunStatus.AwaitingPlanApproval);
+
+        var second = await StartAsync(approval: true);
+
+        Assert.Equal(new QueueSpot(1, WorkerPool.Local, first.Id), await WaitForQueueAsync(second.Id));
+        Assert.Equal(RunStatus.Queued, (await _store.GetRunAsync(second.Id)).Status);
+
+        await _orchestrator.CancelAsync(first.Id);
+        var started = await WaitForAsync(second.Id, RunStatus.AwaitingPlanApproval);
+        Assert.Equal($"factory/run-{second.Id}", started.BranchName);
+        Assert.Equal(first.BaseBranch, started.BaseBranch); // It started from the user's branch, not the first run's.
+    }
+
+    [Fact]
+    public async Task Runs_on_the_local_model_past_the_limit_wait_in_line()
+    {
+        using var other = await SecondRepositoryAsync();
+        _llm.Enqueue(AgentRole.TaskPlanner, Plan("alpha"), Plan("beta"));
+        _llm.Hold = AgentRole.TaskPlanner;
+
+        var first = await StartAsync(approval: true);
+        await _llm.HoldStarted.Task.WaitAsync(TimeSpan.FromSeconds(30));
+        var second = await StartAsync(approval: true, repository: other.Path);
+
+        Assert.Equal(new QueueSpot(1, WorkerPool.Local, null), await WaitForQueueAsync(second.Id));
+        Assert.Null(_orchestrator.GetQueueSpot(first.Id));
+
+        _llm.Hold = null;
+        _llm.Release.TrySetResult();
+        await WaitForAsync(first.Id, RunStatus.AwaitingPlanApproval);
+        await WaitForAsync(second.Id, RunStatus.AwaitingPlanApproval); // Its turn came once the first stopped working.
+    }
+
+    [Fact]
+    public async Task Runs_entirely_on_claude_work_side_by_side_up_to_their_limit()
+    {
+        RunEveryAgentOnClaude();
+        _settings.Settings.MaxParallelClaudeRuns = 2;
+        using var other = await SecondRepositoryAsync();
+        _llm.Enqueue(AgentRole.TaskPlanner, Plan("alpha"), Plan("beta"));
+        _llm.Hold = AgentRole.TaskPlanner;
+
+        var first = await StartAsync(approval: true);
+        await _llm.HoldStarted.Task.WaitAsync(TimeSpan.FromSeconds(30));
+        var second = await StartAsync(approval: true, repository: other.Path);
+
+        // Both hold a call at once, which they couldn't if the second were waiting for a worker.
+        var deadline = DateTime.UtcNow.AddSeconds(30);
+        while (_orchestrator.GetLiveCall(second.Id) is null && DateTime.UtcNow < deadline) await Task.Delay(10);
+        Assert.NotNull(_orchestrator.GetLiveCall(first.Id));
+        Assert.NotNull(_orchestrator.GetLiveCall(second.Id));
+
+        _llm.Hold = null;
+        _llm.Release.TrySetResult();
+        await WaitForAsync(first.Id, RunStatus.AwaitingPlanApproval);
+        await WaitForAsync(second.Id, RunStatus.AwaitingPlanApproval);
+    }
+
+    [Fact]
+    public async Task Pausing_a_queued_run_takes_it_out_of_line_and_resuming_puts_it_back()
+    {
+        using var other = await SecondRepositoryAsync();
+        _llm.Enqueue(AgentRole.TaskPlanner, Plan("alpha"), Plan("beta"));
+        _llm.Hold = AgentRole.TaskPlanner;
+        var first = await StartAsync(approval: true);
+        await _llm.HoldStarted.Task.WaitAsync(TimeSpan.FromSeconds(30));
+        var second = await StartAsync(approval: true, repository: other.Path);
+        await WaitForQueueAsync(second.Id);
+
+        await _orchestrator.PauseAsync(second.Id, immediately: false);
+
+        var paused = await WaitForAsync(second.Id, RunStatus.NeedsHuman);
+        Assert.True(paused.PausedByUser);
+        Assert.Null(paused.PausedStage);
+        Assert.Null(_orchestrator.GetQueueSpot(second.Id));
+
+        _llm.Hold = null;
+        _llm.Release.TrySetResult();
+        await WaitForAsync(first.Id, RunStatus.AwaitingPlanApproval);
+        await _orchestrator.ResumeAsync(second.Id, HumanDecision.Resume, null);
+        await WaitForAsync(second.Id, RunStatus.AwaitingPlanApproval); // It starts from the beginning.
+    }
+
+    [Fact]
+    public async Task Runs_still_in_line_when_hatchet_stopped_join_it_again_at_startup()
+    {
+        var waiting = await _store.CreateRunAsync(null, new FactoryTask { Title = "Queued", RepositoryPath = _repo.Path, ArchitectureSpec = "# Spec", RequirePlanApproval = true });
         _llm.Enqueue(AgentRole.TaskPlanner, Plan("alpha"));
-        await WaitForAsync((await StartAsync(approval: true)).Id, RunStatus.AwaitingPlanApproval);
 
-        var error = await Assert.ThrowsAsync<FactoryValidationException>(() => StartAsync());
+        await _orchestrator.RecoverInterruptedRunsAsync();
 
-        Assert.Contains("still open", error.Message);
+        await WaitForAsync(waiting.Id, RunStatus.AwaitingPlanApproval);
+    }
+
+    [Fact]
+    public void A_run_counts_as_a_claude_run_only_when_every_agent_runs_on_claude()
+    {
+        _settings.Settings.ProfileOverrides.Add(new AgentProfileOverride { Role = AgentRole.StaticReviewer, Engine = AgentEngine.ClaudeCode });
+        Assert.Equal(WorkerPool.Local, FactoryOrchestrator.PoolFor(_settings.Settings));
+
+        _settings.Settings.ProfileOverrides.Clear();
+        RunEveryAgentOnClaude();
+        Assert.Equal(WorkerPool.Claude, FactoryOrchestrator.PoolFor(_settings.Settings));
     }
 
     [Fact]

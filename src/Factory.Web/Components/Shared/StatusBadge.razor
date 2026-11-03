@@ -1,12 +1,22 @@
-<span class="badge badge-@(PausedByUser ? "muted" : Fmt.Tone(Status))">
-    @if (RunStateMachine.IsWorking(Status))
-    {
-        <span class="spinner"></span>
-    }
-    @(PausedByUser ? "Paused" : Fmt.Label(Status))
-</span>
+@if (Queue is not null)
+{
+    <span class="badge badge-muted" title="@Fmt.Queue(Queue)"><Icon Name="clock" Size="11" /> Queued</span>
+}
+else
+{
+    <span class="badge badge-@(PausedByUser ? "muted" : Fmt.Tone(Status))">
+        @if (RunStateMachine.IsWorking(Status))
+        {
+            <span class="spinner"></span>
+        }
+        @(PausedByUser ? "Paused" : Fmt.Label(Status))
+    </span>
+}
 
 @code {
     [Parameter, EditorRequired] public RunStatus Status { get; set; }
     [Parameter] public bool PausedByUser { get; set; }
+
+    /// <summary>Set while the run waits in line for a worker, whatever its status says.</summary>
+    [Parameter] public QueueSpot? Queue { get; set; }
 }
