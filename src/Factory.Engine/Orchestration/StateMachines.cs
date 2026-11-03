@@ -30,6 +30,9 @@ public static class RunStateMachine
     public static bool IsWorking(RunStatus status) =>
         status is RunStatus.Queued or RunStatus.Ingesting or RunStatus.Decomposing or RunStatus.Executing or RunStatus.Integrating;
 
+    /// <summary>The run still has work ahead of it, whether it is working or waiting on a human.</summary>
+    public static bool IsUnderway(RunStatus status) => IsWorking(status) || status == RunStatus.NeedsHuman;
+
     public static void Apply(FactoryRun run, RunStatus to)
     {
         if (!CanTransition(run.Status, to))

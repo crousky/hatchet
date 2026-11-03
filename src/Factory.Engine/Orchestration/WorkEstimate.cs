@@ -15,8 +15,10 @@ public static class WorkEstimator
     /// so time spent paused or waiting for the user doesn't count. A single subtask varies too much to estimate,
     /// since one that needs fixing can take ten times as long, but over many subtasks the spread evens out.
     /// </summary>
-    /// <param name="workBySubtask">Working time spent so far on each subtask, by subtask id.</param>
-    public static WorkEstimate? Estimate(IReadOnlyList<FactorySubtask> subtasks, IReadOnlyDictionary<int, TimeSpan> workBySubtask)
+    /// <param name="workBySubtask">Working time logged so far on each subtask, by subtask id.</param>
+    /// <param name="callInProgress">The subtask a model call is working on now and how long it has run, as that isn't logged yet.</param>
+    public static WorkEstimate? Estimate(IReadOnlyList<FactorySubtask> subtasks, IReadOnlyDictionary<int, TimeSpan> workBySubtask,
+        (int SubtaskId, TimeSpan Elapsed)? callInProgress = null)
     {
         var finished = subtasks
             .Where(s => s.Status == SubtaskStatus.Completed)
@@ -30,7 +32,9 @@ public static class WorkEstimator
         var variance = finished.Sum(m => (m - mean) * (m - mean)) / (finished.Count - 1);
 
         // Work already spent on a subtask in progress comes off what it is expected to take.
-        var expected = left.Sum(s => Math.Max(mean - workBySubtask.GetValueOrDefault(s.Id).TotalMinutes, 0));
+        double Spent(FactorySubtask s) => workBySubtask.GetValueOrDefault(s.Id).TotalMinutes
+            + (callInProgress is { } call && call.SubtaskId == s.Id ? call.Elapsed.TotalMinutes : 0);
+        var expected = left.Sum(s => Math.Max(mean - Spent(s), 0));
         // One standard deviation: the subtasks left vary among themselves, and the average they are judged by is
         // itself uncertain while few subtasks have finished.
         var spread = Math.Sqrt(variance * left.Count * (1 + (double)left.Count / finished.Count));
@@ -40,10 +44,4 @@ public static class WorkEstimator
             TimeSpan.FromMinutes(expected + spread),
             left.Count, finished.Count, TimeSpan.FromMinutes(mean));
     }
-
-    /// <summary>Working time spent on each subtask, from a run's log.</summary>
-    public static IReadOnlyDictionary<int, TimeSpan> WorkBySubtask(IEnumerable<AgentLogEntry> logs) => logs
-        .Where(l => l.SubtaskId is not null)
-        .GroupBy(l => l.SubtaskId!.Value)
-        .ToDictionary(g => g.Key, g => TimeSpan.FromMilliseconds(g.Sum(l => l.DurationMs)));
 }

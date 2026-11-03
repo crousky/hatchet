@@ -196,12 +196,7 @@ public sealed class HatchetTools(FactoryOrchestrator orchestrator, IRunStore sto
         CancellationToken ct = default)
     {
         await RequireRunAsync(runId, ct);
-        var target = to.Trim().ToLowerInvariant();
-        if (target != "local" && !ClaudeCodeOptions.Models.Contains(target))
-            throw new McpException($"Unknown model \"{to}\". Use local, {string.Join(", ", ClaudeCodeOptions.Models)}.");
-        await Do(() => target == "local"
-            ? orchestrator.HandOverCallAsync(runId, AgentEngine.Local)
-            : orchestrator.HandOverCallAsync(runId, AgentEngine.ClaudeCode, target));
+        await Do(() => orchestrator.HandOverCallAsync(runId, to));
         return await DescribeRunAsync(runId, ct);
     }
 
@@ -219,8 +214,10 @@ public sealed class HatchetTools(FactoryOrchestrator orchestrator, IRunStore sto
         var run = await RequireRunAsync(runId, ct);
         var subtasks = await store.GetSubtasksAsync(runId, ct);
         var events = (await store.GetRecentEventsAsync(runId, 12, ct)).Select(l => $"{l.CreatedAt:HH:mm:ss} {l.Message}").ToList();
-        var estimate = RunStateMachine.IsWorking(run.Status) || run.Status == RunStatus.NeedsHuman
-            ? WorkEstimator.Estimate(subtasks, await store.GetWorkBySubtaskAsync(runId, ct))
+        var live = orchestrator.GetLiveCall(runId);
+        var estimate = RunStateMachine.IsUnderway(run.Status)
+            ? WorkEstimator.Estimate(subtasks, await store.GetWorkBySubtaskAsync(runId, ct),
+                live?.Call.SubtaskId is { } subtaskId ? (subtaskId, DateTime.UtcNow - live.StartedAt) : null)
             : null;
 
         return new RunDetails(Summarize(run, subtasks), run.BranchName, run.BaseBranch, run.IntegrationPassed,
@@ -238,7 +235,7 @@ public sealed class HatchetTools(FactoryOrchestrator orchestrator, IRunStore sto
         var status = run.PausedByUser ? "Paused" : run.Status.ToString();
         return new RunSummary(run.Id, run.Task.Title, status, run.Task.RepositoryPath,
             subtasks.Count(s => SubtaskStateMachine.IsFinished(s.Status) && s.Status != SubtaskStatus.Cancelled), subtasks.Count,
-            RunStateMachine.IsWorking(run.Status) || run.Status == RunStatus.NeedsHuman ? step : null,
+            RunStateMachine.IsUnderway(run.Status) ? step : null,
             run.PauseReason, $"{Program.BaseUrl(configuration)}/runs/{run.Id}");
     }
 

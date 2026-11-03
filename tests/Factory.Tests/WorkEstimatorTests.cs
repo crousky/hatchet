@@ -80,21 +80,14 @@ public class WorkEstimatorTests
     }
 
     [Fact]
-    public void Work_by_subtask_adds_up_each_subtask_and_leaves_out_run_level_entries()
+    public void A_call_still_running_counts_as_work_spent_on_its_subtask()
     {
-        AgentLogEntry[] logs =
-        [
-            new() { SubtaskId = 1, DurationMs = 60_000 },
-            new() { SubtaskId = 1, DurationMs = 30_000 },
-            new() { SubtaskId = 2, DurationMs = 10_000 },
-            new() { SubtaskId = null, DurationMs = 999_000 }
-        ];
+        var (subtasks, work) = Plan(finishedMinutes: [20, 20, 20], left: 2);
+        work[subtasks[^1].Id] = TimeSpan.FromMinutes(5);
 
-        var work = WorkEstimator.WorkBySubtask(logs);
+        var estimate = WorkEstimator.Estimate(subtasks, work, (subtasks[^1].Id, TimeSpan.FromMinutes(10)))!;
 
-        Assert.Equal(2, work.Count);
-        Assert.Equal(TimeSpan.FromSeconds(90), work[1]);
-        Assert.Equal(TimeSpan.FromSeconds(10), work[2]);
+        Assert.Equal(TimeSpan.FromMinutes(25), estimate.High);
     }
 
     /// <summary>The range's width relative to its middle.</summary>

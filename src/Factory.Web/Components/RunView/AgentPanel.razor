@@ -144,11 +144,10 @@
     [Parameter] public EventCallback<string?> OnHandOver { get; set; }
     [Parameter] public bool HandingOver { get; set; }
 
-    public const string LocalTarget = "local";
 
     private static IEnumerable<(string Value, string Label)> HandOverTargets(LiveCall live)
     {
-        if (live.Model is not null) yield return (LocalTarget, "Local model");
+        if (live.Model is not null) yield return (FactoryOrchestrator.LocalHandOverTarget, "Local model");
         foreach (var model in ClaudeCodeOptions.Models.Where(m => m != live.Model))
             yield return (model, ClaudeCodeOptions.ModelLabel(model));
     }

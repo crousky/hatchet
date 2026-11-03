@@ -14,12 +14,13 @@ public sealed record PlanChanged(int RunId) : FactoryEvent(RunId);
 /// <summary>The user asked a working run to pause once its current step finishes.</summary>
 public sealed record PauseRequested(int RunId) : FactoryEvent(RunId);
 
-/// <summary>A model call in progress and when it started.</summary>
-public sealed record LiveCallInfo(LlmCallStarted Call, DateTime StartedAt);
+/// <summary>A model call in progress: when it started, the end of what it has streamed, and how many deltas that took.</summary>
+public sealed record LiveCallInfo(LlmCallStarted Call, DateTime StartedAt, string Thinking, string Content, int Deltas);
 
 public sealed record LlmCallStarted(int RunId, int? SubtaskId, Guid CallId, AgentRole Role, PipelineStage Stage, string ReasoningEffort, double Temperature, string? Model = null) : FactoryEvent(RunId);
 
-public sealed record LlmDeltaReceived(int RunId, Guid CallId, string Text, bool IsThinking) : FactoryEvent(RunId);
+/// <summary>Part of a call's stream. <paramref name="Sequence"/> counts the call's deltas from 1.</summary>
+public sealed record LlmDeltaReceived(int RunId, Guid CallId, string Text, bool IsThinking, int Sequence) : FactoryEvent(RunId);
 
 public sealed record LlmCallFinished(int RunId, Guid CallId) : FactoryEvent(RunId);
 

@@ -80,11 +80,13 @@ public static class Fmt
     /// <summary>"31–71h", "1.5–3h" or "20–45m", rounded to what an estimate can say.</summary>
     public static string Range(TimeSpan low, TimeSpan high)
     {
-        if (high.TotalMinutes < 60) return $"{low.TotalMinutes:0}–{Math.Ceiling(high.TotalMinutes):0}m";
-        var hours = high.TotalHours < 10 ? "0.#" : "0";
-        return low.TotalMinutes < 60
-            ? $"{low.TotalMinutes:0}m–{high.TotalHours.ToString(hours)}h"
-            : $"{low.TotalHours.ToString(hours)}–{high.TotalHours.ToString(hours)}h";
+        // Rounded first, so that 59.7 minutes reads as an hour rather than "60m".
+        var (lowMinutes, highMinutes) = (Math.Round(low.TotalMinutes), Math.Ceiling(high.TotalMinutes));
+        if (highMinutes < 60) return $"{lowMinutes:0}–{highMinutes:0}m";
+        var hours = highMinutes < 600 ? "0.#" : "0";
+        return lowMinutes < 60
+            ? $"{lowMinutes:0}m–{(highMinutes / 60).ToString(hours)}h"
+            : $"{(lowMinutes / 60).ToString(hours)}–{(highMinutes / 60).ToString(hours)}h";
     }
 
     /// <summary>What a work estimate is and what it is based on, in a sentence or two.</summary>
