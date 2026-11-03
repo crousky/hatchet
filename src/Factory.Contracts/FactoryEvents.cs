@@ -14,6 +14,9 @@ public sealed record PlanChanged(int RunId) : FactoryEvent(RunId);
 /// <summary>The user asked a working run to pause once its current step finishes.</summary>
 public sealed record PauseRequested(int RunId) : FactoryEvent(RunId);
 
+/// <summary>A model call in progress and when it started.</summary>
+public sealed record LiveCallInfo(LlmCallStarted Call, DateTime StartedAt);
+
 public sealed record LlmCallStarted(int RunId, int? SubtaskId, Guid CallId, AgentRole Role, PipelineStage Stage, string ReasoningEffort, double Temperature, string? Model = null) : FactoryEvent(RunId);
 
 public sealed record LlmDeltaReceived(int RunId, Guid CallId, string Text, bool IsThinking) : FactoryEvent(RunId);

@@ -48,10 +48,13 @@ public sealed class FactoryOrchestrator(
         private CancellationTokenSource? _call;
         private HandOver? _handOver;
 
+        /// <summary>The model call in progress, so a page opened partway through it can still show it.</summary>
+        public LiveCallInfo? LiveCall { get; private set; }
+
         /// <summary>Marks the start of a model call, which the user can then hand to another model.</summary>
-        public void CallStarted(CancellationTokenSource call)
+        public void CallStarted(CancellationTokenSource call, LlmCallStarted started)
         {
-            lock (_callGate) (_call, _handOver) = (call, null);
+            lock (_callGate) (_call, _handOver, LiveCall) = (call, null, new LiveCallInfo(started, DateTime.UtcNow));
         }
 
         /// <summary>Marks the end of the current call. Returns the hand-over the user asked for, if that is why it ended.</summary>
@@ -60,7 +63,7 @@ public sealed class FactoryOrchestrator(
             lock (_callGate)
             {
                 var handOver = _handOver;
-                (_call, _handOver) = (null, null);
+                (_call, _handOver, LiveCall) = (null, null, null);
                 return handOver;
             }
         }
@@ -79,6 +82,9 @@ public sealed class FactoryOrchestrator(
     }
 
     private sealed record HandOver(AgentEngine Engine, string ClaudeModel);
+
+    /// <summary>The model call a run is making, if any.</summary>
+    public LiveCallInfo? GetLiveCall(int runId) => _active.TryGetValue(runId, out var active) ? active.LiveCall : null;
 
     /// <summary>Thrown at a step boundary to stop a pipeline the user paused.</summary>
     private sealed class PausedByUserException : Exception;
@@ -882,10 +888,11 @@ public sealed class FactoryOrchestrator(
             var gate = profile.UsesClaude ? null : _modelGate;
             if (gate is not null) await gate.WaitAsync(ct);
             using var call = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            active?.CallStarted(call);
+            var started = new LlmCallStarted(run.Id, subtaskId, callId, role, profile.Stage, EffortOf(profile), profile.Temperature, ModelOf(profile));
+            active?.CallStarted(call, started);
             try
             {
-                bus.Publish(new LlmCallStarted(run.Id, subtaskId, callId, role, profile.Stage, EffortOf(profile), profile.Temperature, ModelOf(profile)));
+                bus.Publish(started);
                 result = await llm.StreamAsync(settings, new LlmRequest(profile, attemptPrompt, schema),
                     delta => bus.Publish(new LlmDeltaReceived(run.Id, callId, delta.Text, delta.IsThinking)), call.Token);
             }

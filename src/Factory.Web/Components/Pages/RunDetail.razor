@@ -260,6 +260,8 @@ else
         _error = null;
 
         await ReloadAsync();
+        // A call that started before the page opened sent its start event too early to be seen here.
+        if (Orchestrator.GetLiveCall(RunId) is { } live) _liveCall ??= ToLiveCall(live.Call, live.StartedAt);
         if (_run is null) return;
 
         _tab = _run.Status switch
@@ -320,22 +322,25 @@ else
         }
     }
 
+    private static LiveCall ToLiveCall(LlmCallStarted started, DateTime startedAt) => new()
+    {
+        Id = started.CallId,
+        Role = started.Role,
+        Stage = started.Stage,
+        ReasoningEffort = started.ReasoningEffort,
+        Temperature = started.Temperature,
+        Model = started.Model,
+        SubtaskId = started.SubtaskId,
+        StartedAt = startedAt
+    };
+
     /// <summary>Returns true if durable state changed and should be reloaded.</summary>
     private bool Apply(FactoryEvent evt)
     {
         switch (evt)
         {
             case LlmCallStarted started:
-                _liveCall = new LiveCall
-                {
-                    Id = started.CallId,
-                    Role = started.Role,
-                    Stage = started.Stage,
-                    ReasoningEffort = started.ReasoningEffort,
-                    Temperature = started.Temperature,
-                    Model = started.Model,
-                    SubtaskId = started.SubtaskId
-                };
+                _liveCall = ToLiveCall(started, DateTime.UtcNow);
                 return false;
 
             case LlmDeltaReceived delta when _liveCall?.Id == delta.CallId:

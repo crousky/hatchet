@@ -636,8 +636,10 @@ public class OrchestratorTests : IAsyncLifetime
         var run = await StartAsync();
         await _llm.HoldStarted.Task.WaitAsync(TimeSpan.FromSeconds(30));
         _llm.Hold = null;
+        Assert.Equal(AgentRole.TaskPlanner, _orchestrator.GetLiveCall(run.Id)?.Call.Role); // A page opened now can still show it.
         await _orchestrator.HandOverCallAsync(run.Id, AgentEngine.ClaudeCode, "sonnet");
         run = await WaitForAsync(run.Id, RunStatus.ReadyToMerge);
+        Assert.Null(_orchestrator.GetLiveCall(run.Id));
 
         Assert.Equal([false, true], _llm.Engines.Where(e => e.Role == AgentRole.TaskPlanner).Select(e => e.OnClaude));
         var logs = await _store.GetLogsAsync(run.Id);

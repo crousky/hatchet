@@ -59,6 +59,7 @@ Then plan a change with Claude in conversation and ask it to hand the plan to Ha
 | `get_subtask` | One subtask in full: last failure, fix history, review verdict, diff |
 | `approve_plan` | Approves a plan waiting for review in Hatchet, without the commands Hatchet's planner proposed |
 | `pause_run`, `resume_run` | Pause now or after the current step; resume, retry the fixer with guidance, re-verify, restart or skip |
+| `hand_over_call` | Stops the call an agent is making and makes it again on the local model or a Claude model |
 | `cancel_run` | Abandons a run |
 
 Hatchet has to be running for Claude to reach it.

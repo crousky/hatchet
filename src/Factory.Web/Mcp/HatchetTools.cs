@@ -183,6 +183,27 @@ public sealed class HatchetTools(FactoryOrchestrator orchestrator, IRunStore sto
         return await DescribeRunAsync(runId, ct);
     }
 
+    [McpServerTool(Name = "hand_over_call")]
+    [Description("""
+        Stops the model call a working run is making and makes it again on another model. Use it when an agent is taking far too long,
+        for example a local Bug Fixer thinking for an hour. The call starts over on the new model without using an attempt;
+        later calls keep the model set in Hatchet's settings. get_run's currentStep and recentEvents show what is running.
+        """)]
+    public async Task<RunDetails> HandOverCall(
+        [Description("The run's id.")] int runId,
+        [Description("local for the local model, or a Claude model: opus, sonnet or haiku.")] string to,
+        CancellationToken ct = default)
+    {
+        await RequireRunAsync(runId, ct);
+        var target = to.Trim().ToLowerInvariant();
+        if (target != "local" && !ClaudeCodeOptions.Models.Contains(target))
+            throw new McpException($"Unknown model \"{to}\". Use local, {string.Join(", ", ClaudeCodeOptions.Models)}.");
+        await Do(() => target == "local"
+            ? orchestrator.HandOverCallAsync(runId, AgentEngine.Local)
+            : orchestrator.HandOverCallAsync(runId, AgentEngine.ClaudeCode, target));
+        return await DescribeRunAsync(runId, ct);
+    }
+
     [McpServerTool(Name = "cancel_run", Destructive = true)]
     [Description("Cancels a run for good: discards uncommitted changes and returns the repository to its base branch. Commits stay on the run's branch. Prefer pause_run unless the user wants to abandon the run.")]
     public async Task<RunDetails> CancelRun([Description("The run's id.")] int runId, CancellationToken ct = default)
