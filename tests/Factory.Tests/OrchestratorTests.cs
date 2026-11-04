@@ -95,6 +95,35 @@ public class OrchestratorTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Agents_get_the_definitions_of_types_the_subtask_and_its_errors_name()
+    {
+        _repo.Write("src/Contracts/IWidgetStore.cs", "public interface IWidgetStore { int Count { get; } }\n");
+        _repo.Write("src/Contracts/Widget.cs", "public sealed class Widget { public Widget(int state, uint index) { } }\n");
+        _repo.Write("src/Contracts/IGadgetSource.cs", "public interface IGadgetSource { Gadget Next(); }\n");
+        _repo.Write("src/Contracts/Gadget.cs", "public sealed class Gadget { }\n");
+        await _git.StageAllAsync();
+        await _git.CommitStagedAsync("Add contracts");
+        _llm.Enqueue(AgentRole.TaskPlanner, JsonSerializer.Serialize(
+            new TaskGraphResponse([new SubtaskDto(1, "alpha", "Count widgets through IWidgetStore.", [], ["alpha.txt"], ["src/Contracts/IGadgetSource.cs"], "")]),
+            LlmSchemas.SerializerOptions));
+        _llm.Enqueue(AgentRole.ContextSpecifier, Refined());
+        _llm.Enqueue(AgentRole.CodeGenerator, Patch("alpha.txt"));
+        _llm.Enqueue(AgentRole.BugFixer, Patch("alpha.txt", "v2"));
+        _llm.Enqueue(AgentRole.StaticReviewer, Verdict(true));
+        _commands.Results.Enqueue((1, "alpha.cs(3,9): error CS7036: no argument for 'index' of 'Widget.Widget(int, uint)'"));
+
+        var run = await WaitForAsync((await StartAsync()).Id, RunStatus.ReadyToMerge);
+
+        string PromptOf(AgentRole role) => _llm.Calls.Single(c => c.Role == role).Prompt;
+        Assert.Contains("public interface IWidgetStore", PromptOf(AgentRole.ContextSpecifier));
+        Assert.Contains("public interface IWidgetStore", PromptOf(AgentRole.CodeGenerator));
+        Assert.Contains("public sealed class Gadget", PromptOf(AgentRole.CodeGenerator)); // Named by a file the plan gave it.
+        Assert.DoesNotContain("public sealed class Widget", PromptOf(AgentRole.CodeGenerator));
+        Assert.Contains("public sealed class Widget", PromptOf(AgentRole.BugFixer)); // Named only by the error.
+        Assert.Contains(await _store.GetLogsAsync(run.Id), l => l.Message.Contains("definitions of types it names: src/Contracts/Widget.cs"));
+    }
+
+    [Fact]
     public async Task Happy_path_commits_each_subtask_and_reaches_ready_to_merge()
     {
         _llm.Enqueue(AgentRole.TaskPlanner, Plan("alpha", "beta"));

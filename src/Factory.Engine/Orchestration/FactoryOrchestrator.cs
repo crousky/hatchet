@@ -730,10 +730,10 @@ public sealed class FactoryOrchestrator(
         await SetSubtaskStatusAsync(subtask, SubtaskStatus.Refining, ct);
         await SetStageAsync(run, PipelineStage.Refine, subtask.Id, ct);
 
-        var files = RepositoryScanner.ReadFiles(context.Task.RepositoryPath,
-            subtask.TargetFilesToModify.Concat(subtask.TargetFilesToCreate).Concat(subtask.ContextFilesToRead),
-            settings.MaxFileChars, settings.MaxContextChars);
-        var prompt = PromptBuilder.Refine(subtask, context.Task.ArchitectureSpec, run.RepoMap, RepositoryScanner.Render(files));
+        var planned = PlannedFiles(subtask).ToList();
+        var files = RepositoryScanner.ReadFiles(context.Task.RepositoryPath, planned, settings.MaxFileChars, settings.MaxContextChars);
+        var definitions = await ReadDefinitionsAsync(context, subtask, AgentRole.ContextSpecifier, planned, files, ct, subtask.Title, subtask.Description);
+        var prompt = PromptBuilder.Refine(subtask, context.Task.ArchitectureSpec, run.RepoMap, RepositoryScanner.Render(files), definitions);
 
         var refined = await InvokeAgentAsync<RefinedSpecResponse>(context, AgentRole.ContextSpecifier, subtask.Id, prompt, null, ct);
         subtask.RefinedSpecJson = PromptBuilder.ToJson(refined);
@@ -749,16 +749,46 @@ public sealed class FactoryOrchestrator(
         await SetSubtaskStatusAsync(subtask, SubtaskStatus.Building, ct);
         await SetStageAsync(run, PipelineStage.Build, subtask.Id, ct);
 
-        var files = RepositoryScanner.ReadFiles(context.Task.RepositoryPath,
-            subtask.TargetFilesToModify.Concat(subtask.TargetFilesToCreate).Concat(subtask.ContextFilesToRead),
-            settings.MaxFileChars, settings.MaxContextChars);
-        var prompt = PromptBuilder.Build(subtask, RepositoryScanner.Render(files));
+        var planned = PlannedFiles(subtask).ToList();
+        var files = RepositoryScanner.ReadFiles(context.Task.RepositoryPath, planned, settings.MaxFileChars, settings.MaxContextChars);
+        var definitions = await ReadDefinitionsAsync(context, subtask, AgentRole.CodeGenerator, planned, files, ct,
+            subtask.Title, subtask.Description, subtask.RefinedSpecJson);
+        var prompt = PromptBuilder.Build(subtask, RepositoryScanner.Render(files), definitions);
 
         var patch = await InvokeAgentAsync<FilePatchSetResponse>(
             context, AgentRole.CodeGenerator, subtask.Id, prompt,
             p => p.Operations.Count == 0 ? "The operations list is empty, but this subtask requires file changes." : null,
             ct);
         return await ApplyPatchAsync(context, subtask, patch, PipelineStage.Build, ct);
+    }
+
+    private const int MaxDefinitionFiles = 10;
+
+    private static IEnumerable<string> PlannedFiles(FactorySubtask subtask) =>
+        subtask.TargetFilesToModify.Concat(subtask.TargetFilesToCreate).Concat(subtask.ContextFilesToRead);
+
+    /// <summary>
+    /// Reads the files that define the types the given texts name, and then those the agent's files name, such as the
+    /// parameter types of an interface it implements. Files the agent already sees are left out, and the rest fit in
+    /// what is left of the context budget. Returns them rendered, or an empty string if there are none.
+    /// </summary>
+    private async Task<string> ReadDefinitionsAsync(PipelineContext context, FactorySubtask subtask, AgentRole role,
+        IReadOnlyList<string> planned, IReadOnlyList<ContextFile> files, CancellationToken ct, params string?[] texts)
+    {
+        var settings = context.Settings;
+        var named = texts.Concat(files.Select(f => f.Content)).Where(t => !string.IsNullOrWhiteSpace(t));
+        var paths = DefinitionFinder.Find(context.Task.RepositoryPath, string.Join('\n', named), planned, MaxDefinitionFiles);
+        var budget = settings.MaxContextChars - files.Sum(f => f.Content?.Length ?? 0);
+        if (paths.Count == 0 || budget <= 0) return "";
+
+        var definitions = RepositoryScanner.ReadFiles(context.Task.RepositoryPath, paths, settings.MaxFileChars, budget)
+            .Where(f => f.Content is { Length: > 0 })
+            .ToList();
+        if (definitions.Count == 0) return "";
+
+        await LogAsync(context.Run.Id, subtask.Id, AgentLogKind.Info, context.Run.CurrentStage,
+            $"Gave the {AgentProfiles.Resolve(settings, role).DisplayName} the definitions of types it names: {string.Join(", ", definitions.Select(f => f.RelativePath))}.", ct);
+        return RepositoryScanner.Render(definitions);
     }
 
     /// <summary>Returns false if the fix itself was unusable. The attempt still counts.</summary>
@@ -773,10 +803,12 @@ public sealed class FactoryOrchestrator(
 
         await git.StageAllAsync(ct);
         var changed = await git.GetStagedFilesAsync(ct);
-        var files = RepositoryScanner.ReadFiles(context.Task.RepositoryPath,
-            changed.Concat(subtask.TargetFilesToModify).Concat(subtask.TargetFilesToCreate).Concat(subtask.ContextFilesToRead),
-            settings.MaxFileChars, settings.MaxContextChars);
-        var prompt = PromptBuilder.Fix(subtask, subtask.LastFailure ?? "(no failure was recorded)", RepositoryScanner.Render(files), subtask.HumanGuidance);
+        var planned = changed.Concat(PlannedFiles(subtask)).ToList();
+        var files = RepositoryScanner.ReadFiles(context.Task.RepositoryPath, planned, settings.MaxFileChars, settings.MaxContextChars);
+        // The errors name what the fix got wrong, so the types they name come first.
+        var definitions = await ReadDefinitionsAsync(context, subtask, AgentRole.BugFixer, planned, files, ct,
+            subtask.LastFailure, subtask.HumanGuidance, subtask.Title, subtask.Description, subtask.RefinedSpecJson);
+        var prompt = PromptBuilder.Fix(subtask, subtask.LastFailure ?? "(no failure was recorded)", RepositoryScanner.Render(files), subtask.HumanGuidance, definitions);
 
         Func<FilePatchSetResponse, string?> validate = p => p.Operations.Count == 0 ? "The operations list is empty, so nothing would change and the failure would repeat." : null;
         var claude = ClaudeCodeOptions.ModelLabel(AgentProfiles.Resolve(settings, AgentRole.BugFixer).ClaudeModel);
