@@ -480,6 +480,136 @@ public class OrchestratorTests : IAsyncLifetime
         await WaitForAsync(run.Id, RunStatus.ReadyToMerge);
     }
 
+    /// <summary>A Code Generator answer that writes these files whole, then loops on a made-up table in data.csv.</summary>
+    private static string LoopingPatch(params string[] wholeFiles)
+    {
+        var whole = string.Concat(wholeFiles.Select(f => $$"""{"relativeFilePath": "{{f}}", "action": "OVERWRITE", "fileContent": "code"}, """));
+        var rows = string.Join("\\n", Enumerable.Range(0, 300).Select(i => $"IEEE REGISTRY,00-27-{i:X2},Apple Inc.,Cupertino, CA"));
+        return $$"""{"summaryOfChanges": "Wrote the files.", "operations": [{{whole}}{"relativeFilePath": "data.csv", "action": "CREATE", "fileContent": "{{rows}}""";
+    }
+
+    private List<(double Temperature, string Prompt)> RequestsOf(AgentRole role) =>
+        _llm.Requests.Where(r => r.Role == role).Select(r => (r.Temperature, r.Prompt)).ToList();
+
+    [Fact]
+    public async Task A_looping_answer_is_stopped_and_tried_again_with_more_varied_sampling()
+    {
+        _llm.Enqueue(AgentRole.TaskPlanner, Plan("alpha"));
+        _llm.Enqueue(AgentRole.ContextSpecifier, Refined());
+        _llm.Enqueue(AgentRole.CodeGenerator, LoopingPatch(), Patch("alpha.txt"));
+        _llm.Enqueue(AgentRole.StaticReviewer, Verdict(true));
+
+        var run = await WaitForAsync((await StartAsync()).Id, RunStatus.ReadyToMerge);
+
+        var builds = RequestsOf(AgentRole.CodeGenerator);
+        Assert.Equal([0.2, 0.7], builds.Select(b => b.Temperature));
+        Assert.DoesNotContain("previous answer", builds[0].Prompt);
+        Assert.Contains("Your previous answer to this was stopped", builds[1].Prompt);
+        Assert.Contains("Code Generator got stuck repeating itself in its answer: 64 lines in a row like `IEEE REGISTRY,00-27-", builds[1].Prompt);
+        var logs = await _store.GetLogsAsync(run.Id);
+        Assert.Contains(logs, l => l.Kind == AgentLogKind.LlmCall && l is { Succeeded: false } && l.Message.Contains("It was stopped after about"));
+        Assert.Contains(logs, l => l.Message.Contains("Trying once more at temperature 0.7"));
+        Assert.False(File.Exists(_repo.File("data.csv")));
+    }
+
+    [Fact]
+    public async Task A_call_that_loops_again_after_the_retry_goes_to_claude()
+    {
+        _llm.Enqueue(AgentRole.TaskPlanner, Plan("alpha"));
+        _llm.Enqueue(AgentRole.ContextSpecifier, Refined());
+        _llm.Enqueue(AgentRole.CodeGenerator, LoopingPatch(), LoopingPatch(), Patch("alpha.txt"));
+        _llm.Enqueue(AgentRole.StaticReviewer, Verdict(true));
+
+        var run = await WaitForAsync((await StartAsync()).Id, RunStatus.ReadyToMerge);
+
+        Assert.Equal([false, false, true], _llm.Engines.Where(e => e.Role == AgentRole.CodeGenerator).Select(e => e.OnClaude));
+        Assert.Contains(await _store.GetLogsAsync(run.Id), l => l.Message.Contains("The retry went the same way, so Claude Opus takes this call."));
+    }
+
+    [Fact]
+    public async Task Without_claude_a_second_loop_pauses_with_fitting_advice_and_guidance_reaches_the_code_generator()
+    {
+        _settings.Settings.EscalateRunawaysToClaude = false;
+        _llm.Enqueue(AgentRole.TaskPlanner, Plan("alpha"));
+        _llm.Enqueue(AgentRole.ContextSpecifier, Refined());
+        _llm.Enqueue(AgentRole.CodeGenerator, LoopingPatch(), LoopingPatch());
+
+        var run = await WaitForAsync((await StartAsync()).Id, RunStatus.NeedsHuman);
+
+        Assert.Contains("got stuck repeating itself", run.PauseReason);
+        Assert.Contains("Another try with more varied sampling went the same way.", run.PauseReason);
+        Assert.Contains("A bigger context window won't help", run.PauseReason);
+        Assert.Contains("\"Hand runaway calls to Claude\"", run.PauseReason);
+        Assert.DoesNotContain("Context Length", run.PauseReason);
+        Assert.All(_llm.Engines, e => Assert.False(e.OnClaude));
+
+        _llm.Enqueue(AgentRole.CodeGenerator, Patch("alpha.txt"));
+        _llm.Enqueue(AgentRole.StaticReviewer, Verdict(true));
+        await _orchestrator.ResumeAsync(run.Id, HumanDecision.Resume, "Write only five rows of data.");
+        await WaitForAsync(run.Id, RunStatus.ReadyToMerge);
+
+        Assert.Contains("Write only five rows of data.", RequestsOf(AgentRole.CodeGenerator)[^1].Prompt);
+    }
+
+    [Fact]
+    public async Task Whole_files_from_a_cut_off_build_are_kept_and_only_the_rest_is_asked_for()
+    {
+        _llm.Enqueue(AgentRole.TaskPlanner, JsonSerializer.Serialize(
+            new TaskGraphResponse([new SubtaskDto(1, "oui", "Build the lookup and its seed data.", [], ["alpha.txt", "data.csv"], [], "")]),
+            LlmSchemas.SerializerOptions));
+        _llm.Enqueue(AgentRole.ContextSpecifier, Refined());
+        _llm.Enqueue(AgentRole.CodeGenerator, LoopingPatch("alpha.txt"), Patch("data.csv", "Registry,Assignment"));
+        _llm.Enqueue(AgentRole.StaticReviewer, Verdict(true));
+
+        var run = await WaitForAsync((await StartAsync()).Id, RunStatus.ReadyToMerge);
+
+        Assert.Equal("code", await File.ReadAllTextAsync(_repo.File("alpha.txt")));
+        Assert.Equal("Registry,Assignment", await File.ReadAllTextAsync(_repo.File("data.csv")));
+        var builds = RequestsOf(AgentRole.CodeGenerator);
+        Assert.Equal([0.2, 0.2], builds.Select(b => b.Temperature)); // Keeping what was whole is the first step, before any retry.
+        Assert.Contains("Write only the files still missing: data.csv.", builds[1].Prompt);
+        Assert.Contains("already written: alpha.txt", builds[1].Prompt);
+        Assert.Contains(await _store.GetLogsAsync(run.Id), l => l.Message.Contains("Kept the 1 whole file from the cut-off answer, and asked the Code Generator for the rest: data.csv."));
+        Assert.Equal("Wrote the files. Wrote data.csv", (await _store.GetSubtasksAsync(run.Id)).Single().SummaryOfChanges);
+    }
+
+    [Fact]
+    public async Task An_answer_that_fills_a_big_enough_window_is_tried_again_instead_of_blaming_the_window()
+    {
+        _llm.ContextLength = 65_536;
+        _llm.FinishReasons.Enqueue("length");
+        _llm.Enqueue(AgentRole.TaskPlanner, "", Plan("alpha"));
+        _llm.Enqueue(AgentRole.ContextSpecifier, Refined());
+        _llm.Enqueue(AgentRole.CodeGenerator, Patch("alpha.txt"));
+        _llm.Enqueue(AgentRole.StaticReviewer, Verdict(true));
+
+        var run = await WaitForAsync((await StartAsync()).Id, RunStatus.ReadyToMerge);
+
+        Assert.Equal([0.6, 0.9], RequestsOf(AgentRole.TaskPlanner).Select(r => Math.Round(r.Temperature, 2)));
+        Assert.Contains(await _store.GetLogsAsync(run.Id), l => l.Message.Contains("Task Planner filled the context window.")
+                                                               && l.Message.Contains("though the window is already 65,536 tokens"));
+    }
+
+    [Fact]
+    public async Task Type_definitions_are_left_out_when_the_window_has_no_room_for_them()
+    {
+        _repo.Write("src/Contracts/IWidgetStore.cs", "public interface IWidgetStore { int Count { get; } }\n");
+        await _git.StageAllAsync();
+        await _git.CommitStagedAsync("Add contracts");
+        _llm.ContextLength = 16_500;
+        _llm.Enqueue(AgentRole.TaskPlanner, JsonSerializer.Serialize(
+            new TaskGraphResponse([new SubtaskDto(1, "alpha", "Count widgets through IWidgetStore.", [], ["alpha.txt"], [], "")]),
+            LlmSchemas.SerializerOptions));
+        _llm.Enqueue(AgentRole.ContextSpecifier, Refined());
+        _llm.Enqueue(AgentRole.CodeGenerator, Patch("alpha.txt"));
+        _llm.Enqueue(AgentRole.StaticReviewer, Verdict(true));
+
+        var run = await WaitForAsync((await StartAsync()).Id, RunStatus.ReadyToMerge);
+
+        Assert.DoesNotContain("public interface IWidgetStore", RequestsOf(AgentRole.CodeGenerator).Single().Prompt);
+        Assert.Contains(await _store.GetLogsAsync(run.Id), l => l.Message.Contains("Left the type definitions out of the Code Generator's prompt"));
+    }
+
     [Fact]
     public async Task Agents_routed_to_claude_are_logged_with_the_claude_model()
     {
@@ -1177,6 +1307,14 @@ public class OrchestratorTests : IAsyncLifetime
         public bool ClaudeOffline { get; set; }
         public List<(AgentRole Role, bool OnClaude)> Engines { get; } = [];
         public string FinishReason { get; set; } = "stop";
+
+        /// <summary>Finish reasons for the next calls, before falling back to <see cref="FinishReason"/>.</summary>
+        public Queue<string> FinishReasons { get; } = new();
+
+        /// <summary>The context window the server reports, or null when it doesn't say.</summary>
+        public int? ContextLength { get; set; }
+
+        public List<(AgentRole Role, double Temperature, string Prompt)> Requests { get; } = [];
         public TaskCompletionSource HangStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
         /// <summary>Holds calls for this role until Release completes, so a test can act mid-call.</summary>
@@ -1205,7 +1343,11 @@ public class OrchestratorTests : IAsyncLifetime
                 await Task.Delay(Timeout.InfiniteTimeSpan, ct);
             }
             if (role == Offline) throw new LlmException("Connection refused.");
-            lock (_responses) Engines.Add((role, request.Profile.UsesClaude));
+            lock (_responses)
+            {
+                Engines.Add((role, request.Profile.UsesClaude));
+                Requests.Add((role, request.Profile.Temperature, request.UserPrompt));
+            }
             if (request.Profile.UsesClaude && ClaudeOffline) throw new LlmException("Claude Code isn't logged in.");
             if (role == Hold)
             {
@@ -1216,19 +1358,23 @@ public class OrchestratorTests : IAsyncLifetime
             if (request.Profile.UsesClaude && ClaudeDelay > TimeSpan.Zero) await Task.Delay(ClaudeDelay, ct);
 
             string content;
+            string finishReason;
             lock (_responses)
             {
+                finishReason = FinishReasons.TryDequeue(out var next) ? next : FinishReason;
                 Calls.Add((role, request.UserPrompt));
                 content = _responses.TryGetValue(role, out var queue) && queue.Count > 0
                     ? queue.Dequeue()
                     : throw new LlmException($"No scripted response left for {role}.");
             }
             onDelta?.Invoke(new LlmDelta(content, false));
-            return new LlmResult(content, "", 5261, 2931, FinishReason, TimeSpan.FromMilliseconds(1));
+            return new LlmResult(content, "", 5261, 2931, finishReason, TimeSpan.FromMilliseconds(1));
         }
 
         public Task<IReadOnlyList<string>> ListModelsAsync(string baseUrl, CancellationToken ct) =>
             Task.FromResult<IReadOnlyList<string>>(["qwen3.8"]);
+
+        public Task<int?> GetContextLengthAsync(string baseUrl, string modelId, CancellationToken ct) => Task.FromResult(ContextLength);
     }
 
     private sealed class InMemorySettingsStore : ISettingsStore

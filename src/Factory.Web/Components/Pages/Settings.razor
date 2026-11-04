@@ -306,6 +306,13 @@
                         <input autocomplete="off" data-1p-ignore data-lpignore="true" id="fix-limit" type="number" min="0" step="1" @bind="_settings.LocalFixTimeLimitMinutes" />
                         <div class="hint">A local model can keep thinking for hours without failing, so it never hands over. After this long the fix stops and Claude Code takes it. 0 sets no limit.</div>
                     </div>
+                    <label class="toggle-row">
+                        <input autocomplete="off" data-1p-ignore data-lpignore="true" type="checkbox" class="toggle" @bind="_settings.EscalateRunawaysToClaude" />
+                        <div>
+                            <div class="toggle-title">Hand runaway calls to Claude</div>
+                            <div class="hint">When a local agent gets stuck repeating itself or fills its context window, Hatchet stops it and tries once more with more varied sampling. If that goes the same way, Claude Code takes the call instead of the run pausing.</div>
+                        </div>
+                    </label>
                     <div class="field">
                         <label for="attempts">Attempts per model call</label>
                         <input autocomplete="off" data-1p-ignore data-lpignore="true" id="attempts" type="number" min="1" max="10" @bind="_settings.MaxLlmAttempts" />

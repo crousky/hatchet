@@ -17,6 +17,7 @@ public static class AgentProfiles
         - Write each description so an engineer with no other context could implement it: what to build, how it fits the architecture, and what done looks like.
         - verificationCommand is the shell command proving that subtask works, such as "dotnet build && dotnet test" or "npm test". Use an empty string if the project-wide check described below is enough.
         - Number order from 1 with no gaps.
+        - Never plan a subtask that has a model type out long data: registries, lookup tables, word lists, fixtures of more than a few dozen rows, vendored libraries or generated code. Plan a script or build step that downloads or generates it, and at most a small sample for tests and offline builds. A model can't recall facts like registry assignments, hashes or version lists reliably.
 
         {JsonOnly}
         """);
@@ -33,6 +34,8 @@ public static class AgentProfiles
         - testCases: named unit tests with their inputs and expected results.
         - edgeCaseChecks: the specific edge cases the implementation must handle.
         - Stay within the subtask. Do not specify work that belongs to other subtasks.
+        - If human guidance is included, follow it.
+        - For a data file, list the exact rows it holds or bound it to a few dozen. Never ask for long data from memory, such as a registry or lookup table; specify a script that fetches or generates it. Tests use fixtures they define themselves, not facts recalled from memory.
 
         {JsonOnly}
         """);
@@ -47,6 +50,8 @@ public static class AgentProfiles
         - relativeFilePath is relative to the repository root, with forward slashes. Never target .git or a path outside the repository.
         - The code must compile and the tests must pass. Include every using, import and project reference it needs.
         - Write only what the subtask requires. Match the style of the existing code.
+        - Write data files with only the rows the specification names, a few dozen at most. Never enumerate ranges or sequences, or recite tables, registries or other long data from memory. If complete data is needed, write the code or script that fetches or generates it instead.
+        - If human guidance is included, follow it.
         - summaryOfChanges: one or two sentences describing what you did.
 
         {JsonOnly}

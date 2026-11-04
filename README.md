@@ -41,7 +41,18 @@ Roles differ by system prompt, JSON schema, temperature and `reasoning_effort`, 
 
 Once three subtasks are done, the run header shows a likely range for the working time left. It's based on how long the finished subtasks took, and time paused doesn't count. It narrows as more subtasks finish.
 
-If a subtask runs out of attempts, or the model server goes away, the run pauses and asks you what to do. You can retry the Fixer with your own guidance, re-verify after fixing it by hand, restart the subtask, skip it, or cancel the run. Runs interrupted by a restart pause the same way and can be resumed.
+If a subtask runs out of attempts, or the model server goes away, the run pauses and asks you what to do. You can retry with your own guidance, re-verify after fixing it by hand, restart the subtask, skip it, or cancel the run. Your guidance goes to every agent that works on the subtask from then on. Runs interrupted by a restart pause the same way and can be resumed.
+
+### Runaway answers
+
+A local model at low temperature sometimes gets stuck repeating itself. It might count up through made-up table rows, or restate one thought over and over until its context window is full. Hatchet watches each answer and its thinking as they stream in. When many lines in a row differ only in their numbers, or the latest text compresses far better than any real code, it stops the call, usually within a few thousand tokens. It handles an answer that fills a context window that's already 64k or bigger the same way, since a bigger window wouldn't help. It then works through these steps:
+
+1. **Keep the whole files.** A cut-off build keeps every file it finished. The Code Generator is then asked for only the missing files, so one oversized file doesn't cost the whole subtask.
+2. **Try again, differently.** The call runs once more at a higher temperature, with a note on what went wrong and a reminder to keep data files short.
+3. **Hand it to Claude.** If that goes the same way, Claude takes the call. You can turn this off in Settings.
+4. **Pause.** If nothing works, the run pauses. The message says which steps were tried and what to do next.
+
+When the window really is too small, the pause says so and tells you how to load the model with a bigger one. Before a call, Hatchet leaves the type definitions out of a prompt that wouldn't leave the model room to answer. The planner and agents are also told never to type out long data from memory, such as registries or lookup tables. Instead they plan a script that fetches the data, plus a small sample.
 
 ### Projects and the queue
 

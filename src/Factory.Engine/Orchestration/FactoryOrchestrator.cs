@@ -843,15 +843,24 @@ public sealed class FactoryOrchestrator(
 
         var planned = PlannedFiles(subtask).ToList();
         var files = RepositoryScanner.ReadFiles(context.Task.RepositoryPath, planned, settings.MaxFileChars, settings.MaxContextChars);
-        var definitions = await ReadDefinitionsAsync(context, subtask, AgentRole.ContextSpecifier, planned, files, ct, subtask.Title, subtask.Description);
-        var prompt = PromptBuilder.Refine(subtask, context.Task.ArchitectureSpec, run.RepoMap, RepositoryScanner.Render(files), definitions);
+        var definitions = await ReadDefinitionsAsync(context, subtask, AgentRole.ContextSpecifier, planned, files, ct, subtask.Title, subtask.Description, subtask.HumanGuidance);
+        var fileContext = RepositoryScanner.Render(files);
+        var prompt = await FitDefinitionsAsync(context, subtask.Id, AgentRole.ContextSpecifier, definitions,
+            d => PromptBuilder.Refine(subtask, context.Task.ArchitectureSpec, run.RepoMap, fileContext, d, subtask.HumanGuidance), ct);
 
         var refined = await InvokeAgentAsync<RefinedSpecResponse>(context, AgentRole.ContextSpecifier, subtask.Id, prompt, null, ct);
         subtask.RefinedSpecJson = PromptBuilder.ToJson(refined);
         await store.UpdateSubtaskAsync(subtask, ct);
     }
 
-    /// <summary>Returns false if the model's patch was rejected, which sends it to the Fixer.</summary>
+    /// <summary>Calls to the Code Generator for one subtask's build, when each answer is cut off but keeps some whole files.</summary>
+    private const int MaxBuildParts = 4;
+
+    /// <summary>
+    /// Returns false if the model's patch was rejected, which sends it to the Fixer. An answer that loops or fills the
+    /// context window keeps the files it finished, and the Code Generator is asked again for only the rest, so one
+    /// oversized file doesn't cost the whole subtask.
+    /// </summary>
     private async Task<bool> BuildAsync(PipelineContext context, FactorySubtask subtask, CancellationToken ct)
     {
         var (run, settings) = (context.Run, context.Settings);
@@ -861,16 +870,55 @@ public sealed class FactoryOrchestrator(
         await SetStageAsync(run, PipelineStage.Build, subtask.Id, ct);
 
         var planned = PlannedFiles(subtask).ToList();
-        var files = RepositoryScanner.ReadFiles(context.Task.RepositoryPath, planned, settings.MaxFileChars, settings.MaxContextChars);
-        var definitions = await ReadDefinitionsAsync(context, subtask, AgentRole.CodeGenerator, planned, files, ct,
-            subtask.Title, subtask.Description, subtask.RefinedSpecJson);
-        var prompt = PromptBuilder.Build(subtask, RepositoryScanner.Render(files), definitions);
+        var targets = subtask.TargetFilesToCreate.Concat(subtask.TargetFilesToModify).Select(NormalizePath).ToList();
+        var written = new List<string>();
+        var summaries = new List<string>();
+        IReadOnlyList<string> remaining = [];
+        string? cutOff = null;
+        for (var part = 1; ; part++)
+        {
+            var files = RepositoryScanner.ReadFiles(context.Task.RepositoryPath, planned, settings.MaxFileChars, settings.MaxContextChars);
+            var definitions = await ReadDefinitionsAsync(context, subtask, AgentRole.CodeGenerator, planned, files, ct,
+                subtask.Title, subtask.Description, subtask.RefinedSpecJson, subtask.HumanGuidance);
+            var fileContext = RepositoryScanner.Render(files);
+            var prompt = await FitDefinitionsAsync(context, subtask.Id, AgentRole.CodeGenerator, definitions, d => cutOff is null
+                ? PromptBuilder.Build(subtask, fileContext, d, subtask.HumanGuidance)
+                : PromptBuilder.BuildRest(subtask, fileContext, written, remaining, cutOff, d, subtask.HumanGuidance), ct);
 
-        var patch = await InvokeAgentAsync<FilePatchSetResponse>(
-            context, AgentRole.CodeGenerator, subtask.Id, prompt,
-            p => p.Operations.Count == 0 ? "The operations list is empty, but this subtask requires file changes." : null,
-            ct);
-        return await ApplyPatchAsync(context, subtask, patch, PipelineStage.Build, ct);
+            var answer = await AskAgentAsync<FilePatchSetResponse>(
+                context, AgentRole.CodeGenerator, subtask.Id, prompt,
+                p => p.Operations.Count == 0 ? "The operations list is empty, but this subtask requires file changes." : null,
+                ct, salvage: part < MaxBuildParts ? KeepWholeFiles : null);
+            var whole = answer.CutOff is null;
+            if (!await ApplyPatchAsync(context, subtask, answer.Value, PipelineStage.Build, ct, finished: whole)) return false;
+            summaries.Add(answer.Value.SummaryOfChanges.Trim());
+            if (whole) break;
+
+            written.AddRange(answer.Value.Operations.Select(o => NormalizePath(o.RelativeFilePath)));
+            remaining = targets.Concat(answer.CutOffPath is { } path ? [NormalizePath(path)] : [])
+                .Where(p => !written.Contains(p, StringComparer.OrdinalIgnoreCase))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            // Nothing planned is missing, so the check and the reviewer judge what was kept.
+            if (remaining.Count == 0) break;
+            cutOff = answer.CutOff;
+            await LogAsync(run.Id, subtask.Id, AgentLogKind.Info, PipelineStage.Build,
+                $"Kept the {answer.Value.Operations.Count} whole {(answer.Value.Operations.Count == 1 ? "file" : "files")} from the cut-off answer, and asked the Code Generator for the rest: {string.Join(", ", remaining)}.", ct);
+        }
+
+        subtask.SummaryOfChanges = string.Join(" ", summaries.Where(s => s.Length > 0));
+        await store.UpdateSubtaskAsync(subtask, ct);
+        return true;
+    }
+
+    private static (FilePatchSetResponse Value, string? CutOffPath)? KeepWholeFiles(string content) =>
+        StructuredOutputParser.SalvagePatch(content) is { } kept ? (kept.Patch, kept.CutOffPath) : null;
+
+    private static string NormalizePath(string path)
+    {
+        var normal = path.Replace('\\', '/').Trim();
+        while (normal.StartsWith("./", StringComparison.Ordinal)) normal = normal[2..];
+        return normal.TrimStart('/');
     }
 
     private const int MaxDefinitionFiles = 10;
@@ -919,7 +967,9 @@ public sealed class FactoryOrchestrator(
         // The errors name what the fix got wrong, so the types they name come first.
         var definitions = await ReadDefinitionsAsync(context, subtask, AgentRole.BugFixer, planned, files, ct,
             subtask.LastFailure, subtask.HumanGuidance, subtask.Title, subtask.Description, subtask.RefinedSpecJson);
-        var prompt = PromptBuilder.Fix(subtask, subtask.LastFailure ?? "(no failure was recorded)", RepositoryScanner.Render(files), subtask.HumanGuidance, definitions);
+        var fileContext = RepositoryScanner.Render(files);
+        var prompt = await FitDefinitionsAsync(context, subtask.Id, AgentRole.BugFixer, definitions,
+            d => PromptBuilder.Fix(subtask, subtask.LastFailure ?? "(no failure was recorded)", fileContext, subtask.HumanGuidance, d), ct);
 
         Func<FilePatchSetResponse, string?> validate = p => p.Operations.Count == 0 ? "The operations list is empty, so nothing would change and the failure would repeat." : null;
         var claude = ClaudeCodeOptions.ModelLabel(AgentProfiles.Resolve(settings, AgentRole.BugFixer).ClaudeModel);
@@ -995,7 +1045,9 @@ public sealed class FactoryOrchestrator(
         if (subtask.FixHistory.Count > MaxFixHistory) subtask.FixHistory.RemoveAt(0);
     }
 
-    private async Task<bool> ApplyPatchAsync(PipelineContext context, FactorySubtask subtask, FilePatchSetResponse patch, PipelineStage stage, CancellationToken ct)
+    /// <param name="finished">False for part of a build that is still missing files, so a restart builds the subtask again.</param>
+    private async Task<bool> ApplyPatchAsync(PipelineContext context, FactorySubtask subtask, FilePatchSetResponse patch, PipelineStage stage, CancellationToken ct,
+        bool finished = true)
     {
         var run = context.Run;
         PatchResult result;
@@ -1011,8 +1063,11 @@ public sealed class FactoryOrchestrator(
             return false;
         }
 
-        subtask.SummaryOfChanges = patch.SummaryOfChanges;
-        await store.UpdateSubtaskAsync(subtask, ct);
+        if (finished)
+        {
+            subtask.SummaryOfChanges = patch.SummaryOfChanges;
+            await store.UpdateSubtaskAsync(subtask, ct);
+        }
         await LogAsync(run.Id, subtask.Id, AgentLogKind.Info, stage, $"Applied {result.Applied.Count} file operations: {string.Join(", ", result.Applied)}", ct);
         foreach (var warning in result.Warnings) await LogAsync(run.Id, subtask.Id, AgentLogKind.Warning, stage, warning, ct);
 
@@ -1131,10 +1186,26 @@ public sealed class FactoryOrchestrator(
 
     // ---- Agents and commands ----
 
+    /// <summary>
+    /// An agent's answer. One kept from a cut-off answer says what cut it off and, if known, the file it was writing.
+    /// </summary>
+    private sealed record AgentAnswer<T>(T Value, string? CutOff = null, string? CutOffPath = null);
+
     /// <param name="localTimeLimit">How long the calls on the local model may take in all, counted from now. Past it, a
     /// <see cref="TimeLimitException"/> is thrown. A call handed to Claude isn't limited.</param>
     private async Task<T> InvokeAgentAsync<T>(PipelineContext context, AgentRole role, int? subtaskId, string prompt, Func<T, string?>? validate, CancellationToken ct,
-        bool onClaude = false, TimeSpan? localTimeLimit = null)
+        bool onClaude = false, TimeSpan? localTimeLimit = null) =>
+        (await AskAgentAsync(context, role, subtaskId, prompt, validate, ct, onClaude, localTimeLimit)).Value;
+
+    /// <summary>
+    /// Calls an agent and parses its answer, retrying unusable output. Output that loops, or fills a context window
+    /// that is already big enough, goes down a ladder before the run pauses: whatever <paramref name="salvage"/> can
+    /// keep is returned; otherwise the call is tried once more with more varied sampling and a note on what went wrong,
+    /// then on Claude if the settings allow. Repeating the same call unchanged would only fail the same way.
+    /// </summary>
+    /// <param name="salvage">Keeps the usable part of a cut-off answer, with the path it was writing when it stopped.</param>
+    private async Task<AgentAnswer<T>> AskAgentAsync<T>(PipelineContext context, AgentRole role, int? subtaskId, string prompt, Func<T, string?>? validate, CancellationToken ct,
+        bool onClaude = false, TimeSpan? localTimeLimit = null, Func<string, (T Value, string? CutOffPath)?>? salvage = null)
     {
         var (run, settings) = (context.Run, context.Settings);
         var profile = AgentProfiles.Resolve(settings, role);
@@ -1144,6 +1215,8 @@ public sealed class FactoryOrchestrator(
         var lastError = "";
         var deadline = DateTime.UtcNow + localTimeLimit;
         _active.TryGetValue(run.Id, out var active);
+        // What went wrong with each answer that looped or filled the window. Each one moves the call a step down the ladder.
+        var runaways = new List<string>();
 
         for (var attempt = 1; attempt <= settings.MaxLlmAttempts; attempt++)
         {
@@ -1151,7 +1224,7 @@ public sealed class FactoryOrchestrator(
             if (attempt > 1) await Task.Delay(TimeSpan.FromSeconds(1), ct);
 
             var callId = Guid.NewGuid();
-            LlmResult result;
+            LlmResult? result = null;
             // Only the local model is shared. Claude calls from separate runs can overlap.
             var gate = profile.UsesClaude ? null : _modelGate;
             if (gate is not null) await gate.WaitAsync(ct);
@@ -1165,6 +1238,10 @@ public sealed class FactoryOrchestrator(
             active?.CallStarted(call, started);
             var elapsed = Stopwatch.StartNew();
             var deltas = 0;
+            var guard = new RepetitionGuard();
+            RepetitionVerdict? loop = null;
+            var answer = new StringBuilder();
+            var thinking = new StringBuilder();
             try
             {
                 bus.Publish(started);
@@ -1172,7 +1249,16 @@ public sealed class FactoryOrchestrator(
                 {
                     active?.Streamed(delta, ++deltas);
                     bus.Publish(new LlmDeltaReceived(run.Id, callId, delta.Text, delta.IsThinking, deltas));
+                    if (loop is not null) return;
+                    (delta.IsThinking ? thinking : answer).Append(delta.Text);
+                    if (guard.Push(delta.Text, delta.IsThinking) is not { } verdict) return;
+                    loop = verdict;
+                    call.Cancel();
                 }, call.Token);
+            }
+            // Stopped because it was looping. What streamed so far stands in for the answer.
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested && loop is not null)
+            {
             }
             // A call that is stopped is still logged with how long it ran, as that time counts towards the run's.
             catch (OperationCanceledException) when (!ct.IsCancellationRequested && active?.CallEnded() is { } handOver)
@@ -1213,25 +1299,86 @@ public sealed class FactoryOrchestrator(
                 gate?.Release();
             }
 
-            run.PromptTokens += result.PromptTokens;
-            run.CompletionTokens += result.CompletionTokens;
+            if (loop is not null)
+            {
+                // A stopped stream sends no token counts, so the output is estimated from its length.
+                var tokens = result is { CompletionTokens: > 0 } finished ? finished.CompletionTokens : ContextWindow.EstimateTokens(answer.Length + thinking.Length);
+                result = new LlmResult(answer.ToString(), thinking.ToString(), result?.PromptTokens ?? 0, tokens, "loop", result?.Duration ?? elapsed.Elapsed);
+            }
+            var outcome = result!;
+
+            run.PromptTokens += outcome.PromptTokens;
+            run.CompletionTokens += outcome.CompletionTokens;
             await store.UpdateRunAsync(run, ct);
 
-            var (value, parseError) = TryParse(result, validate);
+            var runaway = loop is not null
+                ? $"{loop.Describe(profile.DisplayName)} It was stopped after about {outcome.CompletionTokens:N0} tokens and {DescribeDuration(outcome.Duration)}."
+                : outcome.FinishReason == "length"
+                    ? await DescribeFullWindowAsync(profile, settings, outcome, ct)
+                    : null;
+            if (runaway is not null)
+            {
+                await AppendLlmLogAsync(profile, run.Id, subtaskId, attemptPrompt, outcome, false, runaway, ct);
+                bus.Publish(new LlmCallFinished(run.Id, callId));
+                if (salvage?.Invoke(outcome.Content) is { } kept) return new AgentAnswer<T>(kept.Value, runaway, kept.CutOffPath);
+
+                runaways.Add(runaway);
+                attempt--; // Each step down the ladder changes the call, so it isn't one of the repeated attempts.
+                attemptPrompt = PromptBuilder.AfterRunaway(prompt, runaway);
+                if (!profile.UsesClaude && runaways.Count == 1)
+                {
+                    profile = profile with { Temperature = RetryTemperature(profile.Temperature) };
+                    await LogAsync(run.Id, subtaskId, AgentLogKind.Warning, profile.Stage,
+                        $"{runaway} Trying once more at temperature {profile.Temperature:0.0#}, with a note on what went wrong.", ct);
+                    continue;
+                }
+                if (!profile.UsesClaude && settings.EscalateRunawaysToClaude)
+                {
+                    profile = profile with { Engine = AgentEngine.ClaudeCode };
+                    await LogAsync(run.Id, subtaskId, AgentLogKind.Warning, profile.Stage,
+                        $"The retry went the same way, so {ClaudeCodeOptions.ModelLabel(profile.ClaudeModel)} takes this call.", ct);
+                    continue;
+                }
+                throw new LlmException(Stuck(profile, settings, runaways));
+            }
+
+            var (value, parseError) = TryParse(outcome, validate);
             lastError = parseError ?? "";
             var message = parseError is null
                 ? $"{profile.DisplayName} finished."
                 : $"{profile.DisplayName} returned unusable output (attempt {attempt} of {settings.MaxLlmAttempts}): {parseError}";
-            await AppendLlmLogAsync(profile, run.Id, subtaskId, attemptPrompt, result, parseError is null, message, ct);
+            await AppendLlmLogAsync(profile, run.Id, subtaskId, attemptPrompt, outcome, parseError is null, message, ct);
             bus.Publish(new LlmCallFinished(run.Id, callId));
 
-            if (value is not null) return value;
-            // Hatchet never caps response length, so a cut-off means the context window filled up. Another try hits the same wall.
-            if (result.FinishReason == "length") throw new LlmException(OutOfContext(profile, settings, result));
-            attemptPrompt = PromptBuilder.Repair(prompt, parseError!);
+            if (value is not null) return new AgentAnswer<T>(value);
+            attemptPrompt = PromptBuilder.Repair(runaways.Count > 0 ? PromptBuilder.AfterRunaway(prompt, runaways[^1]) : prompt, parseError!);
         }
 
-        throw new LlmException($"{profile.DisplayName} failed after {settings.MaxLlmAttempts} attempts. {lastError}");
+        var before = runaways.Count > 0 ? $"{runaways[^1]} " : "";
+        throw new LlmException($"{before}{profile.DisplayName} failed after {settings.MaxLlmAttempts} attempts. {lastError}");
+    }
+
+    /// <summary>
+    /// The temperature for another try after a loop. Low temperatures make a model that has started repeating itself
+    /// likely to keep at it, so the retry samples more freely.
+    /// </summary>
+    internal static double RetryTemperature(double temperature) => Math.Min(1.0, Math.Max(0.7, temperature + 0.3));
+
+    /// <summary>Why the run pauses after every step of the ladder went the same way.</summary>
+    private static string Stuck(AgentProfile profile, FactorySettings settings, IReadOnlyList<string> runaways)
+    {
+        var tried = runaways.Count switch
+        {
+            1 => "",
+            2 => " Another try with more varied sampling went the same way.",
+            _ => " Another try with more varied sampling, then one on Claude, went the same way."
+        };
+        var claude = profile.UsesClaude
+            ? ""
+            : settings.EscalateRunawaysToClaude
+                ? $", or set the {profile.DisplayName} to run on Claude in Settings"
+                : ", or turn on \"Hand runaway calls to Claude\" in Settings";
+        return $"{runaways[^1]}{tried} A bigger context window won't help with this. Resume with guidance that narrows the job, such as keeping data files to a few rows{claude}.";
     }
 
     private static string EffortOf(AgentProfile profile) => profile.UsesClaude ? profile.ClaudeEffort : profile.ReasoningEffort;
@@ -1240,25 +1387,53 @@ public sealed class FactoryOrchestrator(
 
     private static string? ModelOf(AgentProfile profile) => profile.UsesClaude ? profile.ClaudeModel : null;
 
-    private static string OutOfContext(AgentProfile profile, FactorySettings settings, LlmResult result)
+    /// <summary>
+    /// Says how an answer filled the context window, when another try could help: the window was already big enough,
+    /// so the answer ran on too long. Throws instead when only something else will: a bigger window, a smaller prompt,
+    /// or a lower effort on Claude.
+    /// </summary>
+    private async Task<string> DescribeFullWindowAsync(AgentProfile profile, FactorySettings settings, LlmResult result, CancellationToken ct)
     {
         if (profile.UsesClaude)
-            return $"{profile.DisplayName} reached Claude's output limit before the answer was finished. Try a lower effort for this agent in Settings, then resume the run.";
+            throw new LlmException($"{profile.DisplayName} reached Claude's output limit before the answer was finished. Try a lower effort for this agent in Settings, then resume the run.");
 
-        var started = result.Content.Length > 0;
         var total = result.PromptTokens + result.CompletionTokens;
+        var window = await llm.GetContextLengthAsync(settings.BaseUrl, settings.ModelId, ct) ?? total;
+        var started = result.Content.Length > 0;
         var usage = total > 0
-            ? $"The prompt took {result.PromptTokens:N0} tokens and {(started ? "the thinking and answer" : "the thinking")} took the remaining {result.CompletionTokens:N0}, filling the model's {total:N0}-token context window"
+            ? $"The prompt took {result.PromptTokens:N0} tokens and {(started ? "the thinking and answer" : "the thinking")} took {result.CompletionTokens:N0}, filling the model's {window:N0}-token context window"
             : "The model's context window filled up";
-        var answer = started ? "before the answer was finished" : "before it started the answer";
-        return $"{profile.DisplayName} ran out of context. {usage} {answer}. {ContextWindow.Advice(settings.Provider)} Then resume the run.";
+        var unfinished = started ? "before the answer was finished" : "before it started the answer";
+
+        if (window <= 0 || ContextWindow.BiggerWouldHelp(window))
+            throw new LlmException($"{profile.DisplayName} ran out of context. {usage} {unfinished}. {ContextWindow.Advice(settings.Provider)} Then resume the run.");
+        if (result.PromptTokens * 2 >= window)
+            throw new LlmException($"{profile.DisplayName} ran out of context. {usage} {unfinished}. The prompt alone takes half the window, so lower \"Max file context per call\" in Settings or run this agent on Claude, then resume the run.");
+        return $"{profile.DisplayName} filled the context window. {usage} {unfinished}, though the window is already {window:N0} tokens.";
+    }
+
+    /// <summary>
+    /// Builds a prompt with the definitions of the types it names, or without them when the local model's context window
+    /// wouldn't then leave the agent room to think and answer.
+    /// </summary>
+    private async Task<string> FitDefinitionsAsync(PipelineContext context, int? subtaskId, AgentRole role, string definitions, Func<string, string> build, CancellationToken ct)
+    {
+        var prompt = build(definitions);
+        if (definitions.Length == 0) return prompt;
+        var settings = context.Settings;
+        var profile = AgentProfiles.Resolve(settings, role);
+        if (profile.UsesClaude || await llm.GetContextLengthAsync(settings.BaseUrl, settings.ModelId, ct) is not { } window) return prompt;
+
+        var needed = ContextWindow.EstimateTokens(profile.SystemPrompt.Length + prompt.Length) + ContextWindow.AnswerReserve(profile.ReasoningEffort);
+        if (needed <= window) return prompt;
+
+        await LogAsync(context.Run.Id, subtaskId, AgentLogKind.Info, context.Run.CurrentStage,
+            $"Left the type definitions out of the {profile.DisplayName}'s prompt: with them it would take about {needed - ContextWindow.AnswerReserve(profile.ReasoningEffort):N0} of the model's {window:N0}-token context window, leaving too little room to answer.", ct);
+        return build("");
     }
 
     private static (T? Value, string? Error) TryParse<T>(LlmResult result, Func<T, string?>? validate)
     {
-        if (result.FinishReason == "length")
-            return (default, "The response was cut off by the model's token or context limit before the JSON was complete.");
-
         try
         {
             var value = StructuredOutputParser.Parse<T>(result.Content);

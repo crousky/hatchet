@@ -25,6 +25,12 @@ public sealed class FactorySettings
     public double LocalFixTimeLimitMinutes { get; set; } = 90;
 
     /// <summary>
+    /// When an agent on the local model gets stuck in a loop or fills its context window twice, even after a retry
+    /// with more varied sampling, Claude takes that call instead of the run pausing. Applies to every agent.
+    /// </summary>
+    public bool EscalateRunawaysToClaude { get; set; } = true;
+
+    /// <summary>
     /// Runs that may work at once when any of their agents use the local model. It serves one request at a time, so
     /// more runs only take turns with it. Runs past the limit wait in line.
     /// </summary>
