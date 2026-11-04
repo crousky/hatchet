@@ -25,8 +25,11 @@ public sealed class WorkerQueue
     {
         public int RunId { get; } = runId;
         public string Repository { get; } = repository;
-        public WorkerPool Pool { get; } = pool;
+        public WorkerPool Pool { get; set; } = pool;
         public int? BlockedByRunId { get; set; }
+
+        /// <summary>The place in line last reported for it, so only runs whose place changed are reported again.</summary>
+        public QueueSpot? Reported { get; set; }
         public TaskCompletionSource Admitted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
     }
 
@@ -69,14 +72,23 @@ public sealed class WorkerQueue
 
     /// <summary>
     /// Lets in, in order, each waiting run whose pool has a worker free and whose repository no other run has.
-    /// Returns the runs it let in and those still waiting, whose place in line may have changed.
+    /// Returns the runs it let in and the waiting runs whose place in line, or what they wait for, has changed.
     /// </summary>
     /// <param name="limit">How many runs of a pool may work at once. Below 1 counts as 1.</param>
     /// <param name="holders">For each repository, the runs that have it already, such as a paused run with its branch checked out.</param>
-    public IReadOnlyList<int> Admit(Func<WorkerPool, int> limit, IReadOnlyDictionary<string, IReadOnlySet<int>> holders)
+    /// <param name="waitingPool">
+    /// The pool waiting runs belong to now, if the settings that decide it may have changed since they joined. They
+    /// keep their place in line.
+    /// </param>
+    public IReadOnlyList<int> Admit(Func<WorkerPool, int> limit, IReadOnlyDictionary<string, IReadOnlySet<int>> holders, WorkerPool? waitingPool = null)
     {
         lock (_gate)
         {
+            if (waitingPool is { } pool)
+            {
+                foreach (var entry in _waiting) entry.Pool = pool;
+            }
+
             var working = _working.Values.GroupBy(e => e.Pool).ToDictionary(g => g.Key, g => g.Count());
             var taken = new Dictionary<string, HashSet<int>>(StringComparer.OrdinalIgnoreCase);
             foreach (var (repository, runs) in holders) Take(taken, repository).UnionWith(runs);
@@ -85,7 +97,6 @@ public sealed class WorkerQueue
             var touched = new List<int>();
             foreach (var entry in _waiting.ToList())
             {
-                touched.Add(entry.RunId);
                 var blocker = Take(taken, entry.Repository).Where(id => id != entry.RunId).Order().Cast<int?>().FirstOrDefault();
                 entry.BlockedByRunId = blocker;
                 if (blocker is not null || working.GetValueOrDefault(entry.Pool) >= Math.Max(limit(entry.Pool), 1)) continue;
@@ -94,10 +105,26 @@ public sealed class WorkerQueue
                 _working[entry.RunId] = entry;
                 working[entry.Pool] = working.GetValueOrDefault(entry.Pool) + 1;
                 Take(taken, entry.Repository).Add(entry.RunId);
+                touched.Add(entry.RunId);
                 entry.Admitted.TrySetResult();
+            }
+
+            for (var index = 0; index < _waiting.Count; index++)
+            {
+                var entry = _waiting[index];
+                var spot = new QueueSpot(index + 1, entry.Pool, entry.BlockedByRunId);
+                if (entry.Reported == spot) continue;
+                entry.Reported = spot;
+                touched.Add(entry.RunId);
             }
             return touched;
         }
+    }
+
+    /// <summary>The pool a run is working in, or null if it hasn't been let in.</summary>
+    public WorkerPool? WorkingPool(int runId)
+    {
+        lock (_gate) return _working.TryGetValue(runId, out var entry) ? entry.Pool : null;
     }
 
     /// <summary>Where a run is in line, or null if it isn't waiting.</summary>

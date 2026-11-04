@@ -50,7 +50,9 @@ The runs list groups runs by project, which is the repository they build in. You
 - **Runs at once.** A run counts as a local run if any of its agents uses the local model. Local runs go one at a time by default, because the model answers one request at a time. Runs whose agents are all set to Claude go up to 4 at a time. Both limits are in Settings.
 - **One run per project.** Runs in the same repository go one at a time, because they share its working tree. A run waits until the one before it in that project is merged, closed or cancelled. A run waiting for its project doesn't hold up runs in other projects.
 
-A queued run starts by itself when its turn comes. Stop waiting takes it out of the line, and Resume puts it back at the end. Runs still in line when Hatchet stops join it again when Hatchet starts.
+Resuming a paused run, approving its plan or asking for a new plan also waits for a worker, and what you asked for happens when the run's turn comes. A queued run starts by itself then. Stop waiting takes it out of the line without doing what it was waiting to do, and Resume puts it back at the end. Runs still in line when Hatchet stops join it again when Hatchet starts.
+
+When a run's turn comes, Hatchet checks the working tree. If it has uncommitted changes, or no branch is checked out, the run pauses so you can tidy the tree and resume it.
 
 ## Driving Hatchet from Claude Code
 

@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Text.RegularExpressions;
 
 namespace Factory.Engine.Workspace;
@@ -18,9 +19,15 @@ public static partial class DefinitionFinder
         ".swift", ".dart", ".php", ".rb", ".cpp", ".cc", ".h", ".hpp"
     };
 
-    // A type declaration in most languages: class, interface, record, struct, enum, trait, protocol or type alias.
-    [GeneratedRegex(@"\b(?:class|interface|struct|enum|record(?:\s+(?:class|struct))?|trait|protocol|type|typealias)\s+([A-Z][A-Za-z0-9_]*)")]
+    // A type declaration in most languages: class, interface, record, struct, enum, trait, protocol, object or type
+    // alias, at the start of a line after any modifiers. Comments, strings and "import type" lines don't match.
+    [GeneratedRegex(@"^[ \t]*(?:(?:public|private|protected|internal|static|sealed|abstract|partial|readonly|ref|unsafe|file|new|export|default|declare|data|open|final|inline|value|case|pub(?:\([a-z]+\))?)[ \t]+)*(?:enum[ \t]+(?:class|struct)|record(?:[ \t]+(?:class|struct))?|class|interface|struct|enum|trait|protocol|object|type|typealias)[ \t]+([A-Z][A-Za-z0-9_]*)", RegexOptions.Multiline)]
     private static partial Regex Declaration();
+
+    private sealed record IndexedFile(DateTime Modified, long Length, string[] Types);
+
+    // The types each file declares, by repository, so a file is read again only once it changes.
+    private static readonly ConcurrentDictionary<string, Dictionary<string, IndexedFile>> Indexes = new(StringComparer.OrdinalIgnoreCase);
 
     // A name that could be a type: starts upper case and has a lower case letter, so FooBar and IFoo but not URL or ID.
     [GeneratedRegex(@"\b[A-Z][A-Za-z0-9_]*[a-z][A-Za-z0-9_]*\b")]
@@ -51,28 +58,40 @@ public static partial class DefinitionFinder
         return found;
     }
 
-    /// <summary>Each declared type name, with the files that declare it.</summary>
+    /// <summary>
+    /// Each declared type name, with the files that declare it. Files unchanged since the last call, by time and size,
+    /// aren't read again.
+    /// </summary>
     private static Dictionary<string, List<string>> IndexDeclarations(string repositoryPath)
     {
         var index = new Dictionary<string, List<string>>(StringComparer.Ordinal);
         var root = new DirectoryInfo(repositoryPath);
+        var key = Path.TrimEndingDirectorySeparator(root.FullName);
+        var previous = Indexes.TryGetValue(key, out var cached) ? cached : [];
+        var current = new Dictionary<string, IndexedFile>(StringComparer.OrdinalIgnoreCase);
         var indexed = 0;
         foreach (var file in SourceFiles(root))
         {
             if (++indexed > MaxIndexedFiles) break;
-            string content;
-            try { content = File.ReadAllText(file.FullName); }
-            catch (IOException) { continue; }
-            catch (UnauthorizedAccessException) { continue; }
-
             var relative = Normalize(Path.GetRelativePath(root.FullName, file.FullName));
-            foreach (Match match in Declaration().Matches(content))
+            if (!previous.TryGetValue(relative, out var entry) || entry.Modified != file.LastWriteTimeUtc || entry.Length != file.Length)
             {
-                var name = match.Groups[1].Value;
+                string content;
+                try { content = File.ReadAllText(file.FullName); }
+                catch (IOException) { continue; }
+                catch (UnauthorizedAccessException) { continue; }
+                entry = new IndexedFile(file.LastWriteTimeUtc, file.Length,
+                    Declaration().Matches(content).Select(m => m.Groups[1].Value).Distinct(StringComparer.Ordinal).ToArray());
+            }
+            current[relative] = entry;
+
+            foreach (var name in entry.Types)
+            {
                 if (!index.TryGetValue(name, out var files)) index[name] = files = [];
-                if (!files.Contains(relative)) files.Add(relative);
+                files.Add(relative);
             }
         }
+        Indexes[key] = current;
         return index;
     }
 

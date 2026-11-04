@@ -173,7 +173,7 @@ else
                         {
                             case EditorTab.Plan:
                                 <PlanEditor Subtasks="_subtasks"
-                                            Editable="@(_run.Status == RunStatus.AwaitingPlanApproval)"
+                                            Editable="@(_run.Status == RunStatus.AwaitingPlanApproval && _spot is null)"
                                             Planning="@(_run.Status is RunStatus.Queued or RunStatus.Ingesting or RunStatus.Decomposing)"
                                             Queued="@(_spot is not null)"
                                             Busy="_busy"

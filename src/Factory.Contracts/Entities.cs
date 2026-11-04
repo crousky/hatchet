@@ -37,6 +37,12 @@ public sealed class FactoryRun
     /// <summary>The user paused the run, as opposed to it stopping on a problem.</summary>
     public bool PausedByUser { get; set; }
 
+    /// <summary>
+    /// What the run does when its turn in line for a worker comes, such as a resume with the user's decision. Kept so
+    /// the run can join the line again after Hatchet restarts. Null while it isn't waiting.
+    /// </summary>
+    public string? QueuedRequest { get; set; }
+
     public string? BranchName { get; set; }
     public string? BaseBranch { get; set; }
     public string? BaseCommit { get; set; }

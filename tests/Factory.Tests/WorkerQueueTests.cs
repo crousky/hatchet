@@ -113,4 +113,38 @@ public class WorkerQueueTests
 
         Assert.True(Started(run));
     }
+
+    [Fact]
+    public void Admit_reports_only_the_runs_it_let_in_and_those_whose_place_changed()
+    {
+        var queue = new WorkerQueue();
+        _ = queue.WaitAsync(1, "a", WorkerPool.Local, CancellationToken.None);
+        _ = queue.WaitAsync(2, "b", WorkerPool.Local, CancellationToken.None);
+        _ = queue.WaitAsync(3, "c", WorkerPool.Local, CancellationToken.None);
+
+        Assert.Equal([1, 2, 3], queue.Admit(Limits(1, 4), NoHolders));
+        Assert.Empty(queue.Admit(Limits(1, 4), NoHolders));
+
+        queue.Release(1);
+        Assert.Equal([2, 3], queue.Admit(Limits(1, 4), NoHolders)); // 2 is let in and 3 moves up.
+    }
+
+    [Fact]
+    public void Waiting_runs_move_to_the_pool_their_agents_use_now_and_keep_their_place()
+    {
+        var queue = new WorkerQueue();
+        var working = queue.WaitAsync(1, "a", WorkerPool.Local, CancellationToken.None);
+        var first = queue.WaitAsync(2, "b", WorkerPool.Local, CancellationToken.None);
+        var second = queue.WaitAsync(3, "c", WorkerPool.Local, CancellationToken.None);
+        queue.Admit(Limits(1, 1), NoHolders);
+        Assert.True(Started(working));
+
+        queue.Admit(Limits(1, 1), NoHolders, WorkerPool.Claude);
+
+        Assert.True(Started(first));
+        Assert.Equal(WorkerPool.Claude, queue.WorkingPool(2));
+        Assert.Equal(WorkerPool.Local, queue.WorkingPool(1));
+        Assert.Equal(new QueueSpot(1, WorkerPool.Claude, null), queue.SpotOf(3));
+        Assert.False(second.IsCompleted);
+    }
 }

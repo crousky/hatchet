@@ -862,7 +862,7 @@ public class OrchestratorTests : IAsyncLifetime
     {
         _repo.Write("uncommitted.txt", "users work");
 
-        var error = await Assert.ThrowsAsync<FactoryValidationException>(() => StartAsync());
+        var error = await Assert.ThrowsAsync<RepositoryNotReadyException>(() => StartAsync());
 
         Assert.Contains("uncommitted", error.Message);
     }
@@ -963,6 +963,137 @@ public class OrchestratorTests : IAsyncLifetime
         await _orchestrator.RecoverInterruptedRunsAsync();
 
         await WaitForAsync(waiting.Id, RunStatus.AwaitingPlanApproval);
+    }
+
+    [Fact]
+    public async Task Runs_in_line_at_a_restart_join_it_again_in_the_order_they_were_started()
+    {
+        var runs = new List<FactoryRun>();
+        for (var i = 0; i < 3; i++)
+            runs.Add(await _store.CreateRunAsync(null, new FactoryTask { Title = $"Queued {i}", RepositoryPath = _repo.Path, ArchitectureSpec = "# Spec", RequirePlanApproval = true }));
+        _llm.Enqueue(AgentRole.TaskPlanner, Plan("alpha"));
+        _llm.Hold = AgentRole.TaskPlanner;
+
+        await _orchestrator.RecoverInterruptedRunsAsync();
+
+        await _llm.HoldStarted.Task.WaitAsync(TimeSpan.FromSeconds(30));
+        Assert.NotNull(_orchestrator.GetLiveCall(runs[0].Id));
+        Assert.Equal(new QueueSpot(1, WorkerPool.Local, runs[0].Id), _orchestrator.GetQueueSpot(runs[1].Id));
+        Assert.Equal(new QueueSpot(2, WorkerPool.Local, runs[0].Id), _orchestrator.GetQueueSpot(runs[2].Id));
+
+        foreach (var run in Enumerable.Reverse(runs)) await _orchestrator.CancelAsync(run.Id);
+    }
+
+    [Fact]
+    public async Task A_run_resumed_while_it_waits_for_a_worker_joins_the_line_again_after_a_restart()
+    {
+        using var other = await SecondRepositoryAsync();
+        _llm.Enqueue(AgentRole.TaskPlanner, Plan("alpha"), Plan("beta"));
+        _llm.Hold = AgentRole.TaskPlanner;
+        await StartAsync(approval: true);
+        await _llm.HoldStarted.Task.WaitAsync(TimeSpan.FromSeconds(30));
+        var waiting = await StartAsync(approval: true, repository: other.Path);
+        await WaitForQueueAsync(waiting.Id);
+        await _orchestrator.PauseAsync(waiting.Id, immediately: false);
+        await WaitForAsync(waiting.Id, RunStatus.NeedsHuman);
+        await _orchestrator.ResumeAsync(waiting.Id, HumanDecision.Resume, null);
+        await WaitForQueueAsync(waiting.Id);
+
+        await _orchestrator.StopAllAsync();
+        _llm.Hold = null;
+        var restarted = new FactoryOrchestrator(_store, _settings, _llm, _commands, new FactoryEventBus(), NullLogger<FactoryOrchestrator>.Instance);
+        await restarted.RecoverInterruptedRunsAsync();
+
+        var deadline = DateTime.UtcNow.AddSeconds(30);
+        while ((await _store.GetRunAsync(waiting.Id)).Status != RunStatus.AwaitingPlanApproval || restarted.IsActive(waiting.Id))
+        {
+            Assert.True(DateTime.UtcNow < deadline, $"Run stayed {(await _store.GetRunAsync(waiting.Id)).Status}: " +
+                string.Join(" | ", (await _store.GetLogsAsync(waiting.Id, 0)).Select(l => l.Message)));
+            await Task.Delay(10);
+        }
+        Assert.Null((await _store.GetRunAsync(waiting.Id)).QueuedRequest);
+    }
+
+    [Fact]
+    public async Task Leaving_the_line_after_a_resume_leaves_the_paused_subtask_as_it_was()
+    {
+        _llm.Enqueue(AgentRole.TaskPlanner, Plan("alpha"));
+        _llm.Enqueue(AgentRole.ContextSpecifier, Refined());
+        _llm.Enqueue(AgentRole.CodeGenerator, Patch("alpha.txt"));
+        _llm.Enqueue(AgentRole.BugFixer, Patch("alpha.txt", "1"), Patch("alpha.txt", "2"), Patch("alpha.txt", "3"));
+        for (var i = 0; i < 4; i++) _commands.Results.Enqueue((1, "still broken"));
+        var paused = await WaitForAsync((await StartAsync()).Id, RunStatus.NeedsHuman);
+
+        using var other = await SecondRepositoryAsync();
+        _llm.Enqueue(AgentRole.TaskPlanner, Plan("beta"));
+        _llm.Hold = AgentRole.TaskPlanner;
+        var busy = await StartAsync(approval: true, repository: other.Path);
+        await _llm.HoldStarted.Task.WaitAsync(TimeSpan.FromSeconds(30));
+
+        await _orchestrator.ResumeAsync(paused.Id, HumanDecision.SkipSubtask, "Skip it");
+        await WaitForQueueAsync(paused.Id);
+        Assert.NotNull((await _store.GetRunAsync(paused.Id)).QueuedRequest);
+        await _orchestrator.PauseAsync(paused.Id, immediately: true);
+
+        var after = await WaitForAsync(paused.Id, RunStatus.NeedsHuman);
+        Assert.Null(after.QueuedRequest);
+        Assert.Equal(paused.PausedStage, after.PausedStage);
+        var subtask = (await _store.GetSubtasksAsync(paused.Id)).Single();
+        Assert.Equal(SubtaskStatus.NeedsHuman, subtask.Status);
+        Assert.Null(subtask.HumanGuidance);
+
+        _llm.Hold = null;
+        _llm.Release.TrySetResult();
+        await WaitForAsync(busy.Id, RunStatus.AwaitingPlanApproval);
+    }
+
+    [Fact]
+    public async Task A_waiting_run_moves_to_the_claude_pool_once_its_agents_run_on_claude()
+    {
+        using var other = await SecondRepositoryAsync();
+        _llm.Enqueue(AgentRole.TaskPlanner, Plan("alpha"), Plan("beta"));
+        _llm.Hold = AgentRole.TaskPlanner;
+        var first = await StartAsync(approval: true);
+        await _llm.HoldStarted.Task.WaitAsync(TimeSpan.FromSeconds(30));
+        var second = await StartAsync(approval: true, repository: other.Path);
+        Assert.Equal(WorkerPool.Local, (await WaitForQueueAsync(second.Id)).Pool);
+
+        RunEveryAgentOnClaude();
+        await _orchestrator.RefreshQueueAsync(); // As saving the settings does.
+
+        var deadline = DateTime.UtcNow.AddSeconds(30);
+        while (_orchestrator.GetLiveCall(second.Id) is null && DateTime.UtcNow < deadline) await Task.Delay(10);
+        Assert.NotNull(_orchestrator.GetLiveCall(second.Id));
+        Assert.Null(_orchestrator.GetQueueSpot(second.Id));
+
+        _llm.Hold = null;
+        _llm.Release.TrySetResult();
+        await WaitForAsync(first.Id, RunStatus.AwaitingPlanApproval);
+        await WaitForAsync(second.Id, RunStatus.AwaitingPlanApproval);
+    }
+
+    [Fact]
+    public async Task A_run_whose_turn_finds_the_tree_dirty_pauses_until_it_is_tidied()
+    {
+        using var other = await SecondRepositoryAsync();
+        _llm.Enqueue(AgentRole.TaskPlanner, Plan("alpha"), Plan("beta"));
+        _llm.Hold = AgentRole.TaskPlanner;
+        var busy = await StartAsync(approval: true, repository: other.Path);
+        await _llm.HoldStarted.Task.WaitAsync(TimeSpan.FromSeconds(30));
+        var waiting = await StartAsync(approval: true);
+        await WaitForQueueAsync(waiting.Id);
+        _repo.Write("uncommitted.txt", "users work");
+
+        _llm.Hold = null;
+        _llm.Release.TrySetResult();
+        var paused = await WaitForAsync(waiting.Id, RunStatus.NeedsHuman);
+        Assert.Equal(PipelineStage.Ingest, paused.PausedStage);
+        Assert.Contains("uncommitted", paused.PauseReason);
+
+        File.Delete(_repo.File("uncommitted.txt"));
+        await _orchestrator.ResumeAsync(waiting.Id, HumanDecision.Resume, null);
+        await WaitForAsync(waiting.Id, RunStatus.AwaitingPlanApproval);
+        await WaitForAsync(busy.Id, RunStatus.AwaitingPlanApproval);
     }
 
     [Fact]
@@ -1125,6 +1256,7 @@ public class OrchestratorTests : IAsyncLifetime
         {
             Id = run.Id, TaskId = run.TaskId, Task = run.Task, Status = run.Status, CurrentStage = run.CurrentStage,
             CurrentSubtaskId = run.CurrentSubtaskId, PausedStage = run.PausedStage, PauseReason = run.PauseReason, PausedByUser = run.PausedByUser,
+            QueuedRequest = run.QueuedRequest,
             BranchName = run.BranchName, BaseBranch = run.BaseBranch, BaseCommit = run.BaseCommit, RepoMap = run.RepoMap,
             IntegrationPassed = run.IntegrationPassed, MergeCommit = run.MergeCommit, PromptTokens = run.PromptTokens,
             CompletionTokens = run.CompletionTokens, CreatedAt = run.CreatedAt, CompletedAt = run.CompletedAt
