@@ -16,7 +16,12 @@
     @if (_items.Count == 0)
     {
         <div class="empty-state">
-            @if (Planning)
+            @if (Queued)
+            {
+                <div class="empty-title">Waiting in line</div>
+                <div class="muted">The plan comes once this run's turn comes.</div>
+            }
+            else if (Planning)
             {
                 <span class="spinner spinner-large"></span>
                 <div class="empty-title">The Task Planner is working</div>
@@ -108,6 +113,9 @@
     [Parameter] public IReadOnlyList<FactorySubtask> Subtasks { get; set; } = [];
     [Parameter] public bool Editable { get; set; }
     [Parameter] public bool Planning { get; set; }
+
+    /// <summary>The run is waiting in line for a worker, so planning hasn't started.</summary>
+    [Parameter] public bool Queued { get; set; }
     [Parameter] public bool Busy { get; set; }
     [Parameter] public string DefaultCommand { get; set; } = "";
     [Parameter] public EventCallback<IReadOnlyList<SubtaskEdit>> OnApprove { get; set; }

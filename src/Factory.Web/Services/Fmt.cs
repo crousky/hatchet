@@ -101,6 +101,17 @@ public static class Fmt
         local.Date < DateTime.Today.AddDays(7) ? local.ToString("ddd h:mm tt") :
         local.ToString("MMM d h:mm tt");
 
+    /// <summary>"2nd in line for a local-model worker", or the run whose turn it waits for.</summary>
+    public static string Queue(QueueSpot spot) => spot.BlockedByRunId is { } blocker
+        ? $"Waiting for run #{blocker} to finish, as it has this repository checked out"
+        : $"{Ordinal(spot.Position)} in line for a {(spot.Pool == WorkerPool.Claude ? "Claude" : "local-model")} worker";
+
+    public static string Ordinal(int n) => (n % 100) switch
+    {
+        11 or 12 or 13 => $"{n}th",
+        _ => (n % 10) switch { 1 => $"{n}st", 2 => $"{n}nd", 3 => $"{n}rd", _ => $"{n}th" }
+    };
+
     public static string Ago(DateTime utc)
     {
         var span = DateTime.UtcNow - utc;

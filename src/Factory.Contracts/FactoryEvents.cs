@@ -11,6 +11,9 @@ public sealed record StageChanged(int RunId, int? SubtaskId, PipelineStage Stage
 
 public sealed record PlanChanged(int RunId) : FactoryEvent(RunId);
 
+/// <summary>A run joined the line for a worker, moved up in it, or got its worker.</summary>
+public sealed record QueueChanged(int RunId) : FactoryEvent(RunId);
+
 /// <summary>The user asked a working run to pause once its current step finishes.</summary>
 public sealed record PauseRequested(int RunId) : FactoryEvent(RunId);
 

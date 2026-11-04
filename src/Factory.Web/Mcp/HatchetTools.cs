@@ -30,7 +30,7 @@ public sealed class PlanStep
     public string? VerificationCommand { get; set; }
 }
 
-public sealed record RunSummary(int RunId, string Title, string Status, string Repository, int SubtasksDone, int Subtasks, string? CurrentStep, string? PauseReason, string Url);
+public sealed record RunSummary(int RunId, string Title, string Status, string Project, string Repository, int SubtasksDone, int Subtasks, string? CurrentStep, string? Queue, string? PauseReason, string Url);
 
 public sealed record SubtaskSummary(int Order, string Title, string Status, int FixAttempts);
 
@@ -50,10 +50,11 @@ public sealed class HatchetTools(FactoryOrchestrator orchestrator, IRunStore sto
     private const int MaxDiffChars = 20_000;
 
     [McpServerTool(Name = "probe_repository", ReadOnly = true)]
-    [Description("Checks whether a folder can host a Hatchet run (a Git repository with a clean working tree) and how Hatchet would verify it. Call this before start_run.")]
+    [Description("Checks whether a folder can host a Hatchet run (a Git repository with a clean working tree) and how Hatchet would verify it. Call this before start_run. If openRunId is set, that run has the repository, and a new run waits in line for it however the tree looks now.")]
     public async Task<object> ProbeRepository([Description("Absolute path of the repository folder.")] string path, CancellationToken ct)
     {
         var probe = await GitWorkspace.ProbeAsync(path, ct);
+        var openRun = probe.IsGitRepository ? await orchestrator.GetOpenRunAsync(path, ct) : null;
         return new
         {
             probe.Exists,
@@ -62,7 +63,8 @@ public sealed class HatchetTools(FactoryOrchestrator orchestrator, IRunStore sto
             probe.IsClean,
             probe.CurrentBranch,
             Verification = probe.Verification is { } v ? $"{v.Description}: {v.Command}" : "Nothing detected yet. The first subtask should set up the build and a test project.",
-            probe.Error
+            probe.Error,
+            OpenRunId = openRun?.Id
         };
     }
 
@@ -71,6 +73,7 @@ public sealed class HatchetTools(FactoryOrchestrator orchestrator, IRunStore sto
         Starts a Hatchet run on a local Git repository. Hatchet makes a factory/run-N branch, then builds, verifies, reviews and commits each subtask in order, fixing failures as it goes, on the user's local model.
         Pass the plan you worked out with the user to skip Hatchet's own planner. Without a plan, Hatchet plans from the spec itself, which is slower.
         The working tree must be clean. The run continues in the background: follow it with get_run.
+        If the user's limit of runs at once is reached, or another open run has the repository, the run waits in line and starts by itself; queue says why.
         """)]
     public async Task<RunDetails> StartRun(
         [Description("Absolute path of the repository.")] string repositoryPath,
@@ -89,7 +92,7 @@ public sealed class HatchetTools(FactoryOrchestrator orchestrator, IRunStore sto
     }
 
     [McpServerTool(Name = "list_runs", ReadOnly = true)]
-    [Description("Lists Hatchet runs, newest first, with their status and progress.")]
+    [Description("Lists Hatchet runs, newest first, with their status, progress and project (the repository's folder name).")]
     public async Task<IReadOnlyList<RunSummary>> ListRuns(
         [Description("True to include merged, closed, failed and cancelled runs.")] bool includeFinished = false,
         CancellationToken ct = default)
@@ -232,11 +235,12 @@ public sealed class HatchetTools(FactoryOrchestrator orchestrator, IRunStore sto
         var step = run.CurrentStage is { } stage
             ? current is null ? stage.ToString() : $"{stage} on subtask {current.Order}: {current.Title}"
             : null;
-        var status = run.PausedByUser ? "Paused" : run.Status.ToString();
-        return new RunSummary(run.Id, run.Task.Title, status, run.Task.RepositoryPath,
+        var spot = orchestrator.GetQueueSpot(run.Id);
+        var status = spot is not null ? "Queued" : run.PausedByUser ? "Paused" : run.Status.ToString();
+        return new RunSummary(run.Id, run.Task.Title, status, Fmt.FolderName(run.Task.RepositoryPath), run.Task.RepositoryPath,
             subtasks.Count(s => SubtaskStateMachine.IsFinished(s.Status) && s.Status != SubtaskStatus.Cancelled), subtasks.Count,
-            RunStateMachine.IsUnderway(run.Status) ? step : null,
-            run.PauseReason, $"{Program.BaseUrl(configuration)}/runs/{run.Id}");
+            spot is null && RunStateMachine.IsUnderway(run.Status) ? step : null, spot is null ? null : Fmt.Queue(spot),
+            spot is null ? run.PauseReason : null, $"{Program.BaseUrl(configuration)}/runs/{run.Id}");
     }
 
     private async Task<FactoryRun> RequireRunAsync(int runId, CancellationToken ct)

@@ -24,6 +24,15 @@ public sealed class FactorySettings
     /// </summary>
     public double LocalFixTimeLimitMinutes { get; set; } = 90;
 
+    /// <summary>
+    /// Runs that may work at once when any of their agents use the local model. It serves one request at a time, so
+    /// more runs only take turns with it. Runs past the limit wait in line.
+    /// </summary>
+    public int MaxParallelLocalRuns { get; set; } = 1;
+
+    /// <summary>Runs that may work at once when every agent runs on Claude. Runs past the limit wait in line.</summary>
+    public int MaxParallelClaudeRuns { get; set; } = 4;
+
     /// <summary>Attempts per LLM call, covering transport errors and unparseable output.</summary>
     public int MaxLlmAttempts { get; set; } = 3;
 

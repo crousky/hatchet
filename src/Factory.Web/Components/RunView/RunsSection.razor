@@ -1,4 +1,5 @@
 @inject IRunStore Store
+@inject FactoryOrchestrator Orchestrator
 
 <div class="pane-section">
     <button class="pane-heading pane-heading-button" @onclick="() => _open = !_open">
@@ -7,15 +8,20 @@
     @if (_open)
     {
         <div class="tree tree-short scroll">
-            @foreach (var run in _runs)
+            @foreach (var project in _projects)
             {
-                <a class="tree-item @(run.Id == CurrentRunId ? "selected" : "")" href="/runs/@run.Id">
-                    <span class="tree-icon"><span class="dot dot-@Fmt.Tone(run.Status)"></span></span>
-                    <span class="tree-text">
-                        <span class="tree-title">@run.Task.Title</span>
-                        <span class="tree-sub">#@run.Id · @Fmt.Label(run.Status)</span>
-                    </span>
-                </a>
+                <div class="tree-group" title="@project.Repository"><Icon Name="folder" Size="11" /> @project.Name</div>
+                @foreach (var run in project.Runs)
+                {
+                    var spot = Orchestrator.GetQueueSpot(run.Id);
+                    <a class="tree-item @(run.Id == CurrentRunId ? "selected" : "")" href="/runs/@run.Id" title="@(spot is null ? null : Fmt.Queue(spot))">
+                        <span class="tree-icon"><span class="dot dot-@(spot is null ? Fmt.Tone(run.Status) : "muted")"></span></span>
+                        <span class="tree-text">
+                            <span class="tree-title">@run.Task.Title</span>
+                            <span class="tree-sub">#@run.Id · @(spot is null ? Fmt.Label(run.Status) : "Queued")</span>
+                        </span>
+                    </a>
+                }
             }
         </div>
     }
@@ -24,10 +30,10 @@
 @code {
     [Parameter] public int CurrentRunId { get; set; }
 
-    /// <summary>Changes whenever the parent saw a run change status.</summary>
+    /// <summary>Changes whenever the parent saw a run change status or its place in line.</summary>
     [Parameter] public int RefreshKey { get; set; }
 
-    private IReadOnlyList<FactoryRun> _runs = [];
+    private IReadOnlyList<ProjectGroup> _projects = [];
     private int _loadedKey = -1;
     private bool _open;
 
@@ -35,6 +41,9 @@
     {
         if (_loadedKey == RefreshKey) return;
         _loadedKey = RefreshKey;
-        _runs = await Store.ListRunsAsync();
+        // The current run's project comes first.
+        _projects = Projects.Group(await Store.ListRunsAsync())
+            .OrderByDescending(p => p.Runs.Any(r => r.Id == CurrentRunId))
+            .ToList();
     }
 }

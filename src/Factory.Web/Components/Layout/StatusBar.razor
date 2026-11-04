@@ -22,6 +22,10 @@
     {
         <span class="status-item"><span class="spinner"></span> @_activeRuns @(_activeRuns == 1 ? "run" : "runs") working</span>
     }
+    @if (_queuedRuns > 0)
+    {
+        <span class="status-item muted"><Icon Name="clock" Size="12" /> @_queuedRuns queued</span>
+    }
     <span class="status-item muted" title="Hatchet only listens on this machine">localhost only</span>
 </footer>
 
@@ -30,6 +34,7 @@
     private FactoryEventBus.Subscription? _subscription;
     private int _tokensPerSecond;
     private int _activeRuns;
+    private int _queuedRuns;
 
     private string ModelDotClass => Health.Current switch
     {
@@ -69,7 +74,7 @@
                 while (_subscription!.Reader.TryRead(out var evt))
                 {
                     if (evt is LlmDeltaReceived) deltas++;
-                    if (evt is RunStatusChanged) statusChanged = true;
+                    if (evt is RunStatusChanged or QueueChanged) statusChanged = true;
                 }
 
                 if (statusChanged) await RefreshActiveRunsAsync();
@@ -87,7 +92,9 @@
     private async Task RefreshActiveRunsAsync()
     {
         var runs = await Store.ListRunsAsync(_stop.Token);
-        _activeRuns = runs.Count(r => RunStateMachine.IsWorking(r.Status));
+        // A run waiting in line has a working status but isn't working yet.
+        _queuedRuns = runs.Count(r => Orchestrator.GetQueueSpot(r.Id) is not null);
+        _activeRuns = runs.Count(r => RunStateMachine.IsWorking(r.Status) && Orchestrator.GetQueueSpot(r.Id) is null);
         await InvokeAsync(StateHasChanged);
     }
 

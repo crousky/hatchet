@@ -176,6 +176,9 @@ namespace Factory.Web.Data.Migrations
                     b.Property<int>("PromptTokens")
                         .HasColumnType("INTEGER");
 
+                    b.Property<string>("QueuedRequest")
+                        .HasColumnType("TEXT");
+
                     b.Property<string>("RepoMap")
                         .IsRequired()
                         .HasColumnType("TEXT");

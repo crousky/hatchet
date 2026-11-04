@@ -11,7 +11,10 @@ using Microsoft.Extensions.Logging;
 namespace Factory.Engine.Orchestration;
 
 /// <summary>The request can't be carried out as asked. The message is shown to the user.</summary>
-public sealed class FactoryValidationException(string message) : Exception(message);
+public class FactoryValidationException(string message) : Exception(message);
+
+/// <summary>The working tree isn't ready for a run yet, such as having uncommitted changes. The user can fix it and resume.</summary>
+public sealed class RepositoryNotReadyException(string message) : FactoryValidationException(message);
 
 /// <summary>
 /// Runs the factory loop: Ingest, Decompose, then Refine, Build, Verify, Review and Fix per subtask,
@@ -29,6 +32,31 @@ public sealed class FactoryOrchestrator(
 
     private sealed record ResumePoint(int SubtaskId, SubtaskEntry Entry);
 
+    private enum RequestKind { Start, Approve, Regenerate, Resume }
+
+    /// <summary>
+    /// What a run does once it has a worker. It is saved on the run while it waits, so it can join the line again after
+    /// a restart, and nothing it asks for happens until the run's turn comes.
+    /// </summary>
+    /// <param name="Text">The plan feedback for <see cref="RequestKind.Regenerate"/>, or the guidance for <see cref="RequestKind.Resume"/>.</param>
+    private sealed record QueuedRequest(RequestKind Kind, HumanDecision Decision = HumanDecision.Resume, string? Text = null)
+    {
+        /// <summary>The status a run has while it waits with this request.</summary>
+        public RunStatus WaitingStatus => Kind switch
+        {
+            RequestKind.Start => RunStatus.Queued,
+            RequestKind.Approve or RequestKind.Regenerate => RunStatus.AwaitingPlanApproval,
+            _ => RunStatus.NeedsHuman
+        };
+
+        public static QueuedRequest? Parse(string? json)
+        {
+            if (string.IsNullOrWhiteSpace(json)) return null;
+            try { return JsonSerializer.Deserialize<QueuedRequest>(json); }
+            catch (JsonException) { return null; }
+        }
+    }
+
     private sealed class PipelineContext(FactoryRun run, FactorySettings settings)
     {
         public FactoryRun Run { get; } = run;
@@ -41,6 +69,9 @@ public sealed class FactoryOrchestrator(
     {
         public CancellationTokenSource Cancellation { get; } = new();
         public Task Completion { get; set; } = Task.CompletedTask;
+
+        /// <summary>Done once the run has taken its place in line, or given up before it could.</summary>
+        public TaskCompletionSource Joined { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
         /// <summary>Set when the user pauses. The pipeline stops at its next step, or at once if Cancellation fires too.</summary>
         public volatile bool PauseRequested;
@@ -135,10 +166,56 @@ public sealed class FactoryOrchestrator(
     // One local model serves every agent, so requests from separate runs take turns.
     private readonly SemaphoreSlim _modelGate = new(1, 1);
 
+    // Runs past the parallel limits wait here. Letting runs in reads the database, so one pass runs at a time.
+    private readonly WorkerQueue _queue = new();
+    private readonly SemaphoreSlim _queueGate = new(1, 1);
+    private volatile bool _stopping;
+
     public bool IsActive(int runId) => _active.ContainsKey(runId);
 
     /// <summary>True while a run is finishing its current step before it pauses.</summary>
     public bool IsPausing(int runId) => _active.TryGetValue(runId, out var active) && active.PauseRequested;
+
+    /// <summary>Where a run is in line for a worker, or null if it isn't waiting for one.</summary>
+    public QueueSpot? GetQueueSpot(int runId) => _queue.SpotOf(runId);
+
+    /// <summary>
+    /// Lets waiting runs start where a worker and their repository are free. Runs call it as they finish; call it too
+    /// after changing the parallel limits.
+    /// </summary>
+    public async Task RefreshQueueAsync()
+    {
+        if (_stopping) return;
+        await _queueGate.WaitAsync();
+        try
+        {
+            var settings = await settingsStore.GetAsync();
+            // A run that has started has its branch checked out until it finishes, even while it waits for the user.
+            var holders = (await store.ListRunsAsync())
+                .Where(r => !RunStateMachine.IsTerminal(r.Status) && r.BranchName is not null)
+                .GroupBy(r => RepositoryKey(r.Task.RepositoryPath), StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(g => g.Key, g => (IReadOnlySet<int>)g.Select(r => r.Id).ToHashSet(), StringComparer.OrdinalIgnoreCase);
+            // Waiting runs haven't read their settings yet, so they go by the agents' models as they are now.
+            var touched = _queue.Admit(pool => pool == WorkerPool.Claude ? settings.MaxParallelClaudeRuns : settings.MaxParallelLocalRuns,
+                holders, PoolFor(settings));
+            foreach (var runId in touched) bus.Publish(new QueueChanged(runId));
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Could not let queued runs start");
+        }
+        finally
+        {
+            _queueGate.Release();
+        }
+    }
+
+    /// <summary>Runs that use the local model for any agent share its workers, and runs entirely on Claude share Claude's.</summary>
+    internal static WorkerPool PoolFor(FactorySettings settings) =>
+        Enum.GetValues<AgentRole>().All(role => AgentProfiles.Resolve(settings, role).UsesClaude) ? WorkerPool.Claude : WorkerPool.Local;
+
+    /// <summary>The repository a path names, in one spelling, so runs in the same repository are grouped and queued together.</summary>
+    public static string RepositoryKey(string path) => Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
 
     /// <summary>True while any pipeline is working, and so may be waiting on the model.</summary>
     public bool HasActiveRuns => !_active.IsEmpty;
@@ -174,7 +251,7 @@ public sealed class FactoryOrchestrator(
 
         // Once the run is saved it has to be launched, or it would sit queued with no pipeline behind it.
         var run = await store.CreateRunAsync(null, task, CancellationToken.None);
-        Launch(run.Id, (context, token) => RunFromIngestAsync(context, token));
+        Launch(run.Id, new QueuedRequest(RequestKind.Start));
         return run;
     }
 
@@ -198,7 +275,7 @@ public sealed class FactoryOrchestrator(
         var previous = await store.GetRunAsync(runId, ct);
         await RequireStartableRepositoryAsync(previous.Task.RepositoryPath, ct);
         var run = await store.CreateRunAsync(previous.TaskId, null, ct);
-        Launch(run.Id, (context, token) => RunFromIngestAsync(context, token));
+        Launch(run.Id, new QueuedRequest(RequestKind.Start));
         return run;
     }
 
@@ -210,46 +287,64 @@ public sealed class FactoryOrchestrator(
 
         await store.ReplaceSubtasksAsync(runId, ToSubtasks(runId, plan), ct);
         bus.Publish(new PlanChanged(runId));
-        Launch(runId, (context, token) => ExecuteAsync(context, null, token));
+        Launch(runId, new QueuedRequest(RequestKind.Approve));
     }
 
     public async Task RegeneratePlanAsync(int runId, string? feedback, CancellationToken ct = default)
     {
         var run = await store.GetRunAsync(runId, ct);
         RequireStatus(run, RunStatus.AwaitingPlanApproval);
-        Launch(runId, (context, token) => DecomposeAndContinueAsync(context, feedback, token));
+        Launch(runId, new QueuedRequest(RequestKind.Regenerate, Text: feedback));
     }
 
     public async Task ResumeAsync(int runId, HumanDecision decision, string? guidance, CancellationToken ct = default)
     {
         var run = await store.GetRunAsync(runId, ct);
         RequireStatus(run, RunStatus.NeedsHuman);
+        // The decision is carried out when the run's turn comes, so leaving the line first undoes nothing.
+        Launch(runId, new QueuedRequest(RequestKind.Resume, decision, guidance));
+    }
+
+    /// <summary>Carries out what a run asked to do, once it has a worker.</summary>
+    private Task RunRequestAsync(PipelineContext context, QueuedRequest request, CancellationToken ct) => request.Kind switch
+    {
+        RequestKind.Start => RunFromIngestAsync(context, ct),
+        RequestKind.Approve => ExecuteAsync(context, null, ct),
+        RequestKind.Regenerate => DecomposeAndContinueAsync(context, request.Text, ct),
+        _ => ResumeFromPauseAsync(context, request.Decision, request.Text, ct)
+    };
+
+    private async Task ResumeFromPauseAsync(PipelineContext context, HumanDecision decision, string? guidance, CancellationToken ct)
+    {
+        var run = context.Run;
+        RequireStatus(run, RunStatus.NeedsHuman);
 
         switch (run.PausedStage)
         {
-            case PipelineStage.Ingest:
-                Launch(runId, (context, token) => RunFromIngestAsync(context, token));
+            // No stage means it was paused while waiting in line, before it started.
+            case PipelineStage.Ingest or null:
+                await RunFromIngestAsync(context, ct);
                 return;
             case PipelineStage.Decompose:
-                Launch(runId, (context, token) => PlanAsync(context, token));
+                await PlanAsync(context, ct);
                 return;
             case PipelineStage.Integrate:
-                Launch(runId, (context, token) => IntegrateAsync(context, token));
+                await IntegrateAsync(context, ct);
                 return;
         }
 
-        var subtasks = await store.GetSubtasksAsync(runId, ct);
+        var subtasks = await store.GetSubtasksAsync(run.Id, ct);
         var paused = subtasks.FirstOrDefault(s => s.Status == SubtaskStatus.NeedsHuman);
         if (paused is null)
         {
-            Launch(runId, (context, token) => ExecuteAsync(context, null, token));
+            await ExecuteAsync(context, null, ct);
             return;
         }
 
         paused.HumanGuidance = string.IsNullOrWhiteSpace(guidance) ? paused.HumanGuidance : guidance.Trim();
         var resumePoint = await ApplyDecisionAsync(run, paused, decision, ct);
         await store.UpdateSubtaskAsync(paused, ct);
-        Launch(runId, (context, token) => ExecuteAsync(context, resumePoint, token));
+        await ExecuteAsync(context, resumePoint, ct);
     }
 
     /// <summary>
@@ -268,7 +363,8 @@ public sealed class FactoryOrchestrator(
 
         active.PauseRequested = true;
         bus.Publish(new PauseRequested(runId));
-        if (!immediately) return;
+        // A run still waiting for a worker has no step to finish, so it leaves the line now.
+        if (!immediately && _queue.SpotOf(runId) is null) return;
 
         await active.Cancellation.CancelAsync();
         await active.Completion;
@@ -337,6 +433,7 @@ public sealed class FactoryOrchestrator(
         }
 
         await LeaveWorkingBranchAsync(run, ct);
+        run.QueuedRequest = null;
         await SetRunStatusAsync(run, RunStatus.Cancelled, ct);
     }
 
@@ -393,26 +490,41 @@ public sealed class FactoryOrchestrator(
         return new PullRequestDraft(run.Task.Title, body.ToString(), run.BranchName ?? "", run.BaseBranch ?? "", hasRemote);
     }
 
-    /// <summary>A run left mid-work by a previous process has no pipeline behind it, so it pauses for a resume.</summary>
+    /// <summary>
+    /// A run left mid-work by a previous process has no pipeline behind it, so it pauses for a resume. Runs that were
+    /// still waiting in line, whether to start, to carry out an approved plan or to resume, join the line again in the
+    /// order they were started, to do what they were waiting to do.
+    /// </summary>
     public async Task RecoverInterruptedRunsAsync(CancellationToken ct = default)
     {
-        foreach (var run in await store.ListRunsAsync(ct))
+        foreach (var run in (await store.ListRunsAsync(ct)).OrderBy(r => r.Id))
         {
-            if (!RunStateMachine.IsWorking(run.Status) || IsActive(run.Id)) continue;
-            await PauseRunAsync(run, InterruptedReason, ct);
+            if (IsActive(run.Id)) continue;
+            var request = QueuedRequest.Parse(run.QueuedRequest)
+                ?? (run is { Status: RunStatus.Queued, BranchName: null } ? new QueuedRequest(RequestKind.Start) : null);
+            if (request is not null && run.Status == request.WaitingStatus)
+            {
+                // Each takes its place before the next is launched, so the line keeps its order.
+                await Launch(run.Id, request).Joined.Task;
+                continue;
+            }
+            if (RunStateMachine.IsWorking(run.Status)) await PauseRunAsync(run, InterruptedReason, ct);
         }
     }
 
     /// <summary>Stops pipelines for shutdown. Their state is left as is, for recovery at the next start.</summary>
     public async Task StopAllAsync()
     {
+        // Runs giving back their workers mustn't let waiting runs in, which would start them as Hatchet stops.
+        _stopping = true;
         foreach (var active in _active.Values) await active.Cancellation.CancelAsync();
         await Task.WhenAll(_active.Values.Select(a => a.Completion));
     }
 
     // ---- Pipeline ----
 
-    private void Launch(int runId, Func<PipelineContext, CancellationToken, Task> body)
+    /// <summary>Starts a pipeline that waits in line for a worker, then carries out the request.</summary>
+    private ActivePipeline Launch(int runId, QueuedRequest request)
     {
         var active = new ActivePipeline();
         if (!_active.TryAdd(runId, active))
@@ -424,28 +536,92 @@ public sealed class FactoryOrchestrator(
             PipelineContext? context = null;
             try
             {
+                var settings = await WaitForWorkerAsync(runId, request, active, token);
                 var run = await store.GetRunAsync(runId, token);
-                context = new PipelineContext(run, await settingsStore.GetAsync(token));
-                await body(context, token);
+                run.QueuedRequest = null;
+                await store.UpdateRunAsync(run, token);
+                context = new PipelineContext(run, settings);
+                await RunRequestAsync(context, request, token);
             }
             catch (Exception ex) when (ex is PausedByUserException || ex is OperationCanceledException && token.IsCancellationRequested && active.PauseRequested)
             {
+                // Leaving the line drops what the run was waiting to do.
+                await ForgetQueuedRequestAsync(runId);
                 await PauseByUserAsync(context?.Run ?? await store.GetRunAsync(runId, CancellationToken.None));
             }
             catch (OperationCanceledException) when (token.IsCancellationRequested)
             {
-                // The user cancelled (CancelAsync finishes the job) or the app is stopping (recovery does).
+                // The user cancelled (CancelAsync finishes the job) or the app is stopping (recovery does, and a run
+                // still in line keeps its request so it can join the line again).
             }
             catch (Exception ex)
             {
                 logger.LogError(ex, "Pipeline for run {RunId} stopped", runId);
+                await ForgetQueuedRequestAsync(runId);
                 await HandlePipelineFailureAsync(runId, context, ex);
             }
             finally
             {
+                active.Joined.TrySetResult();
                 _active.TryRemove(runId, out _);
+                _queue.Release(runId);
+                bus.Publish(new QueueChanged(runId));
+                await RefreshQueueAsync();
             }
         }, CancellationToken.None);
+        return active;
+    }
+
+    /// <summary>
+    /// Waits in line until the run's pool has a worker free and no other run has its repository. Returns the settings
+    /// the run starts with, read once its turn comes, which can be long after it joined.
+    /// </summary>
+    private async Task<FactorySettings> WaitForWorkerAsync(int runId, QueuedRequest request, ActivePipeline active, CancellationToken ct)
+    {
+        var run = await store.GetRunAsync(runId, ct);
+        var repository = RepositoryKey(run.Task.RepositoryPath);
+        // Saved first, so if Hatchet restarts while the run waits, it joins the line again to do the same thing.
+        var saved = JsonSerializer.Serialize(request);
+        if (run.QueuedRequest != saved)
+        {
+            run.QueuedRequest = saved;
+            await store.UpdateRunAsync(run, ct);
+        }
+
+        var pool = PoolFor(await settingsStore.GetAsync(ct));
+        while (true)
+        {
+            var wait = _queue.WaitAsync(runId, repository, pool, ct);
+            active.Joined.TrySetResult();
+            await RefreshQueueAsync();
+            await wait;
+            // Hatchet may be stopping, and a run let in as others gave back their workers keeps its request for the restart.
+            ct.ThrowIfCancellationRequested();
+            // A pause asked for while it waited takes effect before it starts.
+            PauseIfRequested(runId);
+
+            // The line moves runs to the pool their agents use as settings change, so this differs only if they
+            // changed again just as it was let in. Then it waits for a worker in the right pool.
+            var settings = await settingsStore.GetAsync(ct);
+            pool = PoolFor(settings);
+            if (_queue.WorkingPool(runId) == pool) return settings;
+            _queue.Release(runId);
+        }
+    }
+
+    private async Task ForgetQueuedRequestAsync(int runId)
+    {
+        try
+        {
+            var run = await store.GetRunAsync(runId, CancellationToken.None);
+            if (run.QueuedRequest is null) return;
+            run.QueuedRequest = null;
+            await store.UpdateRunAsync(run, CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Could not clear what run {RunId} was waiting to do", runId);
+        }
     }
 
     private async Task HandlePipelineFailureAsync(int runId, PipelineContext? context, Exception ex)
@@ -455,8 +631,9 @@ public sealed class FactoryOrchestrator(
             var run = context?.Run ?? await store.GetRunAsync(runId);
             await LogAsync(runId, run.CurrentSubtaskId, AgentLogKind.Error, run.CurrentStage, ex.Message);
 
-            // Ingest failures mean the repository itself is unusable, and retrying can't fix that.
-            if (run.CurrentStage == PipelineStage.Ingest && ex is GitException or FactoryValidationException)
+            // Ingest failures mean the repository itself is unusable, and retrying can't fix that. A working tree that
+            // isn't ready only needs the user to tidy it, so that pauses for a resume instead.
+            if (run.CurrentStage == PipelineStage.Ingest && ex is (GitException or FactoryValidationException) and not RepositoryNotReadyException)
             {
                 run.PauseReason = ex.Message;
                 await SetRunStatusAsync(run, RunStatus.Failed, CancellationToken.None);
@@ -510,6 +687,8 @@ public sealed class FactoryOrchestrator(
         await SetRunStatusAsync(run, RunStatus.Ingesting, ct);
         await SetStageAsync(run, PipelineStage.Ingest, null, ct);
 
+        // A run that waited in line may have been started while another run had the repository, so its tree is checked now.
+        RequireCleanCheckout(await GitWorkspace.ProbeAsync(task.RepositoryPath, ct));
         await git.EnsureInitialCommitAsync(ct);
         run.BaseBranch = await git.GetCurrentBranchAsync(ct);
         run.BaseCommit = await git.GetHeadShaAsync(ct);
@@ -662,10 +841,10 @@ public sealed class FactoryOrchestrator(
         await SetSubtaskStatusAsync(subtask, SubtaskStatus.Refining, ct);
         await SetStageAsync(run, PipelineStage.Refine, subtask.Id, ct);
 
-        var files = RepositoryScanner.ReadFiles(context.Task.RepositoryPath,
-            subtask.TargetFilesToModify.Concat(subtask.TargetFilesToCreate).Concat(subtask.ContextFilesToRead),
-            settings.MaxFileChars, settings.MaxContextChars);
-        var prompt = PromptBuilder.Refine(subtask, context.Task.ArchitectureSpec, run.RepoMap, RepositoryScanner.Render(files));
+        var planned = PlannedFiles(subtask).ToList();
+        var files = RepositoryScanner.ReadFiles(context.Task.RepositoryPath, planned, settings.MaxFileChars, settings.MaxContextChars);
+        var definitions = await ReadDefinitionsAsync(context, subtask, AgentRole.ContextSpecifier, planned, files, ct, subtask.Title, subtask.Description);
+        var prompt = PromptBuilder.Refine(subtask, context.Task.ArchitectureSpec, run.RepoMap, RepositoryScanner.Render(files), definitions);
 
         var refined = await InvokeAgentAsync<RefinedSpecResponse>(context, AgentRole.ContextSpecifier, subtask.Id, prompt, null, ct);
         subtask.RefinedSpecJson = PromptBuilder.ToJson(refined);
@@ -681,16 +860,46 @@ public sealed class FactoryOrchestrator(
         await SetSubtaskStatusAsync(subtask, SubtaskStatus.Building, ct);
         await SetStageAsync(run, PipelineStage.Build, subtask.Id, ct);
 
-        var files = RepositoryScanner.ReadFiles(context.Task.RepositoryPath,
-            subtask.TargetFilesToModify.Concat(subtask.TargetFilesToCreate).Concat(subtask.ContextFilesToRead),
-            settings.MaxFileChars, settings.MaxContextChars);
-        var prompt = PromptBuilder.Build(subtask, RepositoryScanner.Render(files));
+        var planned = PlannedFiles(subtask).ToList();
+        var files = RepositoryScanner.ReadFiles(context.Task.RepositoryPath, planned, settings.MaxFileChars, settings.MaxContextChars);
+        var definitions = await ReadDefinitionsAsync(context, subtask, AgentRole.CodeGenerator, planned, files, ct,
+            subtask.Title, subtask.Description, subtask.RefinedSpecJson);
+        var prompt = PromptBuilder.Build(subtask, RepositoryScanner.Render(files), definitions);
 
         var patch = await InvokeAgentAsync<FilePatchSetResponse>(
             context, AgentRole.CodeGenerator, subtask.Id, prompt,
             p => p.Operations.Count == 0 ? "The operations list is empty, but this subtask requires file changes." : null,
             ct);
         return await ApplyPatchAsync(context, subtask, patch, PipelineStage.Build, ct);
+    }
+
+    private const int MaxDefinitionFiles = 10;
+
+    private static IEnumerable<string> PlannedFiles(FactorySubtask subtask) =>
+        subtask.TargetFilesToModify.Concat(subtask.TargetFilesToCreate).Concat(subtask.ContextFilesToRead);
+
+    /// <summary>
+    /// Reads the files that define the types the given texts name, and then those the agent's files name, such as the
+    /// parameter types of an interface it implements. Files the agent already sees are left out, and the rest fit in
+    /// what is left of the context budget. Returns them rendered, or an empty string if there are none.
+    /// </summary>
+    private async Task<string> ReadDefinitionsAsync(PipelineContext context, FactorySubtask subtask, AgentRole role,
+        IReadOnlyList<string> planned, IReadOnlyList<ContextFile> files, CancellationToken ct, params string?[] texts)
+    {
+        var settings = context.Settings;
+        var named = texts.Concat(files.Select(f => f.Content)).Where(t => !string.IsNullOrWhiteSpace(t));
+        var paths = DefinitionFinder.Find(context.Task.RepositoryPath, string.Join('\n', named), planned, MaxDefinitionFiles);
+        var budget = settings.MaxContextChars - files.Sum(f => f.Content?.Length ?? 0);
+        if (paths.Count == 0 || budget <= 0) return "";
+
+        var definitions = RepositoryScanner.ReadFiles(context.Task.RepositoryPath, paths, settings.MaxFileChars, budget)
+            .Where(f => f.Content is { Length: > 0 })
+            .ToList();
+        if (definitions.Count == 0) return "";
+
+        await LogAsync(context.Run.Id, subtask.Id, AgentLogKind.Info, context.Run.CurrentStage,
+            $"Gave the {AgentProfiles.Resolve(settings, role).DisplayName} the definitions of types it names: {string.Join(", ", definitions.Select(f => f.RelativePath))}.", ct);
+        return RepositoryScanner.Render(definitions);
     }
 
     /// <summary>Returns false if the fix itself was unusable. The attempt still counts.</summary>
@@ -705,10 +914,12 @@ public sealed class FactoryOrchestrator(
 
         await git.StageAllAsync(ct);
         var changed = await git.GetStagedFilesAsync(ct);
-        var files = RepositoryScanner.ReadFiles(context.Task.RepositoryPath,
-            changed.Concat(subtask.TargetFilesToModify).Concat(subtask.TargetFilesToCreate).Concat(subtask.ContextFilesToRead),
-            settings.MaxFileChars, settings.MaxContextChars);
-        var prompt = PromptBuilder.Fix(subtask, subtask.LastFailure ?? "(no failure was recorded)", RepositoryScanner.Render(files), subtask.HumanGuidance);
+        var planned = changed.Concat(PlannedFiles(subtask)).ToList();
+        var files = RepositoryScanner.ReadFiles(context.Task.RepositoryPath, planned, settings.MaxFileChars, settings.MaxContextChars);
+        // The errors name what the fix got wrong, so the types they name come first.
+        var definitions = await ReadDefinitionsAsync(context, subtask, AgentRole.BugFixer, planned, files, ct,
+            subtask.LastFailure, subtask.HumanGuidance, subtask.Title, subtask.Description, subtask.RefinedSpecJson);
+        var prompt = PromptBuilder.Fix(subtask, subtask.LastFailure ?? "(no failure was recorded)", RepositoryScanner.Render(files), subtask.HumanGuidance, definitions);
 
         Func<FilePatchSetResponse, string?> validate = p => p.Operations.Count == 0 ? "The operations list is empty, so nothing would change and the failure would repeat." : null;
         var claude = ClaudeCodeOptions.ModelLabel(AgentProfiles.Resolve(settings, AgentRole.BugFixer).ClaudeModel);
@@ -1250,6 +1461,9 @@ public sealed class FactoryOrchestrator(
 
         await store.UpdateRunAsync(run, ct);
         bus.Publish(new RunStatusChanged(run.Id, from, to));
+        // A finished run gives up its repository, which a queued run may be waiting for. A pipeline that is still
+        // running lets queued runs in itself as it ends.
+        if (RunStateMachine.IsTerminal(to) && !IsActive(run.Id)) await RefreshQueueAsync();
     }
 
     private async Task SetSubtaskStatusAsync(FactorySubtask subtask, SubtaskStatus to, CancellationToken ct)
@@ -1300,14 +1514,27 @@ public sealed class FactoryOrchestrator(
         var probe = await GitWorkspace.ProbeAsync(path, ct);
         if (!probe.Exists) throw new FactoryValidationException($"The folder {path} does not exist.");
         if (!probe.IsGitRepository) throw new FactoryValidationException($"{path} is not a Git repository.");
-        if (!probe.IsClean) throw new FactoryValidationException("The repository has uncommitted changes. Commit or stash them first, so Hatchet's commits and rollbacks can't touch your work.");
-        if (probe.CurrentBranch is null) throw new FactoryValidationException("The repository is in detached HEAD state. Check out a branch first.");
 
-        foreach (var run in await store.ListRunsAsync(ct))
-        {
-            if (!RunStateMachine.IsTerminal(run.Status) && string.Equals(Path.GetFullPath(run.Task.RepositoryPath), path, StringComparison.OrdinalIgnoreCase))
-                throw new FactoryValidationException($"Run #{run.Id} is still open on this repository. Finish or cancel it first.");
-        }
+        // Another open run has the working tree, so this one waits in line for it, and the tree is checked when its turn comes.
+        if (await GetOpenRunAsync(path, ct) is null) RequireCleanCheckout(probe);
+    }
+
+    /// <summary>
+    /// The latest run in a repository that isn't finished, if any. It has the repository's working tree, so a run
+    /// started there now waits in line until it finishes.
+    /// </summary>
+    public async Task<FactoryRun?> GetOpenRunAsync(string repositoryPath, CancellationToken ct = default)
+    {
+        var key = RepositoryKey(repositoryPath);
+        return (await store.ListRunsAsync(ct))
+            .Where(r => !RunStateMachine.IsTerminal(r.Status) && string.Equals(RepositoryKey(r.Task.RepositoryPath), key, StringComparison.OrdinalIgnoreCase))
+            .MaxBy(r => r.Id);
+    }
+
+    private static void RequireCleanCheckout(RepositoryProbe probe)
+    {
+        if (!probe.IsClean) throw new RepositoryNotReadyException("The repository has uncommitted changes. Commit or stash them first, so Hatchet's commits and rollbacks can't touch your work.");
+        if (probe.CurrentBranch is null) throw new RepositoryNotReadyException("The repository is in detached HEAD state. Check out a branch first.");
     }
 
     private static void RequireStatus(FactoryRun run, RunStatus expected)

@@ -19,23 +19,25 @@ public static class PromptBuilder
         return builder.ToString();
     }
 
-    public static string Refine(FactorySubtask subtask, string spec, string repoMap, string fileContext)
+    public static string Refine(FactorySubtask subtask, string spec, string repoMap, string fileContext, string definitions = "")
     {
         var builder = new StringBuilder();
         Section(builder, "Overall architecture specification", spec);
         Section(builder, "Repository map", repoMap);
         SubtaskSection(builder, subtask);
         Section(builder, "Existing file contents", fileContext);
+        DefinitionsSection(builder, definitions);
         builder.Append("Produce the exact implementation instructions, signatures, test cases and edge-case checks for this subtask.");
         return builder.ToString();
     }
 
-    public static string Build(FactorySubtask subtask, string fileContext)
+    public static string Build(FactorySubtask subtask, string fileContext, string definitions = "")
     {
         var builder = new StringBuilder();
         SubtaskSection(builder, subtask);
         Section(builder, "Refined specification", subtask.RefinedSpecJson ?? "(none)");
         Section(builder, "Current file contents", fileContext);
+        DefinitionsSection(builder, definitions);
         builder.Append("Write the implementation and unit tests for this subtask.");
         return builder.ToString();
     }
@@ -51,7 +53,7 @@ public static class PromptBuilder
         return builder.ToString();
     }
 
-    public static string Fix(FactorySubtask subtask, string failure, string fileContext, string? guidance)
+    public static string Fix(FactorySubtask subtask, string failure, string fileContext, string? guidance, string definitions = "")
     {
         var builder = new StringBuilder();
         SubtaskSection(builder, subtask);
@@ -61,8 +63,16 @@ public static class PromptBuilder
         Section(builder, "Failure to fix", failure);
         if (!string.IsNullOrWhiteSpace(guidance)) Section(builder, "Human guidance", guidance);
         Section(builder, "Current file contents", fileContext);
+        DefinitionsSection(builder, definitions);
         builder.Append($"This is fix attempt {subtask.FixAttempts}. Return the file changes that fix the failure.");
         return builder.ToString();
+    }
+
+    // The files that declare types named above, so their members and constructors are used as they are, not guessed.
+    private static void DefinitionsSection(StringBuilder builder, string definitions)
+    {
+        if (definitions.Length == 0) return;
+        Section(builder, "Definitions of types named above. Use their members and constructor parameters exactly as declared here", definitions);
     }
 
     public static string Repair(string prompt, string error) =>
