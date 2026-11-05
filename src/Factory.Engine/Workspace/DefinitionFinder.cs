@@ -58,6 +58,10 @@ public static partial class DefinitionFinder
         return found;
     }
 
+    /// <summary>The names of the types the repository's own source declares.</summary>
+    public static IReadOnlySet<string> DeclaredNames(string repositoryPath) =>
+        Directory.Exists(repositoryPath) ? IndexDeclarations(repositoryPath).Keys.ToHashSet(StringComparer.Ordinal) : new HashSet<string>();
+
     /// <summary>
     /// Each declared type name, with the files that declare it. Files unchanged since the last call, by time and size,
     /// aren't read again.

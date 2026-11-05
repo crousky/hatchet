@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using Factory.Contracts;
 using Factory.Engine.Llm;
 using Factory.Engine.Verification;
@@ -20,7 +21,7 @@ public sealed class RepositoryNotReadyException(string message) : FactoryValidat
 /// Runs the factory loop: Ingest, Decompose, then Refine, Build, Verify, Review and Fix per subtask,
 /// then Integrate. Pipelines run in the background; progress goes to the store and the event bus.
 /// </summary>
-public sealed class FactoryOrchestrator(
+public sealed partial class FactoryOrchestrator(
     IRunStore store,
     ISettingsStore settingsStore,
     ILlmClient llm,
@@ -786,12 +787,19 @@ public sealed class FactoryOrchestrator(
             {
                 if (needsFix)
                 {
-                    if (subtask.FixAttempts >= context.Settings.MaxFixRetries)
+                    // Fixes before the first review and fixes after it have a budget each, so the reviewer's findings
+                    // are always worked on, however many build fixes it took to reach the reviewer.
+                    var reviewed = subtask.ReviewJson is not null;
+                    var used = reviewed ? subtask.ReviewFixAttempts : subtask.FixAttempts - subtask.ReviewFixAttempts;
+                    if (used >= context.Settings.MaxFixRetries)
                     {
-                        await PauseForSubtaskAsync(run, subtask, $"\"{subtask.Title}\" still fails after {subtask.FixAttempts} fix attempts.", ct);
+                        await PauseForSubtaskAsync(run, subtask, reviewed
+                            ? $"\"{subtask.Title}\" still isn't accepted after {used} fix attempts since the reviewer first rejected it."
+                            : $"\"{subtask.Title}\" still fails after {used} fix attempts.", ct);
                         return false;
                     }
 
+                    if (reviewed) subtask.ReviewFixAttempts++;
                     needsFix = false;
                     if (!await FixAsync(context, subtask, ct))
                     {
@@ -934,21 +942,41 @@ public sealed class FactoryOrchestrator(
     private async Task<string> ReadDefinitionsAsync(PipelineContext context, FactorySubtask subtask, AgentRole role,
         IReadOnlyList<string> planned, IReadOnlyList<ContextFile> files, CancellationToken ct, params string?[] texts)
     {
-        var settings = context.Settings;
-        var named = texts.Concat(files.Select(f => f.Content)).Where(t => !string.IsNullOrWhiteSpace(t));
-        var paths = DefinitionFinder.Find(context.Task.RepositoryPath, string.Join('\n', named), planned, MaxDefinitionFiles);
+        var (settings, repository) = (context.Settings, context.Task.RepositoryPath);
+        var named = string.Join('\n', texts.Concat(files.Select(f => f.Content)).Where(t => !string.IsNullOrWhiteSpace(t)));
         var budget = settings.MaxContextChars - files.Sum(f => f.Content?.Length ?? 0);
-        if (paths.Count == 0 || budget <= 0) return "";
+        if (budget <= 0) return "";
 
-        var definitions = RepositoryScanner.ReadFiles(context.Task.RepositoryPath, paths, settings.MaxFileChars, budget)
-            .Where(f => f.Content is { Length: > 0 })
-            .ToList();
-        if (definitions.Count == 0) return "";
+        var paths = DefinitionFinder.Find(repository, named, planned, MaxDefinitionFiles);
+        var definitions = paths.Count == 0
+            ? []
+            : RepositoryScanner.ReadFiles(repository, paths, settings.MaxFileChars, budget).Where(f => f.Content is { Length: > 0 }).ToList();
+        budget -= definitions.Sum(f => f.Content!.Length);
 
-        await LogAsync(context.Run.Id, subtask.Id, AgentLogKind.Info, context.Run.CurrentStage,
-            $"Gave the {AgentProfiles.Resolve(settings, role).DisplayName} the definitions of types it names: {string.Join(", ", definitions.Select(f => f.RelativePath))}.", ct);
-        return RepositoryScanner.Render(definitions);
+        // Types from packages, such as a UI library's components, which agents otherwise guess at from memory.
+        var packaged = new List<ContextFile>();
+        if (budget > 0)
+        {
+            foreach (var type in PackageDefinitions.Find(repository, named, DefinitionFinder.DeclaredNames(repository), MaxPackageTypes, Math.Min(MaxPackageTypeChars, settings.MaxFileChars)))
+            {
+                if (type.Content!.Length > budget) break;
+                packaged.Add(type);
+                budget -= type.Content.Length;
+            }
+        }
+
+        var name = AgentProfiles.Resolve(settings, role).DisplayName;
+        if (definitions.Count > 0)
+            await LogAsync(context.Run.Id, subtask.Id, AgentLogKind.Info, context.Run.CurrentStage,
+                $"Gave the {name} the definitions of types it names: {string.Join(", ", definitions.Select(f => f.RelativePath))}.", ct);
+        if (packaged.Count > 0)
+            await LogAsync(context.Run.Id, subtask.Id, AgentLogKind.Info, context.Run.CurrentStage,
+                $"Gave the {name} the signatures of package types it names: {string.Join(", ", packaged.Select(f => f.RelativePath["package ".Length..]))}.", ct);
+        return definitions.Count + packaged.Count == 0 ? "" : RepositoryScanner.Render([.. definitions, .. packaged]);
     }
+
+    private const int MaxPackageTypes = 6;
+    private const int MaxPackageTypeChars = 6000;
 
     /// <summary>Returns false if the fix itself was unusable. The attempt still counts.</summary>
     private async Task<bool> FixAsync(PipelineContext context, FactorySubtask subtask, CancellationToken ct)
@@ -1008,7 +1036,76 @@ public sealed class FactoryOrchestrator(
         {
             patch = await InvokeAgentAsync(context, AgentRole.BugFixer, subtask.Id, prompt, validate, ct);
         }
+        if (DroppedRequiredTypes(context.Task.RepositoryPath, subtask, patch, changed) is { Count: > 0 } dropped)
+        {
+            await RefuseFixAsync(context, subtask, patch, dropped, ct);
+            return false;
+        }
         return await ApplyPatchAsync(context, subtask, patch, PipelineStage.Fix, ct);
+    }
+
+    private const string RefusedFixLead = "The last fix was not applied, because it took out ";
+    private const string FailureToFixLead = "The failure it was meant to fix:";
+
+    [GeneratedRegex(@"\b[A-Za-z_][A-Za-z0-9_]*\b")]
+    private static partial Regex Identifier();
+
+    /// <summary>
+    /// The types the specification names that a fix takes out of the subtask's files altogether, such as a component
+    /// swapped for plain markup to get past an error in how it was used. Only real types count, from the repository
+    /// or its packages, so a member the specification got wrong can still be replaced.
+    /// </summary>
+    internal static IReadOnlyList<string> DroppedRequiredTypes(string repositoryPath, FactorySubtask subtask, FilePatchSetResponse patch, IEnumerable<string> changedFiles)
+    {
+        var spec = string.Join('\n', new[] { subtask.Title, subtask.Description, subtask.RefinedSpecJson, subtask.HumanGuidance }.Where(t => t is not null));
+        var named = Identifier().Matches(spec).Select(m => m.Value).ToHashSet(StringComparer.Ordinal);
+        if (named.Count == 0 || patch.Operations.Count == 0) return [];
+
+        var root = Path.GetFullPath(repositoryPath);
+        string? Read(string relative)
+        {
+            var full = Path.GetFullPath(Path.Combine(root, relative));
+            if (!full.StartsWith(root, StringComparison.OrdinalIgnoreCase) || !File.Exists(full)) return null;
+            try { return File.ReadAllText(full); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return null; }
+        }
+
+        var patched = patch.Operations.Select(o => NormalizePath(o.RelativeFilePath)).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var before = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var path in patched)
+            if (Read(path) is { } content) before.UnionWith(Identifier().Matches(content).Select(m => m.Value).Where(named.Contains));
+        if (before.Count == 0) return [];
+
+        // After the fix: what it writes, and the subtask's other changed files as they are.
+        var after = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var operation in patch.Operations.Where(o => !o.Action.Equals("DELETE", StringComparison.OrdinalIgnoreCase)))
+            after.UnionWith(Identifier().Matches(operation.FileContent ?? "").Select(m => m.Value));
+        foreach (var path in changedFiles.Select(NormalizePath).Where(p => !patched.Contains(p)))
+            if (Read(path) is { } content) after.UnionWith(Identifier().Matches(content).Select(m => m.Value));
+
+        var dropped = before.Where(n => !after.Contains(n)).ToList();
+        if (dropped.Count == 0) return [];
+        var declared = DefinitionFinder.DeclaredNames(repositoryPath);
+        var packaged = PackageDefinitions.KnownNames(repositoryPath);
+        return dropped.Where(n => declared.Contains(n) || packaged.Contains(n)).Order(StringComparer.Ordinal).ToList();
+    }
+
+    /// <summary>Leaves the files as they were, and tells the next fix to keep what the specification asks for.</summary>
+    private async Task RefuseFixAsync(PipelineContext context, FactorySubtask subtask, FilePatchSetResponse patch, IReadOnlyList<string> dropped, CancellationToken ct)
+    {
+        var names = string.Join(", ", dropped.Select(n => $"`{n}`"));
+        var (it, isIt) = dropped.Count == 1 ? ("it", "it is") : ("them", "they are");
+        var failure = subtask.LastFailure ?? "(no failure was recorded)";
+        var marker = failure.IndexOf(FailureToFixLead, StringComparison.Ordinal);
+        if (marker >= 0) failure = failure[(marker + FailureToFixLead.Length)..].TrimStart();
+
+        subtask.LastFailure = $"{RefusedFixLead}{names}, which the specification asks for. Keep {it} and fix how {isIt} used instead. "
+            + $"The definitions below show {(dropped.Count == 1 ? "its" : "their")} namespace and members, where Hatchet found them.\n\n{FailureToFixLead}\n{failure}";
+        subtask.FixHistory.Add($"Attempt {subtask.FixAttempts}: {patch.SummaryOfChanges}\nNot applied: it took out {names}, which the specification asks for.");
+        if (subtask.FixHistory.Count > MaxFixHistory) subtask.FixHistory.RemoveAt(0);
+        await store.UpdateSubtaskAsync(subtask, ct);
+        await LogAsync(context.Run.Id, subtask.Id, AgentLogKind.Warning, PipelineStage.Fix,
+            $"Didn't apply the Bug Fixer's change: it took out {names}, which the specification asks for. The next attempt is told to keep {it}.", ct);
     }
 
     private static string DescribeDuration(TimeSpan span) =>
@@ -1550,6 +1647,7 @@ public sealed class FactoryOrchestrator(
                 subtask.LastFailure = null;
                 subtask.ReviewJson = null;
                 subtask.FixAttempts = 0;
+                subtask.ReviewFixAttempts = 0;
                 subtask.FixHistory.Clear();
                 await SetSubtaskStatusAsync(subtask, SubtaskStatus.Pending, ct);
                 return new ResumePoint(subtask.Id, SubtaskEntry.Start);
@@ -1562,10 +1660,12 @@ public sealed class FactoryOrchestrator(
 
             case HumanDecision.RetryFixer when subtask.LastFailure is not null:
                 subtask.FixAttempts = 0;
+                subtask.ReviewFixAttempts = 0;
                 return new ResumePoint(subtask.Id, SubtaskEntry.Fix);
 
             case HumanDecision.Reverify when built:
                 subtask.FixAttempts = 0;
+                subtask.ReviewFixAttempts = 0;
                 return new ResumePoint(subtask.Id, SubtaskEntry.Verify);
 
             case HumanDecision.Resume when built:

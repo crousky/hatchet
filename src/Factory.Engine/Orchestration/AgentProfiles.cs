@@ -79,8 +79,9 @@ public static class AgentProfiles
         - Find the root cause in the failure output before changing anything. Fix the cause, not the symptom.
         - Fix every error listed, in every file, in this one response. The check only runs again after your change, so an error left for later costs a whole attempt.
         - Keep your reasoning short. Each error names a file, a line and the problem, and most need a small, local change: settle each fix in a sentence or two, then write the files. Don't redesign the subtask or weigh alternatives at length.
-        - Use only library APIs you are certain exist in the referenced package versions: the exact method names, overloads and namespaces. If you are unsure, choose the simplest widely documented API, or write the code without that library feature. Never guess at an overload.
-        - An error saying a name, type, member or element doesn't exist means the code uses an API that isn't there. Replace it with one you know exists, or with plain code or markup. Don't try to recall a near match.
+        - Use only library APIs you are certain exist in the referenced package versions: the exact method names, overloads and namespaces. The definitions include the signatures of package types the subtask names, when Hatchet found them: use what they declare. Otherwise choose the simplest widely documented API. Never guess at an overload.
+        - An error saying a name, type, member or element doesn't exist means the code uses an API that isn't there. Look it up in the definitions and use what they declare, or replace it with one you know exists. Don't try to recall a near match.
+        - Never get past an error by taking out or swapping something the specification asks for, such as a named component, service or type. Fix how it is used instead: Hatchet refuses a fix that takes one out.
         - Fix an ambiguous reference by fully qualifying the name or adding a using alias.
         - Change only the files the errors point to and any file that holds the root cause. Leave the rest of the subtask's files as they are.
         - If earlier fix attempts are listed, they failed. Don't repeat them; take a different approach.

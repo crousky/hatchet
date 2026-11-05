@@ -219,7 +219,7 @@ public class OrchestratorTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task Review_rejections_count_toward_the_same_retry_cap()
+    public async Task Review_rejections_have_a_retry_cap_of_their_own()
     {
         _llm.Enqueue(AgentRole.TaskPlanner, Plan("alpha"));
         _llm.Enqueue(AgentRole.ContextSpecifier, Refined());
@@ -229,8 +229,74 @@ public class OrchestratorTests : IAsyncLifetime
 
         var run = await WaitForAsync((await StartAsync()).Id, RunStatus.NeedsHuman);
 
-        Assert.Equal(3, (await _store.GetSubtasksAsync(run.Id)).Single().FixAttempts);
+        var subtask = (await _store.GetSubtasksAsync(run.Id)).Single();
+        Assert.Equal(3, subtask.FixAttempts);
+        Assert.Equal(3, subtask.ReviewFixAttempts);
         Assert.Equal(4, _llm.Calls.Count(c => c.Role == AgentRole.StaticReviewer));
+        Assert.Contains("since the reviewer first rejected it", run.PauseReason);
+    }
+
+    [Fact]
+    public async Task A_rejection_that_comes_after_the_build_fixes_are_spent_still_gets_fixed()
+    {
+        _llm.Enqueue(AgentRole.TaskPlanner, Plan("alpha"));
+        _llm.Enqueue(AgentRole.ContextSpecifier, Refined());
+        _llm.Enqueue(AgentRole.CodeGenerator, Patch("alpha.txt", "broken"));
+        _llm.Enqueue(AgentRole.BugFixer, Patch("alpha.txt", "1"), Patch("alpha.txt", "2"), Patch("alpha.txt", "builds"), Patch("alpha.txt", "to spec"));
+        _llm.Enqueue(AgentRole.StaticReviewer, Verdict(false, "Use the component the spec names"), Verdict(true));
+        for (var i = 0; i < 3; i++) _commands.Results.Enqueue((1, "error CS0246"));
+
+        var run = await WaitForAsync((await StartAsync()).Id, RunStatus.ReadyToMerge);
+
+        var subtask = (await _store.GetSubtasksAsync(run.Id)).Single();
+        Assert.Equal(4, subtask.FixAttempts);
+        Assert.Equal(1, subtask.ReviewFixAttempts);
+        Assert.Equal("to spec", File.ReadAllText(_repo.File("alpha.txt")));
+        Assert.Contains("Use the component the spec names", _llm.Calls.Last(c => c.Role == AgentRole.BugFixer).Prompt);
+    }
+
+    [Fact]
+    public async Task A_fix_that_takes_out_a_type_the_spec_names_is_not_applied()
+    {
+        _repo.Write("src/Ui/FancyPicker.cs", "public sealed class FancyPicker { public string Label { get; set; } }\n");
+        await _git.StageAllAsync();
+        await _git.CommitStagedAsync("Add the picker");
+        _llm.Enqueue(AgentRole.TaskPlanner, JsonSerializer.Serialize(
+            new TaskGraphResponse([new SubtaskDto(1, "alpha", "Let the user choose with a FancyPicker.", [], ["alpha.txt"], [], "")]),
+            LlmSchemas.SerializerOptions));
+        _llm.Enqueue(AgentRole.ContextSpecifier, Refined());
+        _llm.Enqueue(AgentRole.CodeGenerator, Patch("alpha.txt", "new FancyPicker { Text = \"x\" }"));
+        _llm.Enqueue(AgentRole.BugFixer, Patch("alpha.txt", "<select>plain</select>"), Patch("alpha.txt", "new FancyPicker { Label = \"x\" }"));
+        _llm.Enqueue(AgentRole.StaticReviewer, Verdict(true));
+        _commands.Results.Enqueue((1, "error CS0117: 'FancyPicker' does not contain a definition for 'Text'"));
+
+        var run = await WaitForAsync((await StartAsync()).Id, RunStatus.ReadyToMerge);
+
+        var subtask = (await _store.GetSubtasksAsync(run.Id)).Single();
+        Assert.Equal(2, subtask.FixAttempts);
+        Assert.Equal("new FancyPicker { Label = \"x\" }", File.ReadAllText(_repo.File("alpha.txt")));
+        var second = _llm.Calls.Where(c => c.Role == AgentRole.BugFixer).Last().Prompt;
+        Assert.Contains("took out `FancyPicker`, which the specification asks for", second);
+        Assert.Contains("does not contain a definition for 'Text'", second); // The failure it was meant to fix is kept.
+        Assert.Contains(await _store.GetLogsAsync(run.Id), l => l.Message.StartsWith("Didn't apply the Bug Fixer's change: it took out `FancyPicker`"));
+        Assert.Equal(3, _commands.Commands.Count); // The refused fix was never checked: build, the second fix, integration.
+    }
+
+    [Fact]
+    public void Only_real_types_the_spec_names_count_as_taken_out()
+    {
+        _repo.Write("src/Ui/FancyPicker.cs", "public sealed class FancyPicker { }\n");
+        _repo.Write("alpha.txt", "new FancyPicker { HostsCount = 1 }; Helper();");
+        var subtask = new FactorySubtask { Title = "alpha", Description = "Use a FancyPicker, set HostsCount and call Helper." };
+
+        FilePatchSetResponse Writes(string content) => new("x", [new FileOperationDto("alpha.txt", FileActions.Overwrite, content)]);
+
+        Assert.Equal(["FancyPicker"], FactoryOrchestrator.DroppedRequiredTypes(_repo.Path, subtask, Writes("plain"), []));
+        // HostsCount and Helper aren't types, so a fix may replace them, as when the spec got a member's name wrong.
+        Assert.Empty(FactoryOrchestrator.DroppedRequiredTypes(_repo.Path, subtask, Writes("new FancyPicker { HostCount = 1 };"), []));
+        // Moving it to another changed file keeps it.
+        _repo.Write("beta.txt", "FancyPicker");
+        Assert.Empty(FactoryOrchestrator.DroppedRequiredTypes(_repo.Path, subtask, Writes("plain"), ["beta.txt"]));
     }
 
     [Fact]
@@ -1412,7 +1478,7 @@ public class OrchestratorTests : IAsyncLifetime
         {
             Id = s.Id, RunId = s.RunId, Order = s.Order, Title = s.Title, Description = s.Description,
             TargetFilesToModify = s.TargetFilesToModify, TargetFilesToCreate = s.TargetFilesToCreate, ContextFilesToRead = s.ContextFilesToRead,
-            VerificationCommand = s.VerificationCommand, CommandApproved = s.CommandApproved, Status = s.Status, FixAttempts = s.FixAttempts,
+            VerificationCommand = s.VerificationCommand, CommandApproved = s.CommandApproved, Status = s.Status, FixAttempts = s.FixAttempts, ReviewFixAttempts = s.ReviewFixAttempts,
             LastFailure = s.LastFailure, FixHistory = [.. s.FixHistory], HumanGuidance = s.HumanGuidance, RefinedSpecJson = s.RefinedSpecJson,
             SummaryOfChanges = s.SummaryOfChanges, ReviewJson = s.ReviewJson, CommitSha = s.CommitSha
         };
