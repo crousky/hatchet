@@ -11,7 +11,8 @@ public record SubtaskDto(
     List<string> TargetFilesToModify,
     List<string> TargetFilesToCreate,
     List<string> ContextFilesToRead,
-    string VerificationCommand);
+    string VerificationCommand,
+    List<string>? Skills = null); // Optional when parsing, so an answer from before skills still reads.
 
 public record RefinedSpecResponse(
     string ImplementationInstructions,
@@ -51,7 +52,8 @@ public sealed record SubtaskEdit(
     List<string> TargetFilesToModify,
     List<string> TargetFilesToCreate,
     List<string> ContextFilesToRead,
-    string VerificationCommand);
+    string VerificationCommand,
+    List<string>? Skills = null);
 
 public sealed record RepositoryProbe(
     bool Exists,

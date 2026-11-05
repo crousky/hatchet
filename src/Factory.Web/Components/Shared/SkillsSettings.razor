@@ -1,0 +1,111 @@
+@using Factory.Engine.Skills
+@inject FactoryOrchestrator Orchestrator
+@inject IRunStore Store
+
+<section class="settings-section">
+    <h2>Skills</h2>
+    <div class="hint">
+        A skill is instructions written once, such as how a project uses its UI library. It's a folder holding a <code>SKILL.md</code>, laid out as in Claude Code:
+        YAML frontmatter with a <code>name</code>, a <code>description</code> and, optionally, the <code>roles</code> it is for
+        (@string.Join(", ", SkillLibrary.SkilledRoles); all of them when left out), then the instructions in markdown.
+        The Task Planner sees each skill's name and description and picks the skills each subtask needs. Those agents then get the instructions in their prompts.
+        Hatchet looks in a repository's <code>.hatchet/skills</code> and <code>.claude/skills</code> folders, then in your own folder for every repository.
+    </div>
+
+    @if (_groups is null)
+    {
+        <div class="muted small"><span class="spinner"></span> Looking for skills</div>
+    }
+    else
+    {
+        @foreach (var group in _groups)
+        {
+            <div class="skill-group">
+                <div class="project-heading">
+                    <span class="project-name">@group.Title</span>
+                    <span class="project-path mono-small muted">@group.Location</span>
+                    <span class="project-count muted small">@group.Skills.Count @(group.Skills.Count == 1 ? "skill" : "skills")</span>
+                </div>
+                @if (group.Skills.Count == 0)
+                {
+                    <div class="muted small">@group.Empty</div>
+                }
+                else
+                {
+                    <table class="profiles-table skills-table">
+                        <thead>
+                            <tr><th>Skill</th><th>For</th><th>Found in</th></tr>
+                        </thead>
+                        <tbody>
+                            @foreach (var skill in group.Skills)
+                            {
+                                <tr>
+                                    <td>
+                                        <div class="mono">@skill.Name</div>
+                                        <div class="hint">@(skill.Description.Length > 0 ? skill.Description : "No description")</div>
+                                        @foreach (var problem in skill.Problems)
+                                        {
+                                            <div class="probe-warn small"><Icon Name="alert" Size="12" /> @problem</div>
+                                        }
+                                    </td>
+                                    <td class="small">@Roles(skill)</td>
+                                    <td class="small">
+                                        <div>@SourceLabel(skill.Source)</div>
+                                        <div class="mono-small muted" title="@skill.Path">@Shorten(skill.Path, group.Root)</div>
+                                    </td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                }
+            </div>
+        }
+    }
+</section>
+
+@code {
+    private sealed record SkillGroup(string Title, string Location, string? Root, IReadOnlyList<Skill> Skills, string Empty);
+
+    private List<SkillGroup>? _groups;
+
+    protected override async Task OnInitializedAsync()
+    {
+        var library = Orchestrator.Skills;
+        var groups = new List<SkillGroup>
+        {
+            new("Your skills", library.UserDirectory ?? "(none)", library.UserDirectory, library.LoadUser(),
+                "None yet. Add a folder with a SKILL.md here to use it in every repository.")
+        };
+
+        var repositories = (await Store.ListRunsAsync())
+            .Select(r => FactoryOrchestrator.RepositoryKey(r.Task.RepositoryPath))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Where(Directory.Exists)
+            .Order(StringComparer.OrdinalIgnoreCase);
+        foreach (var repository in repositories)
+        {
+            // Only the repository's own, as the user's are listed above.
+            var own = library.Load(repository).Where(s => s.Source != SkillSource.User).ToList();
+            groups.Add(new(Fmt.FolderName(repository), repository, repository, own,
+                "None. Add them under .hatchet/skills or .claude/skills, or save the guidance you give a paused run as one."));
+        }
+        _groups = groups;
+    }
+
+    private static string Roles(Skill skill) =>
+        skill.Roles.Count == SkillLibrary.SkilledRoles.Count && SkillLibrary.SkilledRoles.All(skill.IsFor)
+            ? "Every agent that takes skills"
+            : string.Join(", ", skill.Roles.Select(r => AgentProfiles.Defaults.Single(p => p.Role == r).DisplayName));
+
+    private static string SourceLabel(SkillSource source) => source switch
+    {
+        SkillSource.Project => "Project",
+        SkillSource.ClaudeProject => "Project, shared with Claude Code",
+        _ => "Yours"
+    };
+
+    private static string Shorten(string path, string? root) =>
+        root is not null && path.StartsWith(root, StringComparison.OrdinalIgnoreCase)
+            ? Path.GetRelativePath(root, path).Replace('\\', '/')
+            : path;
+}

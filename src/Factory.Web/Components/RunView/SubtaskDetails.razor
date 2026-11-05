@@ -25,7 +25,7 @@ else
 
         <p class="details-description">@Subtask.Description</p>
 
-        @if (Subtask.TargetFilesToModify.Count + Subtask.TargetFilesToCreate.Count + Subtask.ContextFilesToRead.Count > 0)
+        @if (Subtask.TargetFilesToModify.Count + Subtask.TargetFilesToCreate.Count + Subtask.ContextFilesToRead.Count + Subtask.Skills.Count > 0)
         {
             <div class="plan-chips">
                 @foreach (var file in Subtask.TargetFilesToModify)
@@ -39,6 +39,10 @@ else
                 @foreach (var file in Subtask.ContextFilesToRead)
                 {
                     <span class="file-chip" title="Read for context">@file</span>
+                }
+                @foreach (var skill in Subtask.Skills)
+                {
+                    <span class="file-chip file-skill" title="Skill">@skill</span>
                 }
             </div>
         }

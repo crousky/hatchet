@@ -112,7 +112,7 @@ else
             }
             else if (_run.Status == RunStatus.NeedsHuman)
             {
-                <PausePanel Run="_run" Paused="PausedSubtask" Busy="_busy" OnDecision="ResumeAsync" />
+                <PausePanel Run="_run" Paused="PausedSubtask" Busy="_busy" OnDecision="ResumeAsync" SaveSkill="SaveSkillAsync" />
             }
             else if (_run.Status == RunStatus.Failed)
             {
@@ -484,6 +484,13 @@ else
 
     private Task ResumeAsync((HumanDecision Decision, string? Guidance) choice) =>
         ActAsync(() => Orchestrator.ResumeAsync(RunId, choice.Decision, choice.Guidance));
+
+    private async Task<string?> SaveSkillAsync(string name, string description, string guidance)
+    {
+        string? saved = null;
+        await ActAsync(async () => saved = await Orchestrator.SaveGuidanceAsSkillAsync(RunId, name, description, guidance));
+        return saved;
+    }
 
     private Task PauseAsync(bool immediately) => ActAsync(() => Orchestrator.PauseAsync(RunId, immediately));
 

@@ -67,6 +67,10 @@
                         <input autocomplete="off" data-1p-ignore data-lpignore="true" class="mono" spellcheck="false" placeholder="comma separated" @bind="item.Context" />
                     </label>
                     <label>
+                        <span>Skills</span>
+                        <input autocomplete="off" data-1p-ignore data-lpignore="true" class="mono" spellcheck="false" placeholder="comma separated" @bind="item.Skills" />
+                    </label>
+                    <label>
                         <span>Verify with</span>
                         <input autocomplete="off" data-1p-ignore data-lpignore="true" class="mono" spellcheck="false" placeholder="@(string.IsNullOrEmpty(DefaultCommand) ? "Detect from the repository" : DefaultCommand)" @bind="item.Command" />
                     </label>
@@ -91,6 +95,10 @@
                     @foreach (var file in Split(item.Context))
                     {
                         <span class="file-chip" title="Read for context">@file</span>
+                    }
+                    @foreach (var skill in Split(item.Skills))
+                    {
+                        <span class="file-chip file-skill" title="Skill">@skill</span>
                     }
                 </div>
             }
@@ -128,6 +136,7 @@
         public string Modify { get; set; } = "";
         public string Create { get; set; } = "";
         public string Context { get; set; } = "";
+        public string Skills { get; set; } = "";
         public string Command { get; set; } = "";
     }
 
@@ -148,6 +157,7 @@
             Modify = string.Join(", ", s.TargetFilesToModify),
             Create = string.Join(", ", s.TargetFilesToCreate),
             Context = string.Join(", ", s.ContextFilesToRead),
+            Skills = string.Join(", ", s.Skills),
             Command = s.VerificationCommand
         }).ToList();
     }
@@ -165,6 +175,6 @@
         files.Split([',', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
 
     private Task ApproveAsync() => OnApprove.InvokeAsync(_items
-        .Select(i => new SubtaskEdit(null, i.Title, i.Description, Split(i.Modify), Split(i.Create), Split(i.Context), i.Command))
+        .Select(i => new SubtaskEdit(null, i.Title, i.Description, Split(i.Modify), Split(i.Create), Split(i.Context), i.Command, Split(i.Skills)))
         .ToList());
 }

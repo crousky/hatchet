@@ -5,6 +5,7 @@ using System.Text.Json;
 using System.Text.RegularExpressions;
 using Factory.Contracts;
 using Factory.Engine.Llm;
+using Factory.Engine.Skills;
 using Factory.Engine.Verification;
 using Factory.Engine.Workspace;
 using Microsoft.Extensions.Logging;
@@ -27,8 +28,12 @@ public sealed partial class FactoryOrchestrator(
     ILlmClient llm,
     ICommandRunner commands,
     FactoryEventBus bus,
-    ILogger<FactoryOrchestrator> logger)
+    ILogger<FactoryOrchestrator> logger,
+    SkillLibrary? skills = null)
 {
+    /// <summary>Where the skills for a run's repository come from. Without one, only the repository's own skills are used.</summary>
+    public SkillLibrary Skills { get; } = skills ?? new SkillLibrary(null);
+
     private enum SubtaskEntry { Start, Verify, Fix }
 
     private sealed record ResumePoint(int SubtaskId, SubtaskEntry Entry);
@@ -266,6 +271,7 @@ public sealed partial class FactoryOrchestrator(
             TargetFilesToModify = edit.TargetFilesToModify,
             TargetFilesToCreate = edit.TargetFilesToCreate,
             ContextFilesToRead = edit.ContextFilesToRead,
+            Skills = edit.Skills ?? [],
             VerificationCommand = edit.VerificationCommand.Trim(),
             CommandApproved = true
         }).ToList();
@@ -304,6 +310,50 @@ public sealed partial class FactoryOrchestrator(
         RequireStatus(run, RunStatus.NeedsHuman);
         // The decision is carried out when the run's turn comes, so leaving the line first undoes nothing.
         Launch(runId, new QueuedRequest(RequestKind.Resume, decision, guidance));
+    }
+
+    /// <summary>
+    /// Saves guidance given at a pause as a project skill, in the repository's <c>.hatchet/skills</c> folder, so the
+    /// Task Planner can hand it to later subtasks and runs. It is committed on its own on the run's branch, so rolling
+    /// back the paused subtask keeps it and it reaches the base branch with the rest of the run.
+    /// Returns the skill file's repository-relative path.
+    /// </summary>
+    public async Task<string> SaveGuidanceAsSkillAsync(int runId, string name, string description, string guidance, CancellationToken ct = default)
+    {
+        var run = await store.GetRunAsync(runId, ct);
+        RequireStatus(run, RunStatus.NeedsHuman);
+        if (IsActive(runId)) throw new FactoryValidationException("This run is already resuming, so its repository can't take a new skill now.");
+
+        var slug = SkillLibrary.Slug(name);
+        if (slug.Length == 0) throw new FactoryValidationException("Give the skill a name, using letters, digits or hyphens.");
+        if (string.IsNullOrWhiteSpace(description)) throw new FactoryValidationException("Say when the skill applies. The Task Planner chooses skills by their descriptions.");
+        if (string.IsNullOrWhiteSpace(guidance)) throw new FactoryValidationException("There's no guidance to save as a skill.");
+
+        var git = new GitWorkspace(run.Task.RepositoryPath);
+        if (run.BranchName is null || await git.GetCurrentBranchAsync(ct) != run.BranchName)
+            throw new FactoryValidationException($"Skills are saved on the run's branch, {run.BranchName ?? "which doesn't exist yet"}, and the repository isn't on it.");
+
+        var relative = SkillLibrary.ProjectSkillPath(slug);
+        var path = Path.Combine(run.Task.RepositoryPath, relative.Replace('/', Path.DirectorySeparatorChar));
+        if (File.Exists(path)) throw new FactoryValidationException($"There's already a skill at {relative}. Choose another name.");
+        if (Skills.Load(run.Task.RepositoryPath).FirstOrDefault(s => string.Equals(s.Name, slug, StringComparison.OrdinalIgnoreCase)) is { } existing)
+            throw new FactoryValidationException($"There's already a skill called {slug}, at {existing.Path}. Choose another name.");
+
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        await File.WriteAllTextAsync(path, SkillLibrary.Compose(slug, description, guidance), ct);
+        try
+        {
+            await git.CommitFilesAsync($"Add the {slug} skill", [relative], ct);
+        }
+        catch (GitException)
+        {
+            // An uncommitted file would be swept into the subtask's commit, or lost when it rolls back.
+            File.Delete(path);
+            throw;
+        }
+        await LogAsync(run.Id, run.CurrentSubtaskId, AgentLogKind.Info, null,
+            $"Saved the guidance as the project skill {slug}, in {relative}, and committed it on {run.BranchName}. The Task Planner can give it to later subtasks.", ct);
+        return relative;
     }
 
     /// <summary>Carries out what a run asked to do, once it has a worker.</summary>
@@ -707,11 +757,19 @@ public sealed partial class FactoryOrchestrator(
         await SetRunStatusAsync(run, RunStatus.Decomposing, ct);
         await SetStageAsync(run, PipelineStage.Decompose, null, ct);
 
-        var prompt = PromptBuilder.Decompose(task.ArchitectureSpec, run.RepoMap, DescribeVerification(task), feedback);
+        var available = Skills.Load(task.RepositoryPath);
+        var prompt = PromptBuilder.Decompose(task.ArchitectureSpec, run.RepoMap, DescribeVerification(task), feedback, available);
         var graph = await InvokeAgentAsync<TaskGraphResponse>(
             context, AgentRole.TaskPlanner, null, prompt,
             g => g.Subtasks.Count == 0 ? "The subtasks list is empty." : null,
             ct);
+
+        // Names are matched whatever their case. Skills that don't exist are dropped.
+        var byName = available.ToDictionary(s => s.Name, StringComparer.OrdinalIgnoreCase);
+        var unknown = graph.Subtasks.SelectMany(s => s.Skills ?? []).Select(n => n.Trim()).Where(n => !byName.ContainsKey(n)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        if (unknown.Count > 0)
+            await LogAsync(run.Id, null, AgentLogKind.Warning, PipelineStage.Decompose,
+                $"The Task Planner named skills that don't exist, so they were left out: {string.Join(", ", unknown)}.", ct);
 
         var subtasks = graph.Subtasks
             .OrderBy(s => s.Order)
@@ -724,6 +782,7 @@ public sealed partial class FactoryOrchestrator(
                 TargetFilesToModify = dto.TargetFilesToModify,
                 TargetFilesToCreate = dto.TargetFilesToCreate,
                 ContextFilesToRead = dto.ContextFilesToRead,
+                Skills = (dto.Skills ?? []).Select(n => n.Trim()).Where(byName.ContainsKey).Select(n => byName[n].Name).Distinct().ToList(),
                 VerificationCommand = dto.VerificationCommand.Trim()
             })
             .ToList();
@@ -853,8 +912,8 @@ public sealed partial class FactoryOrchestrator(
         var files = RepositoryScanner.ReadFiles(context.Task.RepositoryPath, planned, settings.MaxFileChars, settings.MaxContextChars);
         var definitions = await ReadDefinitionsAsync(context, subtask, AgentRole.ContextSpecifier, planned, files, ct, subtask.Title, subtask.Description, subtask.HumanGuidance);
         var fileContext = RepositoryScanner.Render(files);
-        var prompt = await FitDefinitionsAsync(context, subtask.Id, AgentRole.ContextSpecifier, definitions,
-            d => PromptBuilder.Refine(subtask, context.Task.ArchitectureSpec, run.RepoMap, fileContext, d, subtask.HumanGuidance), ct);
+        var prompt = await FitPromptAsync(context, subtask, AgentRole.ContextSpecifier, definitions,
+            (d, k) => PromptBuilder.Refine(subtask, context.Task.ArchitectureSpec, run.RepoMap, fileContext, d, subtask.HumanGuidance, k), ct);
 
         var refined = await InvokeAgentAsync<RefinedSpecResponse>(context, AgentRole.ContextSpecifier, subtask.Id, prompt, null, ct);
         subtask.RefinedSpecJson = PromptBuilder.ToJson(refined);
@@ -889,9 +948,9 @@ public sealed partial class FactoryOrchestrator(
             var definitions = await ReadDefinitionsAsync(context, subtask, AgentRole.CodeGenerator, planned, files, ct,
                 subtask.Title, subtask.Description, subtask.RefinedSpecJson, subtask.HumanGuidance);
             var fileContext = RepositoryScanner.Render(files);
-            var prompt = await FitDefinitionsAsync(context, subtask.Id, AgentRole.CodeGenerator, definitions, d => cutOff is null
-                ? PromptBuilder.Build(subtask, fileContext, d, subtask.HumanGuidance)
-                : PromptBuilder.BuildRest(subtask, fileContext, written, remaining, cutOff, d, subtask.HumanGuidance), ct);
+            var prompt = await FitPromptAsync(context, subtask, AgentRole.CodeGenerator, definitions, (d, k) => cutOff is null
+                ? PromptBuilder.Build(subtask, fileContext, d, subtask.HumanGuidance, k)
+                : PromptBuilder.BuildRest(subtask, fileContext, written, remaining, cutOff, d, subtask.HumanGuidance, k), ct);
 
             var answer = await AskAgentAsync<FilePatchSetResponse>(
                 context, AgentRole.CodeGenerator, subtask.Id, prompt,
@@ -996,8 +1055,8 @@ public sealed partial class FactoryOrchestrator(
         var definitions = await ReadDefinitionsAsync(context, subtask, AgentRole.BugFixer, planned, files, ct,
             subtask.LastFailure, subtask.HumanGuidance, subtask.Title, subtask.Description, subtask.RefinedSpecJson);
         var fileContext = RepositoryScanner.Render(files);
-        var prompt = await FitDefinitionsAsync(context, subtask.Id, AgentRole.BugFixer, definitions,
-            d => PromptBuilder.Fix(subtask, subtask.LastFailure ?? "(no failure was recorded)", fileContext, subtask.HumanGuidance, d), ct);
+        var prompt = await FitPromptAsync(context, subtask, AgentRole.BugFixer, definitions,
+            (d, k) => PromptBuilder.Fix(subtask, subtask.LastFailure ?? "(no failure was recorded)", fileContext, subtask.HumanGuidance, d, k), ct);
 
         Func<FilePatchSetResponse, string?> validate = p => p.Operations.Count == 0 ? "The operations list is empty, so nothing would change and the failure would repeat." : null;
         var claude = ClaudeCodeOptions.ModelLabel(AgentProfiles.Resolve(settings, AgentRole.BugFixer).ClaudeModel);
@@ -1510,23 +1569,73 @@ public sealed partial class FactoryOrchestrator(
     }
 
     /// <summary>
-    /// Builds a prompt with the definitions of the types it names, or without them when the local model's context window
-    /// wouldn't then leave the agent room to think and answer.
+    /// Builds a prompt with the definitions of the types it names and the skills chosen for the subtask. When the local
+    /// model's context window wouldn't then leave the agent room to think and answer, the definitions are left out
+    /// first, and then skills from the end of the subtask's list.
     /// </summary>
-    private async Task<string> FitDefinitionsAsync(PipelineContext context, int? subtaskId, AgentRole role, string definitions, Func<string, string> build, CancellationToken ct)
+    private async Task<string> FitPromptAsync(PipelineContext context, FactorySubtask subtask, AgentRole role, string definitions,
+        Func<string, string, string> build, CancellationToken ct)
     {
-        var prompt = build(definitions);
-        if (definitions.Length == 0) return prompt;
         var settings = context.Settings;
         var profile = AgentProfiles.Resolve(settings, role);
-        if (profile.UsesClaude || await llm.GetContextLengthAsync(settings.BaseUrl, settings.ModelId, ct) is not { } window) return prompt;
+        var skills = await SkillsForAsync(context, subtask, role, ct);
+        string Render(IEnumerable<Skill> chosen) => SkillLibrary.Render(chosen, settings.MaxFileChars);
 
-        var needed = ContextWindow.EstimateTokens(profile.SystemPrompt.Length + prompt.Length) + ContextWindow.AnswerReserve(profile.ReasoningEffort);
-        if (needed <= window) return prompt;
+        var prompt = build(definitions, Render(skills));
+        var window = (definitions.Length > 0 || skills.Count > 0) && !profile.UsesClaude
+            ? await llm.GetContextLengthAsync(settings.BaseUrl, settings.ModelId, ct)
+            : null;
+        if (window is { } size)
+        {
+            var reserve = ContextWindow.AnswerReserve(profile.ReasoningEffort);
+            int Needed(string text) => ContextWindow.EstimateTokens(profile.SystemPrompt.Length + text.Length) + reserve;
 
-        await LogAsync(context.Run.Id, subtaskId, AgentLogKind.Info, context.Run.CurrentStage,
-            $"Left the type definitions out of the {profile.DisplayName}'s prompt: with them it would take about {needed - ContextWindow.AnswerReserve(profile.ReasoningEffort):N0} of the model's {window:N0}-token context window, leaving too little room to answer.", ct);
-        return build("");
+            if (definitions.Length > 0 && Needed(prompt) > size)
+            {
+                await LogAsync(context.Run.Id, subtask.Id, AgentLogKind.Info, context.Run.CurrentStage,
+                    $"Left the type definitions out of the {profile.DisplayName}'s prompt: with them it would take about {Needed(prompt) - reserve:N0} of the model's {size:N0}-token context window, leaving too little room to answer.", ct);
+                prompt = build("", Render(skills));
+            }
+
+            var dropped = new List<Skill>();
+            var before = Needed(prompt) - reserve;
+            while (skills.Count > 0 && Needed(prompt) > size)
+            {
+                dropped.Insert(0, skills[^1]);
+                skills.RemoveAt(skills.Count - 1);
+                prompt = build("", Render(skills));
+            }
+            if (dropped.Count > 0)
+                await LogAsync(context.Run.Id, subtask.Id, AgentLogKind.Info, context.Run.CurrentStage,
+                    $"Left the {Plural(dropped.Count, "skill")} {string.Join(", ", dropped.Select(s => s.Name))} out of the {profile.DisplayName}'s prompt: with {(dropped.Count == 1 ? "it" : "them")} it would take about {before:N0} of the model's {size:N0}-token context window, leaving too little room to answer.", ct);
+        }
+
+        if (skills.Count > 0)
+            await LogAsync(context.Run.Id, subtask.Id, AgentLogKind.Info, context.Run.CurrentStage,
+                $"Gave the {profile.DisplayName} the skills: {string.Join(", ", skills.Select(s => s.Name))}.", ct);
+        return prompt;
+    }
+
+    private static string Plural(int count, string noun) => count == 1 ? noun : $"{noun}s";
+
+    /// <summary>
+    /// The subtask's skills that are for this agent, in the subtask's order. They are read again for every call, so a
+    /// skill edited or saved while the run is paused is used when it resumes.
+    /// </summary>
+    private async Task<List<Skill>> SkillsForAsync(PipelineContext context, FactorySubtask subtask, AgentRole role, CancellationToken ct)
+    {
+        if (subtask.Skills.Count == 0) return [];
+        var available = Skills.Load(context.Task.RepositoryPath).ToDictionary(s => s.Name, StringComparer.OrdinalIgnoreCase);
+        var missing = subtask.Skills.Where(n => !available.ContainsKey(n)).ToList();
+        if (missing.Count > 0)
+            await LogAsync(context.Run.Id, subtask.Id, AgentLogKind.Warning, context.Run.CurrentStage,
+                $"Couldn't find the {Plural(missing.Count, "skill")} {string.Join(", ", missing)}, so the {AgentProfiles.Resolve(context.Settings, role).DisplayName} goes without.", ct);
+        return subtask.Skills
+            .Where(available.ContainsKey)
+            .Select(n => available[n])
+            .Where(s => s.IsFor(role))
+            .DistinctBy(s => s.Name, StringComparer.OrdinalIgnoreCase)
+            .ToList();
     }
 
     private static (T? Value, string? Error) TryParse<T>(LlmResult result, Func<T, string?>? validate)

@@ -17,6 +17,7 @@ public static class AgentProfiles
         - Write each description so an engineer with no other context could implement it: what to build, how it fits the architecture, and what done looks like.
         - verificationCommand is the shell command proving that subtask works, such as "dotnet build && dotnet test" or "npm test". Use an empty string if the project-wide check described below is enough.
         - Number order from 1 with no gaps.
+        - skills: the names of the listed skills whose instructions the subtask needs, written exactly as listed. Name a skill only when it applies to that subtask's work. Use an empty list when none applies or none are listed.
         - Never plan a subtask that has a model type out long data: registries, lookup tables, word lists, fixtures of more than a few dozen rows, vendored libraries or generated code. Plan a script or build step that downloads or generates it, and at most a small sample for tests and offline builds. A model can't recall facts like registry assignments, hashes or version lists reliably.
 
         {JsonOnly}

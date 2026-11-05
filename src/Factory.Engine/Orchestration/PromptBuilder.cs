@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using Factory.Contracts;
+using Factory.Engine.Skills;
 
 namespace Factory.Engine.Orchestration;
 
@@ -8,23 +9,33 @@ public static class PromptBuilder
 {
     private static readonly JsonSerializerOptions Indented = new(LlmSchemas.SerializerOptions) { WriteIndented = true };
 
-    public static string Decompose(string spec, string repoMap, string verification, string? feedback)
+    public static string Decompose(string spec, string repoMap, string verification, string? feedback, IReadOnlyList<Skill>? skills = null)
     {
         var builder = new StringBuilder();
         Section(builder, "Architecture specification", spec);
         Section(builder, "Repository map", repoMap);
         Section(builder, "How each subtask is verified", verification);
+        if (skills is { Count: > 0 })
+        {
+            var list = string.Join('\n', skills.Select(s => $"- {s.Name}: {(s.Description.Length > 0 ? s.Description : "(no description)")} (for the {string.Join(", ", s.Roles.Select(RoleName))})"));
+            Section(builder, "Skills", $"""
+                Skills are instructions written once for this repository, such as how to use a library. Put a skill's name in a subtask's skills list when that subtask needs it, and its agents get the instructions.
+
+                {list}
+                """);
+        }
         if (!string.IsNullOrWhiteSpace(feedback)) Section(builder, "Reviewer feedback on the previous plan", feedback);
         builder.Append("Break the specification into ordered, atomic coding subtasks.");
         return builder.ToString();
     }
 
-    public static string Refine(FactorySubtask subtask, string spec, string repoMap, string fileContext, string definitions = "", string? guidance = null)
+    public static string Refine(FactorySubtask subtask, string spec, string repoMap, string fileContext, string definitions = "", string? guidance = null, string skills = "")
     {
         var builder = new StringBuilder();
         Section(builder, "Overall architecture specification", spec);
         Section(builder, "Repository map", repoMap);
         SubtaskSection(builder, subtask);
+        SkillsSection(builder, skills);
         GuidanceSection(builder, guidance);
         Section(builder, "Existing file contents", fileContext);
         DefinitionsSection(builder, definitions);
@@ -32,11 +43,12 @@ public static class PromptBuilder
         return builder.ToString();
     }
 
-    public static string Build(FactorySubtask subtask, string fileContext, string definitions = "", string? guidance = null)
+    public static string Build(FactorySubtask subtask, string fileContext, string definitions = "", string? guidance = null, string skills = "")
     {
         var builder = new StringBuilder();
         SubtaskSection(builder, subtask);
         Section(builder, "Refined specification", subtask.RefinedSpecJson ?? "(none)");
+        SkillsSection(builder, skills);
         GuidanceSection(builder, guidance);
         Section(builder, "Current file contents", fileContext);
         DefinitionsSection(builder, definitions);
@@ -49,11 +61,12 @@ public static class PromptBuilder
     /// current file contents for the rest to match.
     /// </summary>
     public static string BuildRest(FactorySubtask subtask, string fileContext, IReadOnlyList<string> written, IReadOnlyList<string> remaining,
-        string cutOff, string definitions = "", string? guidance = null)
+        string cutOff, string definitions = "", string? guidance = null, string skills = "")
     {
         var builder = new StringBuilder();
         SubtaskSection(builder, subtask);
         Section(builder, "Refined specification", subtask.RefinedSpecJson ?? "(none)");
+        SkillsSection(builder, skills);
         GuidanceSection(builder, guidance);
         Section(builder, "Your previous answer was cut off", $"""
             {cutOff}
@@ -88,7 +101,7 @@ public static class PromptBuilder
         return builder.ToString();
     }
 
-    public static string Fix(FactorySubtask subtask, string failure, string fileContext, string? guidance, string definitions = "")
+    public static string Fix(FactorySubtask subtask, string failure, string fileContext, string? guidance, string definitions = "", string skills = "")
     {
         var builder = new StringBuilder();
         SubtaskSection(builder, subtask);
@@ -96,6 +109,7 @@ public static class PromptBuilder
         if (subtask.FixHistory.Count > 0)
             Section(builder, "Earlier fix attempts, all of which failed", string.Join("\n\n", subtask.FixHistory));
         Section(builder, "Failure to fix", failure);
+        SkillsSection(builder, skills);
         GuidanceSection(builder, guidance);
         Section(builder, "Current file contents", fileContext);
         DefinitionsSection(builder, definitions);
@@ -109,6 +123,15 @@ public static class PromptBuilder
         if (definitions.Length == 0) return;
         Section(builder, "Definitions of types named above. Use their members and constructor parameters exactly as declared here", definitions);
     }
+
+    // Instructions written once for the repository and chosen for this subtask, such as how to use a UI library.
+    private static void SkillsSection(StringBuilder builder, string skills)
+    {
+        if (skills.Length == 0) return;
+        Section(builder, "Skills. Follow these instructions for this subtask", skills);
+    }
+
+    private static string RoleName(AgentRole role) => AgentProfiles.Defaults.Single(p => p.Role == role).DisplayName;
 
     public static string Repair(string prompt, string error) =>
         $"{prompt}\n\nYour previous response could not be used: {error}\nRespond again with one complete JSON object that matches the schema.";
