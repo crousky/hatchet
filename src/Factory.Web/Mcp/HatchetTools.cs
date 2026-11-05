@@ -165,12 +165,12 @@ public sealed class HatchetTools(FactoryOrchestrator orchestrator, IRunStore sto
         - reverify: run the checks again on the working tree as it is, for example after you fixed the code yourself.
         - restart_subtask: discard the subtask's uncommitted changes and build it again.
         - skip_subtask: discard its changes and move on to the next subtask.
-        Guidance is passed to the Bug Fixer: name the root cause or the approach to take.
+        Guidance goes to every agent that works on the subtask from then on: name the root cause or the approach to take, such as "keep the seed file to a few rows".
         """)]
     public async Task<RunDetails> ResumeRun(
         [Description("The run's id.")] int runId,
         [Description("resume, retry_fixer, reverify, restart_subtask or skip_subtask.")] string action = "resume",
-        [Description("Guidance for the Bug Fixer.")] string? guidance = null,
+        [Description("Guidance for the agents that work on the subtask next.")] string? guidance = null,
         CancellationToken ct = default)
     {
         var decision = action.Trim().ToLowerInvariant() switch

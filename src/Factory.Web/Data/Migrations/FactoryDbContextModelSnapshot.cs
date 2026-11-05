@@ -238,6 +238,9 @@ namespace Factory.Web.Data.Migrations
                     b.Property<string>("RefinedSpecJson")
                         .HasColumnType("TEXT");
 
+                    b.Property<int>("ReviewFixAttempts")
+                        .HasColumnType("INTEGER");
+
                     b.Property<string>("ReviewJson")
                         .HasColumnType("TEXT");
 

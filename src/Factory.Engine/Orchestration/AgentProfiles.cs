@@ -17,6 +17,7 @@ public static class AgentProfiles
         - Write each description so an engineer with no other context could implement it: what to build, how it fits the architecture, and what done looks like.
         - verificationCommand is the shell command proving that subtask works, such as "dotnet build && dotnet test" or "npm test". Use an empty string if the project-wide check described below is enough.
         - Number order from 1 with no gaps.
+        - Never plan a subtask that has a model type out long data: registries, lookup tables, word lists, fixtures of more than a few dozen rows, vendored libraries or generated code. Plan a script or build step that downloads or generates it, and at most a small sample for tests and offline builds. A model can't recall facts like registry assignments, hashes or version lists reliably.
 
         {JsonOnly}
         """);
@@ -33,6 +34,8 @@ public static class AgentProfiles
         - testCases: named unit tests with their inputs and expected results.
         - edgeCaseChecks: the specific edge cases the implementation must handle.
         - Stay within the subtask. Do not specify work that belongs to other subtasks.
+        - If human guidance is included, follow it.
+        - For a data file, list the exact rows it holds or bound it to a few dozen. Never ask for long data from memory, such as a registry or lookup table; specify a script that fetches or generates it. Tests use fixtures they define themselves, not facts recalled from memory.
 
         {JsonOnly}
         """);
@@ -47,6 +50,8 @@ public static class AgentProfiles
         - relativeFilePath is relative to the repository root, with forward slashes. Never target .git or a path outside the repository.
         - The code must compile and the tests must pass. Include every using, import and project reference it needs.
         - Write only what the subtask requires. Match the style of the existing code.
+        - Write data files with only the rows the specification names, a few dozen at most. Never enumerate ranges or sequences, or recite tables, registries or other long data from memory. If complete data is needed, write the code or script that fetches or generates it instead.
+        - If human guidance is included, follow it.
         - summaryOfChanges: one or two sentences describing what you did.
 
         {JsonOnly}
@@ -74,8 +79,9 @@ public static class AgentProfiles
         - Find the root cause in the failure output before changing anything. Fix the cause, not the symptom.
         - Fix every error listed, in every file, in this one response. The check only runs again after your change, so an error left for later costs a whole attempt.
         - Keep your reasoning short. Each error names a file, a line and the problem, and most need a small, local change: settle each fix in a sentence or two, then write the files. Don't redesign the subtask or weigh alternatives at length.
-        - Use only library APIs you are certain exist in the referenced package versions: the exact method names, overloads and namespaces. If you are unsure, choose the simplest widely documented API, or write the code without that library feature. Never guess at an overload.
-        - An error saying a name, type, member or element doesn't exist means the code uses an API that isn't there. Replace it with one you know exists, or with plain code or markup. Don't try to recall a near match.
+        - Use only library APIs you are certain exist in the referenced package versions: the exact method names, overloads and namespaces. The definitions include the signatures of package types the subtask names, when Hatchet found them: use what they declare. Otherwise choose the simplest widely documented API. Never guess at an overload.
+        - An error saying a name, type, member or element doesn't exist means the code uses an API that isn't there. Look it up in the definitions and use what they declare, or replace it with one you know exists. Don't try to recall a near match.
+        - Never get past an error by taking out or swapping something the specification asks for, such as a named component, service or type. Fix how it is used instead: Hatchet refuses a fix that takes one out.
         - Fix an ambiguous reference by fully qualifying the name or adding a using alias.
         - Change only the files the errors point to and any file that holds the root cause. Leave the rest of the subtask's files as they are.
         - If earlier fix attempts are listed, they failed. Don't repeat them; take a different approach.

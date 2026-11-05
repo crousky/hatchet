@@ -78,6 +78,12 @@ public sealed class FactorySubtask
 
     public SubtaskStatus Status { get; set; } = SubtaskStatus.Pending;
     public int FixAttempts { get; set; }
+
+    /// <summary>
+    /// The fix attempts made since the reviewer first rejected the subtask. They have their own budget, so a change
+    /// that only reaches the reviewer after its build fixes are spent still gets fixed for what the reviewer found.
+    /// </summary>
+    public int ReviewFixAttempts { get; set; }
     public string? LastFailure { get; set; }
 
     /// <summary>What each fix attempt changed and what failed next, so later attempts don't repeat it.</summary>
