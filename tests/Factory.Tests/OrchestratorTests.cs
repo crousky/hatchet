@@ -2,6 +2,7 @@ using System.Text.Json;
 using Factory.Contracts;
 using Factory.Engine.Llm;
 using Factory.Engine.Orchestration;
+using Factory.Engine.Skills;
 using Factory.Engine.Verification;
 using Factory.Engine.Workspace;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -121,6 +122,131 @@ public class OrchestratorTests : IAsyncLifetime
         Assert.DoesNotContain("public sealed class Widget", PromptOf(AgentRole.CodeGenerator));
         Assert.Contains("public sealed class Widget", PromptOf(AgentRole.BugFixer)); // Named only by the error.
         Assert.Contains(await _store.GetLogsAsync(run.Id), l => l.Message.Contains("definitions of types it names: src/Contracts/Widget.cs"));
+    }
+
+    private async Task CommitSkillAsync(string folder, string frontmatter, string body)
+    {
+        _repo.Write($"{folder}/SKILL.md", $"---\n{frontmatter}\n---\n{body}\n");
+        await _git.StageAllAsync();
+        await _git.CommitStagedAsync($"Add {folder}");
+    }
+
+    private static string PlanWithSkills(params string[] skills) => JsonSerializer.Serialize(
+        new TaskGraphResponse([new SubtaskDto(1, "alpha", "Build the alpha page.", [], ["alpha.txt"], [], "", skills.ToList())]),
+        LlmSchemas.SerializerOptions);
+
+    [Fact]
+    public async Task Agents_get_the_skills_the_planner_chose_when_they_are_for_their_role()
+    {
+        await CommitSkillAsync(".hatchet/skills/fluent-ui-blazor", "name: fluent-ui-blazor\ndescription: Building Blazor UI with Fluent UI.", "Use FluentButton, never a plain button.");
+        await CommitSkillAsync(".claude/skills/fixer-notes", "name: fixer-notes\ndescription: Fixing build errors.\nroles: [BugFixer]", "Read the first error before the rest.");
+        await CommitSkillAsync(".claude/skills/unused", "name: unused\ndescription: Never chosen.", "Unused instructions.");
+        _llm.Enqueue(AgentRole.TaskPlanner, PlanWithSkills("Fluent-UI-Blazor", "fixer-notes", "made-up"));
+        _llm.Enqueue(AgentRole.ContextSpecifier, Refined());
+        _llm.Enqueue(AgentRole.CodeGenerator, Patch("alpha.txt"));
+        _llm.Enqueue(AgentRole.BugFixer, Patch("alpha.txt", "v2"));
+        _llm.Enqueue(AgentRole.StaticReviewer, Verdict(true));
+        _commands.Results.Enqueue((1, "alpha.cs(1,1): error CS0001: broken"));
+
+        var run = await WaitForAsync((await StartAsync()).Id, RunStatus.ReadyToMerge);
+
+        string PromptOf(AgentRole role) => _llm.Calls.Single(c => c.Role == role).Prompt;
+        Assert.Contains("- fluent-ui-blazor: Building Blazor UI with Fluent UI.", PromptOf(AgentRole.TaskPlanner));
+        Assert.Contains("- unused: Never chosen.", PromptOf(AgentRole.TaskPlanner));
+        Assert.Equal(["fluent-ui-blazor", "fixer-notes"], (await _store.GetSubtasksAsync(run.Id)).Single().Skills);
+        foreach (var role in new[] { AgentRole.ContextSpecifier, AgentRole.CodeGenerator, AgentRole.BugFixer })
+            Assert.Contains("## Skills. Follow these instructions for this subtask\n\n### fluent-ui-blazor\n\nUse FluentButton", PromptOf(role));
+        Assert.DoesNotContain("Read the first error", PromptOf(AgentRole.CodeGenerator));
+        Assert.Contains("### fixer-notes\n\nRead the first error before the rest.", PromptOf(AgentRole.BugFixer));
+        Assert.DoesNotContain("Unused instructions", PromptOf(AgentRole.BugFixer));
+        Assert.DoesNotContain("## Skills", PromptOf(AgentRole.StaticReviewer));
+
+        var logs = await _store.GetLogsAsync(run.Id);
+        Assert.Contains(logs, l => l.Message == "Gave the Code Generator the skills: fluent-ui-blazor.");
+        Assert.Contains(logs, l => l.Message == "Gave the Bug Fixer the skills: fluent-ui-blazor, fixer-notes.");
+        Assert.Contains(logs, l => l is { Kind: AgentLogKind.Warning } && l.Message.Contains("named skills that don't exist, so they were left out: made-up"));
+    }
+
+    [Fact]
+    public async Task Skills_from_the_user_folder_reach_agents_and_an_edited_plan_keeps_its_skills()
+    {
+        using var user = new TempDirectory();
+        user.Write("house-style/SKILL.md", "---\nname: house-style\ndescription: Any change.\n---\nWrite short methods.\n");
+        var orchestrator = new FactoryOrchestrator(_store, _settings, _llm, _commands, new FactoryEventBus(), NullLogger<FactoryOrchestrator>.Instance, new SkillLibrary(user.Path));
+        _llm.Enqueue(AgentRole.TaskPlanner, Plan("alpha"));
+        _llm.Enqueue(AgentRole.ContextSpecifier, Refined());
+        _llm.Enqueue(AgentRole.CodeGenerator, Patch("alpha.txt"));
+        _llm.Enqueue(AgentRole.StaticReviewer, Verdict(true));
+        var run = await orchestrator.StartRunAsync(new NewRunRequest(_repo.Path, "# Spec", null, "verify", true));
+        await WaitForAsync(run.Id, RunStatus.AwaitingPlanApproval);
+        Assert.Contains("- house-style: Any change.", _llm.Calls.Single(c => c.Role == AgentRole.TaskPlanner).Prompt);
+
+        await orchestrator.ApprovePlanAsync(run.Id, [new SubtaskEdit(null, "alpha", "Build alpha", [], ["alpha.txt"], [], "", ["house-style"])]);
+        var deadline = DateTime.UtcNow.AddSeconds(30);
+        while ((await _store.GetRunAsync(run.Id)).Status != RunStatus.ReadyToMerge || orchestrator.IsActive(run.Id))
+        {
+            Assert.True(DateTime.UtcNow < deadline, "The run never finished.");
+            await Task.Delay(10);
+        }
+
+        Assert.Contains("### house-style\n\nWrite short methods.", _llm.Calls.Single(c => c.Role == AgentRole.CodeGenerator).Prompt);
+    }
+
+    [Fact]
+    public async Task Skills_are_left_out_when_the_window_has_no_room_for_them()
+    {
+        await CommitSkillAsync(".hatchet/skills/small", "name: small\ndescription: Small.", "Keep it small.");
+        await CommitSkillAsync(".hatchet/skills/huge", "name: huge\ndescription: Huge.", new string('x', 30_000));
+        _llm.ContextLength = 18_000;
+        _llm.Enqueue(AgentRole.TaskPlanner, PlanWithSkills("small", "huge"));
+        _llm.Enqueue(AgentRole.ContextSpecifier, Refined());
+        _llm.Enqueue(AgentRole.CodeGenerator, Patch("alpha.txt"));
+        _llm.Enqueue(AgentRole.StaticReviewer, Verdict(true));
+
+        var run = await WaitForAsync((await StartAsync()).Id, RunStatus.ReadyToMerge);
+
+        var prompt = RequestsOf(AgentRole.CodeGenerator).Single().Prompt;
+        Assert.Contains("### small\n\nKeep it small.", prompt);
+        Assert.DoesNotContain("### huge", prompt);
+        var logs = await _store.GetLogsAsync(run.Id);
+        Assert.Contains(logs, l => l.Message.StartsWith("Left the skill huge out of the Code Generator's prompt"));
+        Assert.Contains(logs, l => l.Message == "Gave the Code Generator the skills: small.");
+    }
+
+    [Fact]
+    public async Task Guidance_saved_as_a_skill_is_committed_on_the_run_branch_and_survives_a_restart()
+    {
+        _llm.Enqueue(AgentRole.TaskPlanner, Plan("alpha"));
+        _llm.Enqueue(AgentRole.ContextSpecifier, Refined(), Refined());
+        _llm.Enqueue(AgentRole.CodeGenerator, Patch("wrong.txt"), Patch("alpha.txt"));
+        _llm.Enqueue(AgentRole.BugFixer, Patch("wrong.txt", "1"), Patch("wrong.txt", "2"), Patch("wrong.txt", "3"));
+        _llm.Enqueue(AgentRole.StaticReviewer, Verdict(true));
+        for (var i = 0; i < 4; i++) _commands.Results.Enqueue((1, "still broken"));
+        var run = await WaitForAsync((await StartAsync()).Id, RunStatus.NeedsHuman);
+
+        var path = await _orchestrator.SaveGuidanceAsSkillAsync(run.Id, "Alpha Files", "Writing alpha files.", "Write alpha.txt, never wrong.txt.");
+
+        Assert.Equal(".hatchet/skills/alpha-files/SKILL.md", path);
+        Assert.True(File.Exists(_repo.File("wrong.txt"))); // The paused subtask's work is left as it was, uncommitted.
+        Assert.Equal([path, "wrong.txt"], (await ChangedFilesAsync(run.BaseCommit!)).Order());
+        var saved = Assert.Single(_orchestrator.Skills.Load(_repo.Path));
+        Assert.Equal(("alpha-files", "Writing alpha files.", "Write alpha.txt, never wrong.txt.", SkillSource.Project), (saved.Name, saved.Description, saved.Body, saved.Source));
+        await Assert.ThrowsAsync<FactoryValidationException>(() => _orchestrator.SaveGuidanceAsSkillAsync(run.Id, "alpha-files", "Again.", "Again."));
+
+        await _orchestrator.ResumeAsync(run.Id, HumanDecision.RestartSubtask, null);
+        await WaitForAsync(run.Id, RunStatus.ReadyToMerge);
+
+        Assert.False(File.Exists(_repo.File("wrong.txt")));
+        Assert.True(File.Exists(_repo.File(path)));
+    }
+
+    /// <summary>Paths that differ from the base commit or are untracked, so a file committed on its own shows up and one left uncommitted too.</summary>
+    private async Task<List<string>> ChangedFilesAsync(string baseCommit)
+    {
+        var committed = (await _git.GetRangeDiffAsync(baseCommit, "HEAD")).Split('\n')
+            .Where(l => l.StartsWith("+++ b/")).Select(l => l["+++ b/".Length..].Trim());
+        await _git.StageAllAsync();
+        return committed.Concat(await _git.GetStagedFilesAsync()).ToList();
     }
 
     [Fact]
@@ -1478,7 +1604,7 @@ public class OrchestratorTests : IAsyncLifetime
         {
             Id = s.Id, RunId = s.RunId, Order = s.Order, Title = s.Title, Description = s.Description,
             TargetFilesToModify = s.TargetFilesToModify, TargetFilesToCreate = s.TargetFilesToCreate, ContextFilesToRead = s.ContextFilesToRead,
-            VerificationCommand = s.VerificationCommand, CommandApproved = s.CommandApproved, Status = s.Status, FixAttempts = s.FixAttempts, ReviewFixAttempts = s.ReviewFixAttempts,
+            Skills = [.. s.Skills], VerificationCommand = s.VerificationCommand, CommandApproved = s.CommandApproved, Status = s.Status, FixAttempts = s.FixAttempts, ReviewFixAttempts = s.ReviewFixAttempts,
             LastFailure = s.LastFailure, FixHistory = [.. s.FixHistory], HumanGuidance = s.HumanGuidance, RefinedSpecJson = s.RefinedSpecJson,
             SummaryOfChanges = s.SummaryOfChanges, ReviewJson = s.ReviewJson, CommitSha = s.CommitSha
         };

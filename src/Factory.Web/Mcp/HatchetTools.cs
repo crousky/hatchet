@@ -28,6 +28,9 @@ public sealed class PlanStep
 
     [Description("Command that proves this step works, run from the repository root. Leave empty to use the run's check, which Hatchet detects from the repository.")]
     public string? VerificationCommand { get; set; }
+
+    [Description("Names of Hatchet skills whose instructions this step's agents should get, from the repository's .hatchet/skills or .claude/skills folders or the user's own. Leave empty for none.")]
+    public List<string>? Skills { get; set; }
 }
 
 public sealed record RunSummary(int RunId, string Title, string Status, string Project, string Repository, int SubtasksDone, int Subtasks, string? CurrentStep, string? Queue, string? PauseReason, string Url);
@@ -86,7 +89,7 @@ public sealed class HatchetTools(FactoryOrchestrator orchestrator, IRunStore sto
     {
         // A client may send null for a list or field it leaves empty.
         var edits = plan?.Select(step => new SubtaskEdit(null, step.Title ?? "", step.Description ?? "",
-            step.FilesToModify ?? [], step.FilesToCreate ?? [], step.FilesToRead ?? [], step.VerificationCommand ?? "")).ToList();
+            step.FilesToModify ?? [], step.FilesToCreate ?? [], step.FilesToRead ?? [], step.VerificationCommand ?? "", step.Skills ?? [])).ToList();
         var run = await Do(() => orchestrator.StartRunAsync(new NewRunRequest(repositoryPath, spec, title, verificationCommand, reviewPlanInHatchet), edits, ct));
         return await DescribeRunAsync(run.Id, ct);
     }
@@ -139,7 +142,7 @@ public sealed class HatchetTools(FactoryOrchestrator orchestrator, IRunStore sto
         var plan = (await store.GetSubtasksAsync(runId, ct))
             .OrderBy(s => s.Order)
             .Select(s => new SubtaskEdit(s.Id, s.Title, s.Description, s.TargetFilesToModify, s.TargetFilesToCreate, s.ContextFilesToRead,
-                s.CommandApproved ? s.VerificationCommand : ""))
+                s.CommandApproved ? s.VerificationCommand : "", s.Skills))
             .ToList();
         await Do(() => orchestrator.ApprovePlanAsync(runId, plan, ct));
         return await DescribeRunAsync(runId, ct);

@@ -120,6 +120,14 @@ public sealed class GitWorkspace(string repositoryPath)
         return await GetHeadShaAsync(ct);
     }
 
+    /// <summary>Commits only the given files, leaving any other changes, staged or not, as they are.</summary>
+    public async Task<string> CommitFilesAsync(string message, IReadOnlyList<string> paths, CancellationToken ct = default)
+    {
+        await GitAsync(ct, ["add", "--", .. paths]);
+        await CommitInternalAsync(ct, ["-m", message, "--only", "--", .. paths]);
+        return await GetHeadShaAsync(ct);
+    }
+
     /// <summary>
     /// Discards uncommitted changes. The branch check guards the destructive reset and clean, so a
     /// repository that has been switched by hand never loses work on another branch.

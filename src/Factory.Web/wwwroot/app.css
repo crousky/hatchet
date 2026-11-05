@@ -425,6 +425,9 @@ a.status-item:hover { color: var(--text); }
 .action-banner-good .action-banner-main > .icon { color: var(--good); }
 .action-row { display: flex; flex-wrap: wrap; gap: 6px; }
 .guidance { resize: vertical; background: var(--bg-1); }
+.skill-save { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.skill-save input.mono { width: 180px; }
+.skill-save input.grow { flex: 1; min-width: 240px; }
 
 .center-split { display: flex; flex-direction: column; flex: 1; min-height: 0; }
 .editor { display: flex; flex-direction: column; flex: 1; min-height: 80px; }
@@ -485,6 +488,7 @@ button.terminal-head:hover { background: var(--bg-3); }
 .file-chip { font-family: var(--mono); font-size: 11px; padding: 1px 6px; border-radius: 4px; color: var(--muted); background: var(--bg-4); overflow-wrap: anywhere; }
 .file-modify { color: var(--active); background: var(--active-soft); }
 .file-create { color: var(--good); background: var(--good-soft); }
+.file-skill { color: var(--accent-strong); background: var(--accent-soft); }
 .plan-footer { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .plan-regenerate { display: flex; gap: 6px; flex: 1; min-width: 280px; }
 

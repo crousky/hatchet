@@ -72,6 +72,9 @@ public sealed class FactorySubtask
     public List<string> TargetFilesToCreate { get; set; } = [];
     public List<string> ContextFilesToRead { get; set; } = [];
 
+    /// <summary>The names of the skills whose instructions this subtask's agents get, chosen by the planner.</summary>
+    public List<string> Skills { get; set; } = [];
+
     /// <summary>Proposed by the planner. Runs only once a human has approved the plan containing it.</summary>
     public string VerificationCommand { get; set; } = "";
     public bool CommandApproved { get; set; }

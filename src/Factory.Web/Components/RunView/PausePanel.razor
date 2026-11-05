@@ -24,6 +24,28 @@
     else if (Paused is not null)
     {
         <textarea autocomplete="off" data-1p-ignore data-lpignore="true" class="guidance" rows="2" placeholder="Guidance for the agents (optional). Name the root cause, or the approach you want." @bind="_guidance" @bind:event="oninput"></textarea>
+        @if (SaveSkill is not null)
+        {
+            @if (_savedSkill is not null)
+            {
+                <div class="hint"><Icon Name="check" Size="12" /> Saved as a project skill in <code>@_savedSkill</code>, committed on the run's branch. The Task Planner can give it to later subtasks.</div>
+            }
+            else if (_skillOpen)
+            {
+                <div class="skill-save">
+                    <input autocomplete="off" data-1p-ignore data-lpignore="true" class="mono" spellcheck="false" placeholder="skill-name" @bind="_skillName" @bind:event="oninput" />
+                    <input autocomplete="off" data-1p-ignore data-lpignore="true" class="grow" placeholder="When should agents use it? The Task Planner chooses skills by this." @bind="_skillDescription" @bind:event="oninput" />
+                    <button class="btn" disabled="@(Busy || _saving || string.IsNullOrWhiteSpace(_guidance) || string.IsNullOrWhiteSpace(_skillName) || string.IsNullOrWhiteSpace(_skillDescription))" title="Write the guidance to .hatchet/skills in the repository and commit it on the run's branch" @onclick="SaveSkillAsync">
+                        <Icon Name="check" Size="14" /> Save skill
+                    </button>
+                    <button class="btn btn-ghost" @onclick="@(() => _skillOpen = false)">Cancel</button>
+                </div>
+            }
+            else
+            {
+                <div><button class="link-button small" disabled="@string.IsNullOrWhiteSpace(_guidance)" title="Keep this guidance for later subtasks and runs in this repository" @onclick="@(() => _skillOpen = true)">Save this guidance as a project skill</button></div>
+            }
+        }
         <div class="action-row">
             @if (Interrupted)
             {
@@ -70,7 +92,29 @@
     [Parameter] public bool Busy { get; set; }
     [Parameter] public EventCallback<(HumanDecision Decision, string? Guidance)> OnDecision { get; set; }
 
+    /// <summary>Saves the guidance as a project skill, given its name and description. Returns the skill's path, or null if it wasn't saved.</summary>
+    [Parameter] public Func<string, string, string, Task<string?>>? SaveSkill { get; set; }
+
     private string? _guidance;
+    private bool _skillOpen;
+    private bool _saving;
+    private string? _skillName;
+    private string? _skillDescription;
+    private string? _savedSkill;
+
+    private async Task SaveSkillAsync()
+    {
+        _saving = true;
+        try
+        {
+            _savedSkill = await SaveSkill!(_skillName ?? "", _skillDescription ?? "", _guidance ?? "");
+            if (_savedSkill is not null) _skillOpen = false;
+        }
+        finally
+        {
+            _saving = false;
+        }
+    }
 
     private bool Interrupted => Run.PauseReason == FactoryOrchestrator.InterruptedReason;
 

@@ -31,7 +31,7 @@ public static class LlmSchemas
           "items": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["order", "title", "description", "targetFilesToModify", "targetFilesToCreate", "contextFilesToRead", "verificationCommand"],
+            "required": ["order", "title", "description", "targetFilesToModify", "targetFilesToCreate", "contextFilesToRead", "verificationCommand", "skills"],
             "properties": {
               "order": { "type": "integer" },
               "title": { "type": "string" },
@@ -39,7 +39,8 @@ public static class LlmSchemas
               "targetFilesToModify": { "type": "array", "items": { "type": "string" } },
               "targetFilesToCreate": { "type": "array", "items": { "type": "string" } },
               "contextFilesToRead": { "type": "array", "items": { "type": "string" } },
-              "verificationCommand": { "type": "string" }
+              "verificationCommand": { "type": "string" },
+              "skills": { "type": "array", "items": { "type": "string" } }
             }
           }
         }

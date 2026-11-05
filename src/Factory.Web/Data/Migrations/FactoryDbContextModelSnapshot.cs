@@ -247,6 +247,10 @@ namespace Factory.Web.Data.Migrations
                     b.Property<int>("RunId")
                         .HasColumnType("INTEGER");
 
+                    b.PrimitiveCollection<string>("Skills")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
                     b.Property<string>("Status")
                         .IsRequired()
                         .HasColumnType("TEXT");

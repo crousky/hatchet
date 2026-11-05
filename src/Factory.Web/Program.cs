@@ -1,5 +1,6 @@
 using Factory.Engine.Llm;
 using Factory.Engine.Orchestration;
+using Factory.Engine.Skills;
 using Factory.Engine.Verification;
 using Factory.Web.Components;
 using Factory.Web.Data;
@@ -28,6 +29,8 @@ builder.Services.AddSingleton<EfSettingsStore>();
 builder.Services.AddSingleton<ISettingsStore>(sp => sp.GetRequiredService<EfSettingsStore>());
 builder.Services.AddSingleton<FactoryEventBus>();
 builder.Services.AddSingleton<ICommandRunner, ShellCommandRunner>();
+// Skills in %LOCALAPPDATA%\Hatchet\skills apply to every repository, after the repository's own.
+builder.Services.AddSingleton(_ => new SkillLibrary(SkillLibrary.DefaultUserDirectory));
 builder.Services.AddSingleton<FactoryOrchestrator>();
 
 // Local models can take minutes per response. The client enforces its own stall timeout instead.
