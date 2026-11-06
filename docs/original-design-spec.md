@@ -1,3 +1,9 @@
+# Original design spec
+
+> **Historical.** This is the specification Hatchet was first built from. It's kept to show the intent behind the architecture, and the code has moved on since: the pipeline gained Verify and Integrate stages, runs can use Claude for any agent, and skills, an MCP server and a run queue were added. For how Hatchet works today, read the [README](../README.md) and [how-it-works.md](how-it-works.md).
+
+---
+
 # Project Specification: Local Software Factory & Agent Orchestrator
 
 ## 1. Objective & Operating Model
