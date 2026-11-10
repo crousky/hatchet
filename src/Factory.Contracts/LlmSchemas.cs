@@ -78,7 +78,7 @@ public static class LlmSchemas
             "required": ["relativeFilePath", "action", "fileContent"],
             "properties": {
               "relativeFilePath": { "type": "string" },
-              "action": { "type": "string", "enum": ["CREATE", "OVERWRITE", "DELETE"] },
+              "action": { "type": "string", "enum": ["CREATE", "OVERWRITE", "EDIT", "DELETE"] },
               "fileContent": { "type": "string" }
             }
           }

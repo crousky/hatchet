@@ -98,6 +98,7 @@ public static class FileActions
     public const string Create = "CREATE";
     public const string Overwrite = "OVERWRITE";
     public const string Delete = "DELETE";
+    public const string Edit = "EDIT";
 }
 
 public static class ReasoningEfforts

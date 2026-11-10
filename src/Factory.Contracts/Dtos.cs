@@ -27,7 +27,7 @@ public record FilePatchSetResponse(
 
 public record FileOperationDto(
     string RelativeFilePath,
-    string Action, // "CREATE", "OVERWRITE", "DELETE"
+    string Action, // "CREATE", "OVERWRITE", "EDIT", "DELETE"
     string FileContent);
 
 public record ReviewVerdictResponse(

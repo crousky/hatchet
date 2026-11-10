@@ -119,4 +119,94 @@ public class FilePatcherTests : IDisposable
 
         Assert.Equal("one\ntwo\n"u8.ToArray(), File.ReadAllBytes(_repo.File("a.txt")));
     }
+
+    private static string Lines(int count) => string.Join("\n", Enumerable.Range(1, count).Select(n => $"line {n}"));
+
+    private static string Block(string search, string replace) =>
+        $"{FilePatcher.SearchMarker}\n{search}\n{FilePatcher.DividerMarker}\n{replace}\n{FilePatcher.ReplaceMarker}";
+
+    [Fact]
+    public void Edit_replaces_only_the_named_lines()
+    {
+        _repo.Write("a.txt", Lines(300));
+
+        var result = FilePatcher.Apply(_repo.Path, [Op("a.txt", FileActions.Edit, Block("line 150", "line 150\nadded"))]);
+
+        var lines = File.ReadAllText(_repo.File("a.txt")).Split('\n');
+        Assert.Equal(301, lines.Length);
+        Assert.Equal("added", lines[150]);
+        Assert.Equal("line 300", lines[^1]);
+        Assert.Equal(["EDIT a.txt"], result.Applied);
+    }
+
+    [Fact]
+    public void Edit_applies_several_blocks_in_order_and_keeps_crlf()
+    {
+        _repo.Write("a.txt", "one\r\ntwo\r\nthree\r\n");
+
+        FilePatcher.Apply(_repo.Path, [Op("a.txt", FileActions.Edit, Block("one", "1") + "\n" + Block("three", "3"))]);
+
+        Assert.Equal("1\r\ntwo\r\n3\r\n", File.ReadAllText(_repo.File("a.txt")));
+    }
+
+    [Fact]
+    public void Edit_rejects_text_that_is_missing_or_ambiguous_and_writes_nothing()
+    {
+        _repo.Write("a.txt", "same\nsame\n");
+        _repo.Write("b.txt", "keep");
+
+        var ambiguous = Assert.Throws<PatchRejectedException>(() => FilePatcher.Apply(_repo.Path,
+            [Op("b.txt", FileActions.Overwrite, "changed"), Op("a.txt", FileActions.Edit, Block("same", "x"))]));
+        var missing = Assert.Throws<PatchRejectedException>(() => FilePatcher.Apply(_repo.Path,
+            [Op("a.txt", FileActions.Edit, Block("absent", "x"))]));
+
+        Assert.Contains("more than once", ambiguous.Message);
+        Assert.Contains("isn't in the file", missing.Message);
+        Assert.Equal("keep", File.ReadAllText(_repo.File("b.txt")));
+        Assert.Equal("same\nsame\n", File.ReadAllText(_repo.File("a.txt")));
+    }
+
+    [Fact]
+    public void Edit_rejects_a_missing_file_and_malformed_blocks()
+    {
+        _repo.Write("a.txt", "x");
+
+        Assert.Throws<PatchRejectedException>(() => FilePatcher.Apply(_repo.Path, [Op("none.txt", FileActions.Edit, Block("x", "y"))]));
+        Assert.Throws<PatchRejectedException>(() => FilePatcher.Apply(_repo.Path, [Op("a.txt", FileActions.Edit, "just some code")]));
+        Assert.Throws<PatchRejectedException>(() => FilePatcher.Apply(_repo.Path, [Op("a.txt", FileActions.Edit, $"{FilePatcher.SearchMarker}\nx\n")]));
+    }
+
+    [Fact]
+    public void Overwrite_that_cuts_a_long_file_sharply_is_rejected()
+    {
+        _repo.Write("big.cs", Lines(1000));
+
+        var ex = Assert.Throws<PatchRejectedException>(() => FilePatcher.Apply(_repo.Path, [Op("big.cs", FileActions.Overwrite, Lines(600))]));
+
+        Assert.Contains("1000 lines to 600", ex.Message);
+        Assert.Contains("EDIT", ex.Message);
+        Assert.Equal(Lines(1000), File.ReadAllText(_repo.File("big.cs")));
+    }
+
+    [Fact]
+    public void Overwrite_that_keeps_most_of_a_long_file_or_shortens_a_short_one_is_allowed()
+    {
+        _repo.Write("big.cs", Lines(1000));
+        _repo.Write("small.cs", Lines(100));
+
+        FilePatcher.Apply(_repo.Path, [Op("big.cs", FileActions.Overwrite, Lines(800)), Op("small.cs", FileActions.Overwrite, Lines(10))]);
+
+        Assert.Equal(Lines(800), File.ReadAllText(_repo.File("big.cs")));
+        Assert.Equal(Lines(10), File.ReadAllText(_repo.File("small.cs")));
+    }
+
+    [Fact]
+    public void Delete_then_create_replaces_a_long_file_on_purpose()
+    {
+        _repo.Write("big.cs", Lines(1000));
+
+        FilePatcher.Apply(_repo.Path, [Op("big.cs", FileActions.Delete), Op("big.cs", FileActions.Create, Lines(50))]);
+
+        Assert.Equal(Lines(50), File.ReadAllText(_repo.File("big.cs")));
+    }
 }
