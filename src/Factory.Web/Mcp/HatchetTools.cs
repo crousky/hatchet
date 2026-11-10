@@ -37,7 +37,7 @@ public sealed record RunSummary(int RunId, string Title, string Status, string P
 
 public sealed record SubtaskSummary(int Order, string Title, string Status, int FixAttempts);
 
-public sealed record RunDetails(RunSummary Run, string? Branch, string? BaseBranch, bool? FinalCheckPassed, int Tokens, string? WorkLeft, IReadOnlyList<SubtaskSummary> Subtasks, IReadOnlyList<string> RecentEvents);
+public sealed record RunDetails(RunSummary Run, string? Branch, string? BaseBranch, bool? FinalCheckPassed, int Tokens, string? WorkLeft, IReadOnlyList<SubtaskSummary> Subtasks, IReadOnlyList<string> RecentEvents, PauseBrief? NeedsFromYou = null);
 
 public sealed record SubtaskDetails(
     int Order, string Title, string Status, string Description, int FixAttempts,
@@ -95,7 +95,7 @@ public sealed class HatchetTools(FactoryOrchestrator orchestrator, IRunStore sto
     }
 
     [McpServerTool(Name = "list_runs", ReadOnly = true)]
-    [Description("Lists Hatchet runs, newest first, with their status, progress and project (the repository's folder name).")]
+    [Description("Lists Hatchet runs, newest first, with their status, progress and project (the repository's folder name). For a run that needs a person, call get_run to see what it needs.")]
     public async Task<IReadOnlyList<RunSummary>> ListRuns(
         [Description("True to include merged, closed, failed and cancelled runs.")] bool includeFinished = false,
         CancellationToken ct = default)
@@ -109,7 +109,7 @@ public sealed class HatchetTools(FactoryOrchestrator orchestrator, IRunStore sto
     }
 
     [McpServerTool(Name = "get_run", ReadOnly = true)]
-    [Description("Shows a run's status, its subtasks, recent events and, once a few subtasks are done, how much working time is likely left. If it is paused, pauseReason says why; use get_subtask for the details and resume_run to continue.")]
+    [Description("Shows a run's status, its subtasks, recent events and, once a few subtasks are done, how much working time is likely left. If it is waiting for a person, needsFromYou explains what happened, what is blocking it, what to give the agents as guidance and what each resume_run action needs; use get_subtask for the full failure and diff.")]
     public Task<RunDetails> GetRun([Description("The run's id.")] int runId, CancellationToken ct = default) =>
         DescribeRunAsync(runId, ct);
 
@@ -229,7 +229,7 @@ public sealed class HatchetTools(FactoryOrchestrator orchestrator, IRunStore sto
         return new RunDetails(Summarize(run, subtasks), run.BranchName, run.BaseBranch, run.IntegrationPassed,
             run.PromptTokens + run.CompletionTokens, estimate is null ? null : Fmt.WorkLeft(estimate),
             subtasks.OrderBy(s => s.Order).Select(s => new SubtaskSummary(s.Order, s.Title, s.Status.ToString(), s.FixAttempts)).ToList(),
-            events);
+            events, PauseBriefBuilder.Build(run, subtasks.FirstOrDefault(s => s.Status == SubtaskStatus.NeedsHuman)));
     }
 
     private RunSummary Summarize(FactoryRun run, IReadOnlyList<FactorySubtask> subtasks)

@@ -142,7 +142,7 @@ public sealed class ClaudeCodeLlmClient(string workingDirectory) : ILlmClient
         return output;
     }
 
-    private static Process StartOrThrow(ProcessStartInfo start, string path)
+    internal static Process StartOrThrow(ProcessStartInfo start, string path)
     {
         try
         {
@@ -154,10 +154,12 @@ public sealed class ClaudeCodeLlmClient(string workingDirectory) : ILlmClient
         }
     }
 
-    private static void Kill(Process process)
+    internal static void Kill(Process process)
     {
         try { process.Kill(entireProcessTree: true); } catch (InvalidOperationException) { } catch (Win32Exception) { }
     }
+
+    internal static Task WritePromptToAsync(Process process, string prompt) => WritePromptAsync(process, prompt);
 
     private static string? StringOrNull(JsonNode? node) =>
         node?.GetValueKind() == JsonValueKind.String ? node.GetValue<string>() : null;
@@ -200,7 +202,7 @@ internal sealed class ClaudeStreamParser(Action<LlmDelta>? onDelta)
                         break;
                     // The structured answer arrives as the input of the StructuredOutput tool.
                     case "input_json_delta" when Str(delta?["partial_json"]) is { Length: > 0 } json:
-                        onDelta?.Invoke(new LlmDelta(json, IsThinking: false));
+                        onDelta?.Invoke(new LlmDelta(json, IsThinking: false, IsToolInput: true));
                         break;
                 }
                 break;

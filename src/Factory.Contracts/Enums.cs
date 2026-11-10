@@ -115,6 +115,9 @@ public static class ClaudeCodeOptions
     public const string DefaultModel = "opus";
     public const string DefaultEffort = "high";
 
+    /// <summary>The model Hatchet saves for a last try, when everything else has failed.</summary>
+    public const string StrongestModel = "opus";
+
     public static readonly IReadOnlyList<string> Models = ["opus", "sonnet", "haiku"];
     public static readonly IReadOnlyList<string> Efforts = ["low", "medium", "high", "xhigh", "max"];
 

@@ -90,11 +90,12 @@ public static class PromptBuilder
         Don't repeat it. Keep your thinking brief and go straight to the answer. Write data files with only the rows the specification names (a few dozen at most); never enumerate ranges or sequences, or recite tables, registries or other long data from memory. If complete data is needed, write the code or script that fetches or generates it instead.
         """;
 
-    public static string Review(FactorySubtask subtask, string diff, string testSummary)
+    public static string Review(FactorySubtask subtask, string diff, string testSummary, string? guidance = null)
     {
         var builder = new StringBuilder();
         SubtaskSection(builder, subtask);
         Section(builder, "Refined specification", subtask.RefinedSpecJson ?? "(none)");
+        GuidanceSection(builder, guidance);
         Section(builder, "Git diff", diff.Length > 0 ? diff : "(the diff is empty: no files changed)");
         Section(builder, "Build and test summary", testSummary);
         builder.Append("Review this diff against the refined specification.");

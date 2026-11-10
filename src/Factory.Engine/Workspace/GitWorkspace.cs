@@ -142,6 +142,44 @@ public sealed class GitWorkspace(string repositoryPath)
         await GitAsync(ct, "clean", "-fd");
     }
 
+    /// <summary>The checked-out branch, or "HEAD" when detached.</summary>
+    public async Task<string> GetBranchLabelAsync(CancellationToken ct = default) => await GetCurrentBranchOrNullAsync(ct) ?? "HEAD";
+
+    /// <summary>
+    /// Checks a commit out into a new folder of its own, detached, so something can build and run it without touching
+    /// this working tree. The folder shares the repository's history and takes no branch.
+    /// </summary>
+    public async Task AddDetachedWorktreeAsync(string path, string commit, CancellationToken ct = default) =>
+        await GitAsync(ct, "worktree", "add", "--detach", "--force", path, commit);
+
+    /// <summary>Removes a folder made by <see cref="AddDetachedWorktreeAsync"/>, with whatever it built. Nothing is lost that a commit holds.</summary>
+    public async Task RemoveWorktreeAsync(string path, CancellationToken ct = default)
+    {
+        await TryGitAsync(ct, "worktree", "remove", "--force", path);
+        await TryGitAsync(ct, "worktree", "prune");
+    }
+
+    /// <summary>Uncommitted changes as <c>git status --porcelain</c> lines, leaving out build output.</summary>
+    public async Task<IReadOnlyList<string>> GetUncommittedChangesAsync(CancellationToken ct = default)
+    {
+        string[] args = ["status", "--porcelain", "--", ".", .. ArtifactExclusions];
+        return (await GitAsync(ct, args)).Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+    }
+
+    /// <summary>The latest commits on a revision, newest first, as "shortsha subject".</summary>
+    public async Task<IReadOnlyList<string>> GetRecentCommitsAsync(string revision, int count, CancellationToken ct = default)
+    {
+        var (success, output) = await TryGitAsync(ct, "log", $"-{count}", "--format=%h %s", revision);
+        return success ? output.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries) : [];
+    }
+
+    /// <summary>Commits on <paramref name="branch"/> that <paramref name="baseRevision"/> doesn't have. Zero if either is missing.</summary>
+    public async Task<int> CountCommitsAheadAsync(string baseRevision, string branch, CancellationToken ct = default)
+    {
+        var (success, output) = await TryGitAsync(ct, "rev-list", "--count", $"{baseRevision}..{branch}");
+        return success && int.TryParse(output.Trim(), out var count) ? count : 0;
+    }
+
     /// <summary>Merges into the base branch. On conflict the merge is aborted and the original branch restored.</summary>
     public async Task<string> MergeIntoAsync(string baseBranch, string branch, string message, CancellationToken ct = default)
     {

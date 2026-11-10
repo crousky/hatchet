@@ -1,0 +1,156 @@
+@inject AdHocManager Manager
+@inject NavigationManager Nav
+
+<div class="requests">
+    <div class="requests-heading"><Icon Name="sparkle" Size="12" /> Ask or run something in @Project.Name</div>
+
+    <div class="request-bar">
+        <input autocomplete="off" data-1p-ignore data-lpignore="true" class="grow" placeholder="Ask a question about this project, or type a command to run…"
+               @bind="_text" @bind:event="oninput" @onkeydown="OnKeyDown" />
+        <button class="btn btn-primary" disabled="@(_busy || string.IsNullOrWhiteSpace(_text))" title="Claude Code answers from the project's files and Hatchet's status. It can only read." @onclick="AskAsync">
+            <Icon Name="sparkle" Size="14" /> Ask
+        </button>
+        <button class="btn" disabled="@(_busy || string.IsNullOrWhiteSpace(_text))" title="Runs the text as a command in an isolated copy of the latest commit" @onclick="RunCommandAsync">
+            <Icon Name="terminal" Size="14" /> Run command
+        </button>
+    </div>
+    <div class="action-row">
+        <button class="btn" disabled="@_busy" title="Branch, uncommitted changes, every run's progress, and what needs you" @onclick="StatusReportAsync">
+            <Icon Name="clipboard" Size="14" /> Status report
+        </button>
+        <button class="btn" disabled="@(_busy || Project.Requests.Any(r => r.IsActive && r.Kind is RequestKind.RunApp or RequestKind.RunCommand))"
+                title="@RunAppTitle" @onclick="RunAppAsync">
+            <Icon Name="play" Size="14" /> Run the app
+        </button>
+        <button class="btn @(_reporting ? "active" : null)" title="Report a defect or ask for a change, with screenshots if you have them. Hatchet turns it into a run." @onclick="() => _reporting = !_reporting">
+            <Icon Name="bug" Size="14" /> Report a defect or change
+        </button>
+        <span class="hint request-hint">Runs use an isolated copy of the latest commit, so they never disturb a run that is building here.</span>
+    </div>
+    @if (_reporting)
+    {
+        <ReportForm Repository="@Project.Repository" OnClose="() => _reporting = false" />
+    }
+
+    @if (_error is not null)
+    {
+        <div class="notice notice-bad"><Icon Name="alert" Size="16" /><div class="notice-body">@_error</div></div>
+    }
+
+    @if (Project.Requests.Count > 0)
+    {
+        <table class="runs-table requests-table">
+            <thead>
+                <tr>
+                    <th>Request</th>
+                    <th>Status</th>
+                    <th class="num">Started</th>
+                    <th></th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var request in Project.Requests)
+                {
+                    <tr class="row-link" @key="request.Id" @onclick="@(() => Nav.NavigateTo($"/requests/{request.Id}"))">
+                        <td class="col-title">
+                            <span class="request-kind" title="@Fmt.Label(request.Kind)"><Icon Name="@Fmt.Icon(request.Kind)" Size="13" /></span>
+                            <a href="/requests/@request.Id">@request.Title</a>
+                            <span class="muted mono-small">#@request.Id</span>
+                        </td>
+                        <td>
+                            <span class="badge badge-@Fmt.Tone(request.Status)">
+                                @if (request.IsActive)
+                                {
+                                    <span class="spinner"></span>
+                                }
+                                @Fmt.Label(request.Status)
+                            </span>
+                        </td>
+                        <td class="num muted">@Fmt.Ago(request.CreatedAt)</td>
+                        <td class="num" @onclick:stopPropagation="true">
+                            @if (request.IsActive)
+                            {
+                                <button class="btn btn-ghost" title="Stop it. A command's whole process tree is killed." @onclick="() => StopAsync(request.Id)"><Icon Name="square" Size="13" /> Stop</button>
+                            }
+                            else
+                            {
+                                <ConfirmButton Class="btn-ghost" Text="Delete" ConfirmText="Delete?" IconName="trash" Title="Remove this request and its isolated copy of the code" OnConfirmed="() => DeleteAsync(request.Id)" />
+                            }
+                        </td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    }
+</div>
+
+@code {
+    [Parameter, EditorRequired] public ProjectGroup Project { get; set; } = null!;
+
+    private string? _text;
+    private string? _error;
+    private bool _busy;
+    private bool _reporting;
+    private string? _detectedFor;
+    private DetectedRunCommand? _detected;
+
+    // How the software starts is read from the repository's files, so it's worked out once per repository, not on every refresh.
+    protected override void OnParametersSet()
+    {
+        if (_detectedFor == Project.Repository) return;
+        _detectedFor = Project.Repository;
+        _detected = AdHocManager.DetectRunCommand(Project.Repository);
+    }
+
+    private string RunAppTitle => _detected is { } detected
+        ? $"Runs `{detected.Command}` ({detected.Description}) on the latest commit"
+        : "Hatchet couldn't tell how to start this software. Type a command and use Run command instead.";
+
+    private Task OnKeyDown(KeyboardEventArgs args) =>
+        args is { Key: "Enter", CtrlKey: false, ShiftKey: false } && !string.IsNullOrWhiteSpace(_text) ? AskAsync() : Task.CompletedTask;
+
+    private Task StatusReportAsync() => StartAsync(() => Manager.RequestStatusReportAsync(Project.Repository));
+
+    private Task RunAppAsync() => StartAsync(() => Manager.RequestRunAppAsync(Project.Repository));
+
+    private Task RunCommandAsync() => StartAsync(() => Manager.RequestCommandAsync(Project.Repository, _text ?? ""));
+
+    private Task AskAsync() => StartAsync(() => Manager.AskAsync(Project.Repository, _text ?? ""));
+
+    private async Task StartAsync(Func<Task<AdHocRequest>> start)
+    {
+        _busy = true;
+        _error = null;
+        try
+        {
+            var request = await start();
+            _text = null;
+            Nav.NavigateTo($"/requests/{request.Id}");
+        }
+        catch (Exception ex) when (ex is FactoryValidationException or GitException)
+        {
+            _error = ex.Message;
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+
+    private Task StopAsync(int id) => ActAsync(() => Manager.StopAsync(id));
+
+    private Task DeleteAsync(int id) => ActAsync(() => Manager.DeleteAsync(id));
+
+    private async Task ActAsync(Func<Task> action)
+    {
+        _error = null;
+        try
+        {
+            await action();
+        }
+        catch (Exception ex) when (ex is FactoryValidationException or GitException)
+        {
+            _error = ex.Message;
+        }
+    }
+}

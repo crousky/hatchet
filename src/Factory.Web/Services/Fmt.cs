@@ -1,4 +1,5 @@
 using Factory.Contracts;
+using Factory.Engine.AdHoc;
 using Factory.Engine.Orchestration;
 
 namespace Factory.Web.Services;
@@ -35,6 +36,35 @@ public static class Fmt
         RunStatus.Failed => "bad",
         RunStatus.Closed or RunStatus.Cancelled => "muted",
         _ => "active"
+    };
+
+    public static string Label(RequestKind kind) => StatusReportBuilder.KindLabel(kind);
+
+    public static string Icon(RequestKind kind) => kind switch
+    {
+        RequestKind.StatusReport => "clipboard",
+        RequestKind.RunApp => "play",
+        RequestKind.RunCommand => "terminal",
+        RequestKind.Defect => "bug",
+        RequestKind.Change => "wrench",
+        _ => "sparkle"
+    };
+
+    public static string Label(RequestStatus status) => status switch
+    {
+        RequestStatus.Running => "Running",
+        RequestStatus.Succeeded => "Done",
+        RequestStatus.Failed => "Failed",
+        RequestStatus.Stopped => "Stopped",
+        _ => status.ToString()
+    };
+
+    public static string Tone(RequestStatus status) => status switch
+    {
+        RequestStatus.Running => "active",
+        RequestStatus.Succeeded => "good",
+        RequestStatus.Failed => "bad",
+        _ => "muted"
     };
 
     public static string Label(SubtaskStatus status) => status switch
@@ -76,6 +106,13 @@ public static class Fmt
         $"{(int)span.TotalHours}h {span.Minutes}m";
 
     public static string Duration(long milliseconds) => Duration(TimeSpan.FromMilliseconds(milliseconds));
+
+    public static string Size(long bytes) => bytes switch
+    {
+        < 1024 => $"{bytes} B",
+        < 1024 * 1024 => $"{bytes / 1024.0:0} KB",
+        _ => $"{bytes / 1024.0 / 1024.0:0.0} MB"
+    };
 
     /// <summary>"31–71h", "1.5–3h" or "20–45m", rounded to what an estimate can say.</summary>
     public static string Range(TimeSpan low, TimeSpan high)

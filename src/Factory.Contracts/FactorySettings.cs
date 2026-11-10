@@ -56,6 +56,14 @@ public sealed class FactorySettings
 
     /// <summary>The Claude Code executable, for roles routed to Claude. A bare name is looked up on PATH.</summary>
     public string ClaudeCodePath { get; set; } = "claude";
+
+    /// <summary>A copy that can be changed without touching these settings, which every run shares.</summary>
+    public FactorySettings Clone()
+    {
+        var copy = (FactorySettings)MemberwiseClone();
+        copy.ProfileOverrides = ProfileOverrides.Select(o => o.Clone()).ToList();
+        return copy;
+    }
 }
 
 public sealed class AgentProfileOverride
@@ -69,4 +77,6 @@ public sealed class AgentProfileOverride
 
     /// <summary>A replacement system prompt, or null for the built-in one.</summary>
     public string? SystemPrompt { get; set; }
+
+    public AgentProfileOverride Clone() => (AgentProfileOverride)MemberwiseClone();
 }

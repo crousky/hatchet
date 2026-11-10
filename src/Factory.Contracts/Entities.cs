@@ -16,6 +16,9 @@ public sealed class FactoryTask
     /// <summary>The plan handed over with the task, as JSON <see cref="SubtaskEdit"/>s. Null when Hatchet's planner makes the plan.</summary>
     public string? SuppliedPlanJson { get; set; }
 
+    /// <summary>The model every agent runs on for this task, such as <c>claude:sonnet</c> or <c>local:qwen3.8</c>. Null when Settings decide.</summary>
+    public string? ModelChoice { get; set; }
+
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
     public List<FactoryRun> Runs { get; set; } = [];
 }

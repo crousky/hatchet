@@ -4,7 +4,7 @@ namespace Factory.Engine.Llm;
 
 public sealed record LlmRequest(AgentProfile Profile, string UserPrompt, LlmSchema Schema);
 
-public sealed record LlmDelta(string Text, bool IsThinking);
+public sealed record LlmDelta(string Text, bool IsThinking, bool IsToolInput = false);
 
 public sealed record LlmResult(
     string Content,

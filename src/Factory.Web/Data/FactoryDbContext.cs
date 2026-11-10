@@ -19,9 +19,12 @@ public sealed class FactoryDbContext(DbContextOptions<FactoryDbContext> options)
     public DbSet<AgentLogEntry> AgentLogs => Set<AgentLogEntry>();
     public DbSet<DiffSnapshot> Diffs => Set<DiffSnapshot>();
     public DbSet<SettingsRow> Settings => Set<SettingsRow>();
+    public DbSet<AdHocRequest> AdHocRequests => Set<AdHocRequest>();
 
     protected override void ConfigureConventions(ModelConfigurationBuilder builder)
     {
+        builder.Properties<RequestKind>().HaveConversion<string>();
+        builder.Properties<RequestStatus>().HaveConversion<string>();
         // SQLite drops DateTimeKind. Everything is stored as UTC, so restore it on read.
         builder.Properties<DateTime>().HaveConversion<UtcDateTimeConverter>();
         builder.Properties<RunStatus>().HaveConversion<string>();
@@ -41,6 +44,7 @@ public sealed class FactoryDbContext(DbContextOptions<FactoryDbContext> options)
         model.Entity<AgentLogEntry>().HasIndex(l => l.RunId);
         model.Entity<DiffSnapshot>().HasOne<FactoryRun>().WithMany().HasForeignKey(d => d.RunId);
         model.Entity<DiffSnapshot>().HasIndex(d => d.RunId);
+        model.Entity<AdHocRequest>().HasIndex(r => r.RepositoryPath);
     }
 
     private sealed class UtcDateTimeConverter() : ValueConverter<DateTime, DateTime>(

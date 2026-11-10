@@ -29,7 +29,7 @@ public sealed partial class FactoryOrchestrator(
     ICommandRunner commands,
     FactoryEventBus bus,
     ILogger<FactoryOrchestrator> logger,
-    SkillLibrary? skills = null)
+    SkillLibrary? skills = null) : IRunStarter
 {
     /// <summary>Where the skills for a run's repository come from. Without one, only the repository's own skills are used.</summary>
     public SkillLibrary Skills { get; } = skills ?? new SkillLibrary(null);
@@ -197,13 +197,15 @@ public sealed partial class FactoryOrchestrator(
         {
             var settings = await settingsStore.GetAsync();
             // A run that has started has its branch checked out until it finishes, even while it waits for the user.
-            var holders = (await store.ListRunsAsync())
-                .Where(r => !RunStateMachine.IsTerminal(r.Status) && r.BranchName is not null)
+            var openRuns = (await store.ListRunsAsync()).Where(r => !RunStateMachine.IsTerminal(r.Status)).ToList();
+            var holders = openRuns
+                .Where(r => r.BranchName is not null)
                 .GroupBy(r => RepositoryKey(r.Task.RepositoryPath), StringComparer.OrdinalIgnoreCase)
                 .ToDictionary(g => g.Key, g => (IReadOnlySet<int>)g.Select(r => r.Id).ToHashSet(), StringComparer.OrdinalIgnoreCase);
-            // Waiting runs haven't read their settings yet, so they go by the agents' models as they are now.
+            // Waiting runs haven't read their settings yet, so they go by the agents' models as they are now, or as the run's own choice has them.
+            var pools = openRuns.ToDictionary(r => r.Id, r => PoolFor(ModelChoices.Apply(settings, r.Task.ModelChoice)));
             var touched = _queue.Admit(pool => pool == WorkerPool.Claude ? settings.MaxParallelClaudeRuns : settings.MaxParallelLocalRuns,
-                holders, PoolFor(settings));
+                holders, runId => pools.GetValueOrDefault(runId, PoolFor(settings)));
             foreach (var runId in touched) bus.Publish(new QueueChanged(runId));
         }
         catch (Exception ex)
@@ -230,6 +232,9 @@ public sealed partial class FactoryOrchestrator(
 
     public Task<FactoryRun> StartRunAsync(NewRunRequest request, CancellationToken ct = default) => StartRunAsync(request, null, ct);
 
+    public Task EnsureCanStartAsync(string repositoryPath, CancellationToken ct = default) =>
+        RequireStartableRepositoryAsync(Path.GetFullPath(repositoryPath.Trim()), ct);
+
     /// <summary>
     /// Starts a run. With a <paramref name="plan"/>, for example one worked out with Claude over MCP, Hatchet's own
     /// planner is skipped. Whoever supplied the plan has approved it, so its verification commands may run.
@@ -243,6 +248,7 @@ public sealed partial class FactoryOrchestrator(
 
         var command = request.VerificationCommand?.Trim() ?? "";
         var path = Path.GetFullPath(request.RepositoryPath.Trim());
+        var modelChoice = ModelChoices.Normalize(request.ModelChoice);
         await RequireStartableRepositoryAsync(path, ct);
 
         var task = new FactoryTask
@@ -252,7 +258,8 @@ public sealed partial class FactoryOrchestrator(
             ArchitectureSpec = request.ArchitectureSpec,
             VerificationCommand = command,
             RequirePlanApproval = request.RequirePlanApproval,
-            SuppliedPlanJson = plan is null ? null : JsonSerializer.Serialize(plan)
+            SuppliedPlanJson = plan is null ? null : JsonSerializer.Serialize(plan),
+            ModelChoice = modelChoice
         };
 
         // Once the run is saved it has to be launched, or it would sit queued with no pipeline behind it.
@@ -591,7 +598,7 @@ public sealed partial class FactoryOrchestrator(
                 var run = await store.GetRunAsync(runId, token);
                 run.QueuedRequest = null;
                 await store.UpdateRunAsync(run, token);
-                context = new PipelineContext(run, settings);
+                context = new PipelineContext(run, ModelChoices.Apply(settings, run.Task.ModelChoice));
                 await RunRequestAsync(context, request, token);
             }
             catch (Exception ex) when (ex is PausedByUserException || ex is OperationCanceledException && token.IsCancellationRequested && active.PauseRequested)
@@ -639,7 +646,7 @@ public sealed partial class FactoryOrchestrator(
             await store.UpdateRunAsync(run, ct);
         }
 
-        var pool = PoolFor(await settingsStore.GetAsync(ct));
+        var pool = PoolFor(ModelChoices.Apply(await settingsStore.GetAsync(ct), run.Task.ModelChoice));
         while (true)
         {
             var wait = _queue.WaitAsync(runId, repository, pool, ct);
@@ -654,7 +661,7 @@ public sealed partial class FactoryOrchestrator(
             // The line moves runs to the pool their agents use as settings change, so this differs only if they
             // changed again just as it was let in. Then it waits for a worker in the right pool.
             var settings = await settingsStore.GetAsync(ct);
-            pool = PoolFor(settings);
+            pool = PoolFor(ModelChoices.Apply(settings, run.Task.ModelChoice));
             if (_queue.WorkingPool(runId) == pool) return settings;
             _queue.Release(runId);
         }
@@ -850,17 +857,29 @@ public sealed partial class FactoryOrchestrator(
                     // are always worked on, however many build fixes it took to reach the reviewer.
                     var reviewed = subtask.ReviewJson is not null;
                     var used = reviewed ? subtask.ReviewFixAttempts : subtask.FixAttempts - subtask.ReviewFixAttempts;
-                    if (used >= context.Settings.MaxFixRetries)
+                    var settings = context.Settings;
+
+                    // Fixes the guard refused never touched the code, so they don't spend the budget. A run of them still ends the loop.
+                    if (RefusedInARow(subtask) >= Math.Min(Math.Max(settings.MaxFixRetries, 1), MaxFixHistory))
                     {
-                        await PauseForSubtaskAsync(run, subtask, reviewed
-                            ? $"\"{subtask.Title}\" still isn't accepted after {used} fix attempts since the reviewer first rejected it."
-                            : $"\"{subtask.Title}\" still fails after {used} fix attempts.", ct);
+                        await PauseForSubtaskAsync(run, subtask, PauseBriefBuilder.RefusedFixesReason(subtask.Title, RefusedInARow(subtask)), ct);
                         return false;
                     }
 
+                    if (used >= FixBudget(settings))
+                    {
+                        await PauseForSubtaskAsync(run, subtask, reviewed
+                            ? PauseBriefBuilder.ReviewStalledReason(subtask.Title, used)
+                            : PauseBriefBuilder.VerificationStalledReason(subtask.Title, used), ct);
+                        return false;
+                    }
+
+                    // Once the normal attempts are spent, one more goes to the strongest Claude model before anyone is asked.
+                    var lastResort = used >= settings.MaxFixRetries ? LastResortModel(settings) : null;
+
                     if (reviewed) subtask.ReviewFixAttempts++;
                     needsFix = false;
-                    if (!await FixAsync(context, subtask, ct))
+                    if (!await FixAsync(context, subtask, lastResort, ct))
                     {
                         needsFix = true;
                         continue;
@@ -875,6 +894,14 @@ public sealed partial class FactoryOrchestrator(
                         ? string.Join('\n', errors.Take(10))
                         : PromptBuilder.Tail(verification.Output, 800));
                     await store.UpdateSubtaskAsync(subtask, ct);
+
+                    // The same error after a fix by Claude (or with no Claude to turn to) means the code isn't the problem,
+                    // so more attempts would only spend time and tokens.
+                    if (SameErrorTwice(subtask.FixHistory) && await ClaudeHasTriedAsync(context, subtask, ct))
+                    {
+                        await PauseForSubtaskAsync(run, subtask, PauseBriefBuilder.RepeatedFailureReason(subtask.Title, subtask.FixAttempts), ct);
+                        return false;
+                    }
                     needsFix = true;
                     continue;
                 }
@@ -1037,8 +1064,12 @@ public sealed partial class FactoryOrchestrator(
     private const int MaxPackageTypes = 6;
     private const int MaxPackageTypeChars = 6000;
 
-    /// <summary>Returns false if the fix itself was unusable. The attempt still counts.</summary>
-    private async Task<bool> FixAsync(PipelineContext context, FactorySubtask subtask, CancellationToken ct)
+    /// <summary>
+    /// Returns false if the fix itself was unusable. The attempt still counts, unless the fix was refused for taking out
+    /// something the specification asks for: it changed nothing, so it gives the budget back.
+    /// </summary>
+    /// <param name="lastResortModel">When set, this is the final automatic attempt and this Claude model makes it.</param>
+    private async Task<bool> FixAsync(PipelineContext context, FactorySubtask subtask, string? lastResortModel, CancellationToken ct)
     {
         var (run, settings, git) = (context.Run, context.Settings, context.Git);
         subtask.FixAttempts++;
@@ -1062,7 +1093,13 @@ public sealed partial class FactoryOrchestrator(
         var claude = ClaudeCodeOptions.ModelLabel(AgentProfiles.Resolve(settings, AgentRole.BugFixer).ClaudeModel);
         FilePatchSetResponse patch;
         var failedLocalFixes = await CountFailedLocalFixesAsync(run.Id, subtask.Id, ct);
-        if (ShouldEscalateFix(settings, failedLocalFixes))
+        if (lastResortModel is not null)
+        {
+            await LogAsync(run.Id, subtask.Id, AgentLogKind.Info, PipelineStage.Fix,
+                $"The normal fix attempts are used up, so {ClaudeCodeOptions.ModelLabel(lastResortModel)} makes one last try before Hatchet asks you.", ct);
+            patch = await InvokeAgentAsync(context, AgentRole.BugFixer, subtask.Id, prompt, validate, ct, claudeModel: lastResortModel);
+        }
+        else if (ShouldEscalateFix(settings, failedLocalFixes))
         {
             await LogAsync(run.Id, subtask.Id, AgentLogKind.Info, PipelineStage.Fix,
                 $"{failedLocalFixes} fix {(failedLocalFixes == 1 ? "attempt" : "attempts")} on the local model didn't work, so {claude} takes this one.", ct);
@@ -1109,10 +1146,19 @@ public sealed partial class FactoryOrchestrator(
     [GeneratedRegex(@"\b[A-Za-z_][A-Za-z0-9_]*\b")]
     private static partial Regex Identifier();
 
+    // C-style line and block comments, HTML comments and Razor comments. A "//" right after a colon is a URL, not a comment.
+    [GeneratedRegex(@"/\*.*?\*/|<!--.*?-->|@\*.*?\*@|(?<!:)//[^\r\n]*", RegexOptions.Singleline)]
+    private static partial Regex Comment();
+
+    /// <summary>The names a file's code uses. Words in comments don't count, as "In" at the start of a sentence isn't the type called In.</summary>
+    private static IEnumerable<string> CodeNames(string content) =>
+        Identifier().Matches(Comment().Replace(content, " ")).Select(m => m.Value);
+
     /// <summary>
     /// The types the specification names that a fix takes out of the subtask's files altogether, such as a component
     /// swapped for plain markup to get past an error in how it was used. Only real types count, from the repository
-    /// or its packages, so a member the specification got wrong can still be replaced.
+    /// or its packages, so a member the specification got wrong can still be replaced. Only names in code count,
+    /// on either side of the fix, so prose in a comment that happens to match a type can't hold a fix back.
     /// </summary>
     internal static IReadOnlyList<string> DroppedRequiredTypes(string repositoryPath, FactorySubtask subtask, FilePatchSetResponse patch, IEnumerable<string> changedFiles)
     {
@@ -1132,15 +1178,15 @@ public sealed partial class FactoryOrchestrator(
         var patched = patch.Operations.Select(o => NormalizePath(o.RelativeFilePath)).ToHashSet(StringComparer.OrdinalIgnoreCase);
         var before = new HashSet<string>(StringComparer.Ordinal);
         foreach (var path in patched)
-            if (Read(path) is { } content) before.UnionWith(Identifier().Matches(content).Select(m => m.Value).Where(named.Contains));
+            if (Read(path) is { } content) before.UnionWith(CodeNames(content).Where(named.Contains));
         if (before.Count == 0) return [];
 
         // After the fix: what it writes, and the subtask's other changed files as they are.
         var after = new HashSet<string>(StringComparer.Ordinal);
         foreach (var operation in patch.Operations.Where(o => !o.Action.Equals("DELETE", StringComparison.OrdinalIgnoreCase)))
-            after.UnionWith(Identifier().Matches(operation.FileContent ?? "").Select(m => m.Value));
+            after.UnionWith(CodeNames(operation.FileContent ?? ""));
         foreach (var path in changedFiles.Select(NormalizePath).Where(p => !patched.Contains(p)))
-            if (Read(path) is { } content) after.UnionWith(Identifier().Matches(content).Select(m => m.Value));
+            if (Read(path) is { } content) after.UnionWith(CodeNames(content));
 
         var dropped = before.Where(n => !after.Contains(n)).ToList();
         if (dropped.Count == 0) return [];
@@ -1160,7 +1206,10 @@ public sealed partial class FactoryOrchestrator(
 
         subtask.LastFailure = $"{RefusedFixLead}{names}, which the specification asks for. Keep {it} and fix how {isIt} used instead. "
             + $"The definitions below show {(dropped.Count == 1 ? "its" : "their")} namespace and members, where Hatchet found them.\n\n{FailureToFixLead}\n{failure}";
-        subtask.FixHistory.Add($"Attempt {subtask.FixAttempts}: {patch.SummaryOfChanges}\nNot applied: it took out {names}, which the specification asks for.");
+        // Nothing was written, so this wasn't an attempt at the failure. RefusedInARow ends the loop if the guard keeps saying no.
+        subtask.FixAttempts--;
+        if (subtask.ReviewJson is not null) subtask.ReviewFixAttempts--;
+        subtask.FixHistory.Add($"{RefusedFixLabel} {patch.SummaryOfChanges}\nNot applied: it took out {names}, which the specification asks for.");
         if (subtask.FixHistory.Count > MaxFixHistory) subtask.FixHistory.RemoveAt(0);
         await store.UpdateSubtaskAsync(subtask, ct);
         await LogAsync(context.Run.Id, subtask.Id, AgentLogKind.Warning, PipelineStage.Fix,
@@ -1192,6 +1241,80 @@ public sealed partial class FactoryOrchestrator(
     }
 
     private const int MaxFixHistory = 5;
+    private const string RefusedFixLabel = "Refused fix (not counted as an attempt):";
+    private const string FailedNextMarker = "\nWhat failed next:\n";
+
+    /// <summary>Fixes in a row, newest first, that the guard refused to apply.</summary>
+    internal static int RefusedInARow(FactorySubtask subtask)
+    {
+        var count = 0;
+        for (var i = subtask.FixHistory.Count - 1; i >= 0 && subtask.FixHistory[i].StartsWith(RefusedFixLabel, StringComparison.Ordinal); i--) count++;
+        return count;
+    }
+
+    /// <summary>Forgets refused fixes after a person has stepped in, so they don't end the next stretch of attempts at once.</summary>
+    private static void ForgetRefusedFixes(FactorySubtask subtask) =>
+        subtask.FixHistory.RemoveAll(h => h.StartsWith(RefusedFixLabel, StringComparison.Ordinal));
+
+    /// <summary>The stronger model for the final automatic attempt, or null when there's none to turn to.</summary>
+    internal static string? LastResortModel(FactorySettings settings)
+    {
+        var profile = AgentProfiles.Resolve(settings, AgentRole.BugFixer);
+        var canUseClaude = profile.UsesClaude || settings.EscalateFixesToClaudeAfter > 0;
+        return settings.MaxFixRetries > 0 && canUseClaude && !profile.ClaudeModel.Equals(ClaudeCodeOptions.StrongestModel, StringComparison.OrdinalIgnoreCase)
+            ? ClaudeCodeOptions.StrongestModel
+            : null;
+    }
+
+    /// <summary>The attempts a stage gets: the configured number, plus the last-resort one when there's a stronger model to use.</summary>
+    internal static int FixBudget(FactorySettings settings) =>
+        settings.MaxFixRetries + (LastResortModel(settings) is null ? 0 : 1);
+
+    /// <summary>
+    /// True when the last two fix attempts, in a row, ended in the same error. Line numbers are ignored, as a fix can
+    /// move the code without changing what is wrong. Only failed builds and tests count, not a reviewer's objections.
+    /// </summary>
+    internal static bool SameErrorTwice(IReadOnlyList<string> history)
+    {
+        if (history.Count < 2) return false;
+        var (previous, latest) = (history[^2], history[^1]);
+        if (AttemptNumber(previous) is not { } before || AttemptNumber(latest) is not { } after || after != before + 1) return false;
+        if (FailedNext(previous) is not { } first || FailedNext(latest) is not { } second) return false;
+        return first.Length > 0 && first == second;
+    }
+
+    private static int? AttemptNumber(string entry) =>
+        entry.StartsWith("Attempt ", StringComparison.Ordinal) && int.TryParse(entry["Attempt ".Length..].Split(':', 2)[0], out var n) ? n : null;
+
+    private static string? FailedNext(string entry)
+    {
+        var at = entry.IndexOf(FailedNextMarker, StringComparison.Ordinal);
+        if (at < 0) return null;
+        var outcome = entry[(at + FailedNextMarker.Length)..];
+        if (outcome.StartsWith("The reviewer rejected it", StringComparison.Ordinal)) return null;
+        return WhitespaceRuns().Replace(LineNumbers().Replace(outcome, ""), " ").Trim();
+    }
+
+    [GeneratedRegex(@"\(\d+(,\d+)?\)|:\d+(:\d+)?|\bline \d+", RegexOptions.IgnoreCase)]
+    private static partial Regex LineNumbers();
+
+    [GeneratedRegex(@"\s+")]
+    private static partial Regex WhitespaceRuns();
+
+    /// <summary>
+    /// True when a fix by Claude has been tried since the latest build, or when there's no Claude to try. Two identical
+    /// failures from the local model alone don't show the code isn't the problem: Claude hasn't had its go yet.
+    /// </summary>
+    private async Task<bool> ClaudeHasTriedAsync(PipelineContext context, FactorySubtask subtask, CancellationToken ct)
+    {
+        var profile = AgentProfiles.Resolve(context.Settings, AgentRole.BugFixer);
+        if (!profile.UsesClaude && context.Settings.EscalateFixesToClaudeAfter <= 0) return true;
+        var calls = (await store.GetLogsAsync(context.Run.Id, ct: ct))
+            .Where(l => l is { Kind: AgentLogKind.LlmCall, Succeeded: true } && l.SubtaskId == subtask.Id)
+            .ToList();
+        var lastBuild = calls.LastOrDefault(l => l.Role == AgentRole.CodeGenerator)?.Id ?? 0;
+        return calls.Any(l => l.Id > lastBuild && l is { Role: AgentRole.BugFixer, Model: not null });
+    }
 
     /// <summary>Notes that the latest fix didn't work and why, if the code being checked came from a fix.</summary>
     private static void RecordFailedFix(FactorySubtask subtask, string outcome)
@@ -1263,7 +1386,7 @@ public sealed partial class FactoryOrchestrator(
         var testSummary = verification is null
             ? "No build or test setup exists yet, so nothing was built or tested. Judge the change on the diff alone."
             : $"Command: {verification.Command}\nExit code: {verification.ExitCode}\nDuration: {verification.Duration.TotalSeconds:0.0}s\n\n{PromptBuilder.Tail(verification.Output, 4000)}";
-        var prompt = PromptBuilder.Review(subtask, PromptBuilder.Head(diff, settings.MaxDiffChars), testSummary);
+        var prompt = PromptBuilder.Review(subtask, PromptBuilder.Head(diff, settings.MaxDiffChars), testSummary, subtask.HumanGuidance);
 
         var verdict = await InvokeAgentAsync<ReviewVerdictResponse>(context, AgentRole.StaticReviewer, subtask.Id, prompt, null, ct);
         subtask.ReviewJson = PromptBuilder.ToJson(verdict);
@@ -1349,9 +1472,10 @@ public sealed partial class FactoryOrchestrator(
 
     /// <param name="localTimeLimit">How long the calls on the local model may take in all, counted from now. Past it, a
     /// <see cref="TimeLimitException"/> is thrown. A call handed to Claude isn't limited.</param>
+    /// <param name="claudeModel">Runs the call on this Claude model, whatever the agent's profile says.</param>
     private async Task<T> InvokeAgentAsync<T>(PipelineContext context, AgentRole role, int? subtaskId, string prompt, Func<T, string?>? validate, CancellationToken ct,
-        bool onClaude = false, TimeSpan? localTimeLimit = null) =>
-        (await AskAgentAsync(context, role, subtaskId, prompt, validate, ct, onClaude, localTimeLimit)).Value;
+        bool onClaude = false, TimeSpan? localTimeLimit = null, string? claudeModel = null) =>
+        (await AskAgentAsync(context, role, subtaskId, prompt, validate, ct, onClaude, localTimeLimit, claudeModel: claudeModel)).Value;
 
     /// <summary>
     /// Calls an agent and parses its answer, retrying unusable output. Output that loops, or fills a context window
@@ -1361,11 +1485,12 @@ public sealed partial class FactoryOrchestrator(
     /// </summary>
     /// <param name="salvage">Keeps the usable part of a cut-off answer, with the path it was writing when it stopped.</param>
     private async Task<AgentAnswer<T>> AskAgentAsync<T>(PipelineContext context, AgentRole role, int? subtaskId, string prompt, Func<T, string?>? validate, CancellationToken ct,
-        bool onClaude = false, TimeSpan? localTimeLimit = null, Func<string, (T Value, string? CutOffPath)?>? salvage = null)
+        bool onClaude = false, TimeSpan? localTimeLimit = null, Func<string, (T Value, string? CutOffPath)?>? salvage = null, string? claudeModel = null)
     {
         var (run, settings) = (context.Run, context.Settings);
         var profile = AgentProfiles.Resolve(settings, role);
         if (onClaude) profile = profile with { Engine = AgentEngine.ClaudeCode };
+        if (claudeModel is not null) profile = profile with { Engine = AgentEngine.ClaudeCode, ClaudeModel = claudeModel };
         var schema = LlmSchemas.For<T>();
         var attemptPrompt = prompt;
         var lastError = "";
@@ -1770,14 +1895,17 @@ public sealed partial class FactoryOrchestrator(
             case HumanDecision.RetryFixer when subtask.LastFailure is not null:
                 subtask.FixAttempts = 0;
                 subtask.ReviewFixAttempts = 0;
+                ForgetRefusedFixes(subtask);
                 return new ResumePoint(subtask.Id, SubtaskEntry.Fix);
 
             case HumanDecision.Reverify when built:
                 subtask.FixAttempts = 0;
                 subtask.ReviewFixAttempts = 0;
+                ForgetRefusedFixes(subtask);
                 return new ResumePoint(subtask.Id, SubtaskEntry.Verify);
 
             case HumanDecision.Resume when built:
+                ForgetRefusedFixes(subtask);
                 return new ResumePoint(subtask.Id, SubtaskEntry.Verify);
 
             default:

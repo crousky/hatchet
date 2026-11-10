@@ -66,7 +66,21 @@ Each role runs on the local model by default, or on Claude through the Claude Co
 
 Once three subtasks are done, the run header shows a likely range for the working time left. It's based on how long the finished subtasks took, and time paused doesn't count. It narrows as more subtasks finish.
 
+Retries are automatic. Before it asks you, Hatchet makes one last fix on Claude Opus once the normal attempts are used (unless the Bug Fixer is already on Opus, or Claude fixes are switched off). It also stops early when two fixes in a row end in the same error, because that usually means the cause is outside the code, such as a missing download. Fixes the spec guard refuses don't use up attempts, though a run of them still stops the subtask.
+
 If a subtask runs out of attempts, or the model server goes away, the run pauses and asks you what to do. You can retry with your own guidance, re-verify after fixing it by hand, restart the subtask, skip it, or cancel the run. Your guidance goes to every agent that works on the subtask from then on. Runs interrupted by a restart pause the same way and can be resumed.
+
+## Ad hoc requests
+
+Beside a repository's runs, you can ask Hatchet for one-off things. They're grouped under that repository on the Runs page, each with its own page showing live output, and you can stop, repeat or delete them.
+
+- **Status report:** the branch, uncommitted changes, every run's progress, what each is doing now and what needs you. Built from Hatchet's own data, so it's instant and needs no model.
+- **Run the app:** starts the latest commit, using the command Hatchet detects (dotnet, npm, cargo, go or python) or one you give. It keeps running until you stop it.
+- **Run command:** the same, for any command, such as the tests.
+- **Ask:** a free-form question, answered by Claude Code. It gets the status report and can read and search the repository's files, and nothing else.
+- **Report a defect or change:** describe what's wrong, or what you want, and attach screenshots by pasting (`Ctrl+V`), dropping or choosing them. Claude Code reads the screenshots and the code, read-only, and writes up what it found. Hatchet then starts a run from that, which waits for you to approve its plan. You can pick the model for the whole run, any local model your server has or Claude Opus, Sonnet or Haiku, or leave it to Settings. If Claude finds nothing in the project to change, such as a bad install, it starts no run and tells you what to do instead.
+
+Commands run in an isolated copy of the repository's latest commit (a git worktree under Hatchet's data folder), so they never disturb a run that is building in the same folder. The catch is that uncommitted work isn't in the copy. Only one command runs per repository at a time. The same requests are available to Claude Code over MCP; see [Claude Code and MCP](docs/mcp.md).
 
 ## Documentation
 
@@ -90,6 +104,7 @@ What it does to limit the damage:
 - **Writes stay inside the repo.** A patch with an absolute path, a `..`, a symlink on the way, or a target in `.git` is rejected whole, before anything is written.
 - **Local only.** The server binds to `localhost` and rejects other host names. The MCP endpoint also refuses requests from web pages other than Hatchet's own. It has no login, so don't expose it.
 - **Nothing is pushed.** Prepare PR gives you the commands and the description, and you run them yourself.
+- **Ad hoc requests are yours to start.** Running the app or a command executes the repository's code, or the command you typed, with your user's permissions, in an isolated copy of the latest commit. Questions run Claude Code with only the Read, Grep and Glob tools, from Hatchet's own folder, so the repository's hooks and settings aren't loaded. Reports work the same way, and only files whose contents are PNG, JPEG, GIF or WebP pictures are accepted as screenshots, so a path to some other file is refused.
 
 Found a security problem? Please report it privately; see [CONTRIBUTING.md](CONTRIBUTING.md#reporting-security-issues).
 
@@ -97,6 +112,8 @@ Found a security problem? Please report it privately; see [CONTRIBUTING.md](CONT
 
 - **Database:** `%LOCALAPPDATA%\Hatchet\hatchet.db` on Windows, under `~/.local/share/Hatchet` on Linux. Set `ConnectionStrings__Factory` to move it.
 - **Your own skills:** the `skills` folder next to the database. See [Skills](docs/skills.md).
+- **Ad hoc copies:** the `adhoc` folder next to the database, one folder per repository and commit. Deleting the requests that used a copy removes it.
+- **Screenshots:** the `attachments` folder next to the database, one folder per report. Deleting the report removes them.
 - **Port:** `http://localhost:5199`, set by `Urls` in `src/Factory.Web/appsettings.json`.
 
 Keyboard: `Ctrl+B` toggles the subtask pane, `Ctrl+Alt+B` the agent pane, `Ctrl+J` the terminal panel. Pane edges can be dragged to resize.

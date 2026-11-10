@@ -1,0 +1,255 @@
+@page "/requests/{Id:int}"
+@implements IDisposable
+@inject AdHocManager Manager
+@inject NavigationManager Nav
+
+<DocumentTitle Value="@(_request is null ? "Request · Hatchet" : $"{_request.Title} · Hatchet")" />
+
+<div class="page">
+    <div class="page-inner">
+        @if (_loaded && _request is null)
+        {
+            <div class="notice"><Icon Name="alert" Size="16" /><div class="notice-body">There is no request #@Id. It may have been deleted. <a href="/">Back to the runs</a></div></div>
+        }
+        else if (_request is { } request)
+        {
+            <div class="request-back"><a href="/"><Icon Name="chevron-right" Size="12" /> @Fmt.FolderName(request.RepositoryPath)</a> <span class="muted mono-small">@request.RepositoryPath</span></div>
+
+            <header class="page-header">
+                <div class="request-title">
+                    <h1><Icon Name="@Fmt.Icon(request.Kind)" Size="20" /> @request.Title</h1>
+                    <p class="muted">@Fmt.Label(request.Kind) #@request.Id · started @Fmt.Ago(request.CreatedAt)@(request.CompletedAt is { } done ? $" · took {Fmt.Duration(done - request.CreatedAt)}" : "")</p>
+                </div>
+                <div class="action-row">
+                    <span class="badge badge-@Fmt.Tone(request.Status)">
+                        @if (request.IsActive)
+                        {
+                            <span class="spinner"></span>
+                        }
+                        @Fmt.Label(request.Status)
+                    </span>
+                    @if (request.IsActive)
+                    {
+                        <button class="btn" disabled="@_busy" title="Stop it. A command's whole process tree is killed." @onclick="StopAsync"><Icon Name="square" Size="14" /> Stop</button>
+                    }
+                    else
+                    {
+                        @if (request.Kind is RequestKind.Defect or RequestKind.Change)
+                        {
+                            <ConfirmButton Text="Delete" ConfirmText="Delete it?" IconName="trash" Disabled="_busy" Title="Remove this report and its screenshots. The run it started is kept." OnConfirmed="DeleteAsync" />
+                        }
+                        else
+                        {
+                            <button class="btn" disabled="@_busy" title="Start it again on the latest commit, as a new request" @onclick="RerunAsync"><Icon Name="refresh" Size="14" /> Run again</button>
+                            <ConfirmButton Text="Delete" ConfirmText="Delete it?" IconName="trash" Disabled="_busy" Title="Remove this request and its isolated copy of the code" OnConfirmed="DeleteAsync" />
+                        }
+                    }
+                </div>
+            </header>
+
+            @if (_error is not null)
+            {
+                <div class="notice notice-bad"><Icon Name="alert" Size="16" /><div class="notice-body">@_error</div></div>
+            }
+            @if (request.Error is not null)
+            {
+                <div class="notice @(request.Status == RequestStatus.Failed ? "notice-bad" : "notice-warn")"><Icon Name="alert" Size="16" /><div class="notice-body">@request.Error</div></div>
+            }
+
+            @if (request.Source is not null || request.Command is not null)
+            {
+                <dl class="request-meta">
+                    @if (request.Source is not null)
+                    {
+                        <dt>Version</dt>
+                        <dd>@request.Source <span class="muted">(latest commit, in its own copy; uncommitted work isn't included)</span></dd>
+                    }
+                    @if (request.Command is not null)
+                    {
+                        <dt>Command</dt>
+                        <dd class="mono-small">@request.Command</dd>
+                    }
+                    @if (request.WorkDirectory is not null)
+                    {
+                        <dt>Folder</dt>
+                        <dd class="mono-small">@request.WorkDirectory</dd>
+                    }
+                    @if (request.ExitCode is { } exitCode)
+                    {
+                        <dt>Exit code</dt>
+                        <dd>@exitCode</dd>
+                    }
+                </dl>
+            }
+
+            @if (request.Kind is RequestKind.Defect or RequestKind.Change)
+            {
+                @if (request.RunId is { } runId)
+                {
+                    <div class="notice"><Icon Name="check" Size="16" /><div class="notice-body">Started <a href="/runs/@runId">run #@runId</a>. It asks you to approve its plan before building anything.</div></div>
+                }
+                else if (request.Status == RequestStatus.Succeeded && request.Result is not null)
+                {
+                    <div class="notice notice-warn">
+                        <Icon Name="alert" Size="16" />
+                        <div class="notice-body">Claude found nothing in the project to change, so no run was started. Its write-up is below. If you think it's wrong, Hatchet can still start a run from it.</div>
+                        <button class="btn" disabled="@_busy" @onclick="StartAnywayAsync"><Icon Name="play" Size="14" /> Start a run anyway</button>
+                    </div>
+                }
+                <section class="request-section">
+                    <div class="requests-heading">@(request.Kind == RequestKind.Defect ? "Defect" : "Change")</div>
+                    <pre class="request-result">@request.Input</pre>
+                </section>
+                @if (_screenshots.Count > 0)
+                {
+                    <section class="request-section">
+                        <div class="requests-heading">Screenshots</div>
+                        <div class="report-shots">
+                            @foreach (var name in _screenshots)
+                            {
+                                <a href="/requests/@request.Id/screenshots/@Uri.EscapeDataString(name)" target="_blank" title="@name"><img src="/requests/@request.Id/screenshots/@Uri.EscapeDataString(name)" alt="@name" /></a>
+                            }
+                        </div>
+                    </section>
+                }
+                @if (request.Result is not null)
+                {
+                    <section class="request-section">
+                        <div class="requests-heading">@(request.RunId is null ? "What Claude found" : "The spec the run was started from")</div>
+                        <pre class="request-result">@request.Result</pre>
+                    </section>
+                }
+                else if (_output.Length > 0)
+                {
+                    <section class="request-section">
+                        <div class="requests-heading">@(request.IsActive ? "Claude is reading the screenshots and the code" : "What Claude wrote")</div>
+                        <pre class="request-result">@_output</pre>
+                    </section>
+                }
+            }
+            else if (request.Kind is RequestKind.StatusReport or RequestKind.Ask)
+            {
+                <section class="request-section">
+                    <div class="requests-heading">@(request.Kind == RequestKind.Ask ? "Answer" : "Report")</div>
+                    @if (request.Result is not null)
+                    {
+                        <pre class="request-result">@request.Result</pre>
+                    }
+                    else if (request.IsActive)
+                    {
+                        <pre class="request-result">@(_output.Length == 0 ? "Claude is reading the project…" : _output)</pre>
+                    }
+                </section>
+            }
+            else
+            {
+                <section class="request-section">
+                    <div class="requests-heading">Output</div>
+                    <div class="terminal request-terminal scroll" data-stick-bottom>
+                        <pre class="terminal-output">@(_output.Length == 0 ? "Nothing printed yet." : Fmt.Tail(_output, MaxOutputChars))</pre>
+                    </div>
+                </section>
+            }
+        }
+        else
+        {
+            <div class="muted pad">Loading…</div>
+        }
+    </div>
+</div>
+
+@code {
+    private const int MaxOutputChars = 60_000;
+
+    [Parameter] public int Id { get; set; }
+
+    private readonly CancellationTokenSource _stop = new();
+    private AdHocRequest? _request;
+    private string _output = "";
+    private List<string> _screenshots = [];
+    private string? _error;
+    private bool _loaded;
+    private bool _busy;
+    private int _loadedId = -1;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (_loadedId == Id) return;
+        _loadedId = Id;
+        _request = null;
+        _loaded = false;
+        await LoadAsync();
+    }
+
+    protected override void OnInitialized() => _ = PumpAsync();
+
+    private async Task LoadAsync()
+    {
+        _request = await Manager.GetAsync(Id);
+        _output = _request is null ? "" : Manager.GetOutput(_request);
+        _screenshots = _request is null ? [] : Manager.GetAttachments(Id).Select(path => Path.GetFileName(path)).ToList();
+        _loaded = true;
+    }
+
+    // Live output comes from memory while a request runs, so a second's poll keeps the page current without database writes.
+    private async Task PumpAsync()
+    {
+        try
+        {
+            using var timer = new PeriodicTimer(TimeSpan.FromSeconds(1));
+            while (await timer.WaitForNextTickAsync(_stop.Token))
+            {
+                if (_request is null || (!_request.IsActive && !Manager.IsActive(_request.Id))) continue;
+                await LoadAsync();
+                await InvokeAsync(StateHasChanged);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
+    }
+
+    private Task StopAsync() => ActAsync(async () =>
+    {
+        await Manager.StopAsync(Id);
+        await LoadAsync();
+    });
+
+    private Task StartAnywayAsync() => ActAsync(async () =>
+    {
+        await Manager.StartRunAnywayAsync(Id);
+        await LoadAsync();
+    });
+
+    private Task RerunAsync() => ActAsync(async () =>
+    {
+        var request = await Manager.RerunAsync(Id);
+        Nav.NavigateTo($"/requests/{request.Id}");
+    });
+
+    private Task DeleteAsync() => ActAsync(async () =>
+    {
+        await Manager.DeleteAsync(Id);
+        Nav.NavigateTo("/");
+    });
+
+    private async Task ActAsync(Func<Task> action)
+    {
+        _busy = true;
+        _error = null;
+        try
+        {
+            await action();
+        }
+        catch (Exception ex) when (ex is FactoryValidationException or GitException)
+        {
+            _error = ex.Message;
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+
+    public void Dispose() => _stop.Cancel();
+}

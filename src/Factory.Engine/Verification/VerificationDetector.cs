@@ -116,7 +116,7 @@ public static class VerificationDetector
     private static bool Has(DirectoryInfo root, string fileName) =>
         File.Exists(Path.Combine(root.FullName, fileName));
 
-    private static IEnumerable<FileInfo> Find(DirectoryInfo root, string pattern) => Find(root, pattern, 0);
+    internal static IEnumerable<FileInfo> Find(DirectoryInfo root, string pattern) => Find(root, pattern, 0);
 
     private static IEnumerable<FileInfo> Find(DirectoryInfo directory, string pattern, int depth)
     {

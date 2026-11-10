@@ -31,7 +31,8 @@ public class ClaudeCodeTests
         parser.Accept(Success.ReplaceLineEndings(""));
         var result = parser.Result(0, "");
 
-        Assert.Equal([new LlmDelta("Checking the diff.", true), new LlmDelta("{\"passed\":", false)], deltas);
+        // A tool's arguments are marked, so a reader that only wants the prose, such as a question's live answer, can leave them out.
+        Assert.Equal([new LlmDelta("Checking the diff.", true), new LlmDelta("{\"passed\":", false, IsToolInput: true)], deltas);
         Assert.Equal("""{"passed":true,"issues":[]}""", result.Content);
         Assert.Equal("Checking the diff.", result.Thinking);
         Assert.Equal(3512, result.PromptTokens);

@@ -1,0 +1,166 @@
+@inject AdHocManager Manager
+@inject NavigationManager Nav
+@inject ISettingsStore SettingsStore
+@inject ModelHealthService ModelHealth
+
+@* data-paste-images: app.js turns a pasted or dropped picture inside here into a choice in the file input below. *@
+<div class="report-form" data-paste-images>
+    <div class="action-row">
+        <div class="segmented">
+            <button class="@(_kind == RequestKind.Defect ? "active" : null)" disabled="@_busy" @onclick="() => _kind = RequestKind.Defect">Defect</button>
+            <button class="@(_kind == RequestKind.Change ? "active" : null)" disabled="@_busy" @onclick="() => _kind = RequestKind.Change">Change</button>
+        </div>
+        <span class="hint">@(_kind == RequestKind.Defect ? "Something that doesn't work as it should." : "Something new, or different from how it is now.")</span>
+    </div>
+
+    <textarea autocomplete="off" data-1p-ignore data-lpignore="true" class="report-text" rows="5" spellcheck="true" disabled="@_busy"
+              placeholder="@(_kind == RequestKind.Defect ? "What went wrong, and what did you expect? Say how to make it happen. The first line becomes the title." : "What should change? The first line becomes the title.") You can paste a screenshot here with Ctrl+V."
+              @bind="_text" @bind:event="oninput"></textarea>
+
+    @if (_images.Count > 0)
+    {
+        <div class="report-images">
+            @foreach (var image in _images)
+            {
+                <div class="report-image" @key="image">
+                    @if (image.Preview is not null)
+                    {
+                        <img src="@image.Preview" alt="@image.Name" />
+                    }
+                    <span class="report-image-name" title="@image.Name">@image.Name</span>
+                    <span class="muted mono-small">@Fmt.Size(image.Content.Length)</span>
+                    <button class="btn btn-ghost" disabled="@_busy" title="Remove this screenshot" @onclick="() => _images.Remove(image)"><Icon Name="x" Size="12" /></button>
+                </div>
+            }
+        </div>
+    }
+
+    <div class="field report-model">
+        <label for="report-model">Model</label>
+        <select id="report-model" disabled="@_busy" @bind="_model">
+            @foreach (var group in _options.GroupBy(o => o.Group))
+            {
+                @if (group.Key.Length == 0)
+                {
+                    @foreach (var option in group)
+                    {
+                        <option value="@option.Value">@option.Label</option>
+                    }
+                }
+                else
+                {
+                    <optgroup label="@group.Key">
+                        @foreach (var option in group)
+                        {
+                            <option value="@option.Value">@option.Label</option>
+                        }
+                    </optgroup>
+                }
+            }
+        </select>
+        <span class="hint">@ModelHint</span>
+    </div>
+
+    <div class="action-row">
+        <label class="btn" title="PNG, JPEG, GIF or WebP, up to @(ReportBuilder.MaxImageBytes / 1024 / 1024) MB each">
+            <Icon Name="plus" Size="14" /> Add screenshots
+            <InputFile OnChange="OnFilesAsync" multiple accept="image/png,image/jpeg,image/gif,image/webp" class="report-file" disabled="@_busy" />
+        </label>
+        <button class="btn btn-primary" disabled="@(_busy || string.IsNullOrWhiteSpace(_text))" @onclick="SendAsync">
+            <Icon Name="@(_kind == RequestKind.Defect ? "bug" : "wrench")" Size="14" /> @(_busy ? "Sending…" : "Send")
+        </button>
+        <button class="btn btn-ghost" disabled="@_busy" @onclick="Close">Cancel</button>
+    </div>
+    <div class="hint">
+        @(_images.Count > 0 ? "Claude reads the screenshots and the code, read-only, and writes up what it finds. " : "")
+        Hatchet then starts a run for it, which asks you to approve its plan before building anything.
+    </div>
+
+    @if (_error is not null)
+    {
+        <div class="notice notice-bad"><Icon Name="alert" Size="16" /><div class="notice-body">@_error</div></div>
+    }
+</div>
+
+@code {
+    [Parameter, EditorRequired] public string Repository { get; set; } = "";
+    [Parameter] public EventCallback OnClose { get; set; }
+
+    private sealed record Picture(string Name, byte[] Content, string? Preview);
+
+    private const int MaxPreviewBytes = 1024 * 1024;
+
+    private readonly List<Picture> _images = [];
+    private RequestKind _kind = RequestKind.Defect;
+    private IReadOnlyList<ModelOption> _options = [new("", "As set in Settings", "")];
+    private string _model = "";
+    private string? _text;
+    private string? _error;
+    private bool _busy;
+
+    protected override async Task OnInitializedAsync() =>
+        _options = ModelChoices.Options(await SettingsStore.GetAsync(), ModelHealth.Current?.AvailableModels ?? []);
+
+    private string ModelHint
+    {
+        get
+        {
+            if (ModelChoices.Describe(_model) is not { } name) return "Each agent uses the model Settings gives it. Claude reads any screenshots.";
+            var hint = $"Every agent in the run uses {name}.";
+            if (ModelChoices.ClaudeModelOf(_model) is null && _images.Count > 0) hint += " Claude still reads the screenshots, since the local model can't see them.";
+            return hint;
+        }
+    }
+
+    private async Task OnFilesAsync(InputFileChangeEventArgs args)
+    {
+        _error = null;
+        try
+        {
+            foreach (var file in args.GetMultipleFiles(ReportBuilder.MaxImages))
+            {
+                if (_images.Count >= ReportBuilder.MaxImages)
+                {
+                    _error = $"Attach at most {ReportBuilder.MaxImages} screenshots.";
+                    break;
+                }
+                await using var stream = file.OpenReadStream(ReportBuilder.MaxImageBytes);
+                using var buffer = new MemoryStream();
+                await stream.CopyToAsync(buffer);
+                var content = buffer.ToArray();
+                if (ReportBuilder.ImageExtension(content) is not { } extension)
+                {
+                    _error = $"\"{file.Name}\" isn't a PNG, JPEG, GIF or WebP picture.";
+                    continue;
+                }
+                var preview = content.Length <= MaxPreviewBytes ? $"data:{file.ContentType};base64,{Convert.ToBase64String(content)}" : null;
+                _images.Add(new Picture(file.Name, content, preview));
+            }
+        }
+        catch (Exception ex) when (ex is IOException or InvalidOperationException)
+        {
+            _error = $"Could not read a screenshot: {ex.Message}";
+        }
+    }
+
+    private async Task SendAsync()
+    {
+        _busy = true;
+        _error = null;
+        try
+        {
+            var request = await Manager.RequestReportAsync(_kind, Repository, _text ?? "", _images.Select(i => new ReportImage(i.Name, i.Content)).ToList(), _model);
+            Nav.NavigateTo($"/requests/{request.Id}");
+        }
+        catch (Exception ex) when (ex is FactoryValidationException or GitException)
+        {
+            _error = ex.Message;
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+
+    private Task Close() => OnClose.InvokeAsync();
+}

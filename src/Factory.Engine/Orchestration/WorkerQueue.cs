@@ -80,13 +80,17 @@ public sealed class WorkerQueue
     /// The pool waiting runs belong to now, if the settings that decide it may have changed since they joined. They
     /// keep their place in line.
     /// </param>
-    public IReadOnlyList<int> Admit(Func<WorkerPool, int> limit, IReadOnlyDictionary<string, IReadOnlySet<int>> holders, WorkerPool? waitingPool = null)
+    public IReadOnlyList<int> Admit(Func<WorkerPool, int> limit, IReadOnlyDictionary<string, IReadOnlySet<int>> holders, WorkerPool? waitingPool = null) =>
+        Admit(limit, holders, waitingPool is { } pool ? _ => pool : null);
+
+    /// <summary>As above, with each waiting run's pool worked out separately, since a run can be given its own model.</summary>
+    public IReadOnlyList<int> Admit(Func<WorkerPool, int> limit, IReadOnlyDictionary<string, IReadOnlySet<int>> holders, Func<int, WorkerPool>? waitingPool)
     {
         lock (_gate)
         {
-            if (waitingPool is { } pool)
+            if (waitingPool is not null)
             {
-                foreach (var entry in _waiting) entry.Pool = pool;
+                foreach (var entry in _waiting) entry.Pool = waitingPool(entry.RunId);
             }
 
             var working = _working.Values.GroupBy(e => e.Pool).ToDictionary(g => g.Key, g => g.Count());

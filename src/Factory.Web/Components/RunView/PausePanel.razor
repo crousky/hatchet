@@ -3,7 +3,32 @@
         <Icon Name="@(Run.PausedByUser ? "pause" : "alert")" Size="18" />
         <div class="action-banner-text">
             <div class="action-banner-title">@Title</div>
-            <div class="action-banner-reason">@Run.PauseReason</div>
+            @if (_brief is { NeedsDecision: true })
+            {
+                <div class="action-banner-reason">@_brief.Why</div>
+                @if (_brief.Findings.Count > 0)
+                {
+                    <div class="brief-label">@_brief.FindingsLabel</div>
+                    <ul class="brief-list">
+                        @foreach (var finding in _brief.Findings)
+                        {
+                            <li>@finding</li>
+                        }
+                    </ul>
+                }
+                <div class="brief-ask"><strong>What Hatchet needs from you:</strong> @_brief.Ask</div>
+                <div class="brief-label">Your options</div>
+                <ul class="brief-list brief-options">
+                    @foreach (var option in _brief.Options)
+                    {
+                        <li><strong>@option.Label</strong>: @option.When <span class="brief-provide">You provide: @option.YouProvide</span></li>
+                    }
+                </ul>
+            }
+            else
+            {
+                <div class="action-banner-reason">@Run.PauseReason</div>
+            }
         </div>
     </div>
 
@@ -23,7 +48,7 @@
     }
     else if (Paused is not null)
     {
-        <textarea autocomplete="off" data-1p-ignore data-lpignore="true" class="guidance" rows="2" placeholder="Guidance for the agents (optional). Name the root cause, or the approach you want." @bind="_guidance" @bind:event="oninput"></textarea>
+        <textarea autocomplete="off" data-1p-ignore data-lpignore="true" class="guidance" rows="2" placeholder="@(_brief?.GuidanceHint ?? "Guidance for the agents (optional). Name the root cause, or the approach you want.")" @bind="_guidance" @bind:event="oninput"></textarea>
         @if (SaveSkill is not null)
         {
             @if (_savedSkill is not null)
@@ -95,12 +120,16 @@
     /// <summary>Saves the guidance as a project skill, given its name and description. Returns the skill's path, or null if it wasn't saved.</summary>
     [Parameter] public Func<string, string, string, Task<string?>>? SaveSkill { get; set; }
 
+    private PauseBrief? _brief;
     private string? _guidance;
     private bool _skillOpen;
     private bool _saving;
     private string? _skillName;
     private string? _skillDescription;
     private string? _savedSkill;
+
+    // Worked out once per change of run or subtask, not on every keystroke in the guidance box.
+    protected override void OnParametersSet() => _brief = PauseBriefBuilder.Build(Run, Paused);
 
     private async Task SaveSkillAsync()
     {

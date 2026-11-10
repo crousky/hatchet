@@ -125,6 +125,44 @@
         }, 50);
     }).observe(document.documentElement, { childList: true, subtree: true, characterData: true });
 
+    // A screenshot pasted or dropped onto a report form becomes a choice in the form's file input, so Blazor reads it like any chosen file.
+    function pictures(transfer) {
+        return [...(transfer?.files ?? [])].filter((file) => file.type.startsWith("image/"));
+    }
+
+    function attach(form, files) {
+        const input = form.querySelector("input[type=file]");
+        if (!input || files.length === 0) return false;
+        const transfer = new DataTransfer();
+        for (const file of files) transfer.items.add(file);
+        input.files = transfer.files;
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+        return true;
+    }
+
+    document.addEventListener("paste", (event) => {
+        const form = event.target.closest?.("[data-paste-images]");
+        if (form && attach(form, pictures(event.clipboardData))) event.preventDefault();
+    });
+
+    document.addEventListener("dragover", (event) => {
+        const form = event.target.closest?.("[data-paste-images]");
+        if (!form || ![...(event.dataTransfer?.types ?? [])].includes("Files")) return;
+        event.preventDefault();
+        form.classList.add("drop-target");
+    });
+
+    document.addEventListener("dragleave", (event) => {
+        event.target.closest?.("[data-paste-images]")?.classList.remove("drop-target");
+    });
+
+    document.addEventListener("drop", (event) => {
+        const form = event.target.closest?.("[data-paste-images]");
+        if (!form) return;
+        form.classList.remove("drop-target");
+        if (attach(form, pictures(event.dataTransfer))) event.preventDefault();
+    });
+
     window.hatchet = {
         setTitle: (title) => {
             document.title = title;

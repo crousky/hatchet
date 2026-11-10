@@ -35,6 +35,10 @@ else
                 </div>
                 <div class="run-meta">
                     <span class="meta-item" title="@_run.Task.RepositoryPath"><Icon Name="folder" Size="12" /> @Fmt.FolderName(_run.Task.RepositoryPath)</span>
+                    @if (ModelChoices.Describe(_run.Task.ModelChoice) is { } chosenModel)
+                    {
+                        <span class="meta-item" title="Chosen when the work was started. Every agent in this run uses it, whatever Settings say."><Icon Name="sparkle" Size="12" /> @chosenModel</span>
+                    }
                     @if (_run.BranchName is not null)
                     {
                         <span class="meta-item mono-small"><Icon Name="git-branch" Size="12" /> @_run.BaseBranch ← @_run.BranchName</span>

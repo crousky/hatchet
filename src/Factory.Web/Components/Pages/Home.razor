@@ -4,6 +4,7 @@
 @inject FactoryEventBus Bus
 @inject ModelHealthService Health
 @inject FactoryOrchestrator Orchestrator
+@inject AdHocManager Requests
 
 <DocumentTitle Value="Hatchet" />
 
@@ -12,7 +13,7 @@
         <header class="page-header">
             <div>
                 <h1>Runs</h1>
-                <p class="muted">Hand over an architecture spec. Your local model plans, builds, tests and reviews it, one commit at a time.</p>
+                <p class="muted">Hand over an architecture spec. Your local model plans, builds, tests and reviews it, one commit at a time. Each repository also takes ad hoc requests: a status report, running the software, a command or a question.</p>
             </div>
             <a class="btn btn-primary" href="/runs/new"><Icon Name="plus" Size="14" /> New run</a>
         </header>
@@ -64,10 +65,18 @@
                         <Icon Name="folder" Size="14" />
                         <span class="project-name">@project.Name</span>
                         <span class="project-path mono-small">@project.Repository</span>
-                        <span class="project-count">@(project.Open > 0 ? $"{project.Open} open · " : "")@project.Runs.Count @(project.Runs.Count == 1 ? "run" : "runs")</span>
+                        <span class="project-count">
+                            @(project.Open > 0 ? $"{project.Open} open · " : "")@project.Runs.Count @(project.Runs.Count == 1 ? "run" : "runs")
+                            @if (project.Requests.Count > 0)
+                            {
+                                <text> · @(project.RunningRequests > 0 ? $"{project.RunningRequests} running · " : "")@project.Requests.Count @(project.Requests.Count == 1 ? "request" : "requests")</text>
+                            }
+                        </span>
                     </button>
                     @if (open)
                     {
+                        @if (project.Runs.Count > 0)
+                        {
                         <table class="runs-table">
                             <thead>
                                 <tr>
@@ -98,6 +107,8 @@
                                 }
                             </tbody>
                         </table>
+                        }
+                        <ProjectRequests Project="project" />
                     }
                 </section>
             }
@@ -111,6 +122,7 @@
     private readonly CancellationTokenSource _stop = new();
     private FactoryEventBus.Subscription? _subscription;
     private IReadOnlyList<FactoryRun>? _runs;
+    private IReadOnlyList<AdHocRequest> _requests = [];
     private IReadOnlyList<ProjectGroup> _projects = [];
 
     // Projects the user opened or closed. The rest are open while they have open runs, and the latest project always is.
@@ -126,11 +138,12 @@
     private async Task LoadAsync(CancellationToken ct)
     {
         _runs = await Store.ListRunsAsync(ct);
-        _projects = Projects.Group(_runs);
+        _requests = await Requests.ListAsync(ct: ct);
+        _projects = Projects.Group(_runs, _requests);
     }
 
     private bool IsOpen(ProjectGroup project) =>
-        _toggled.TryGetValue(project.Repository, out var open) ? open : project.Open > 0 || project == _projects[0];
+        _toggled.TryGetValue(project.Repository, out var open) ? open : project.Open > 0 || project.RunningRequests > 0 || project == _projects[0];
 
     private void Toggle(ProjectGroup project) => _toggled[project.Repository] = !IsOpen(project);
 
@@ -144,7 +157,7 @@
                 var changed = false;
                 while (_subscription!.Reader.TryRead(out var evt))
                 {
-                    if (evt is RunStatusChanged or LlmCallFinished or QueueChanged) changed = true;
+                    if (evt is RunStatusChanged or LlmCallFinished or QueueChanged or RequestChanged) changed = true;
                 }
                 if (!changed) continue;
 

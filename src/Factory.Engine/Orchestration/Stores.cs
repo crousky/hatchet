@@ -28,6 +28,20 @@ public interface IRunStore
     Task<IReadOnlyList<DiffSnapshot>> GetDiffsAsync(int runId, CancellationToken ct = default);
 }
 
+/// <summary>Durable ad hoc requests, kept beside the runs and grouped with them by repository.</summary>
+public interface IAdHocStore
+{
+    Task<AdHocRequest> CreateAsync(AdHocRequest request, CancellationToken ct = default);
+    Task<AdHocRequest?> GetAsync(int id, CancellationToken ct = default);
+    /// <summary>
+    /// Newest first. Pass a repository folder to list only its requests. Listed requests leave out <c>Output</c> and
+    /// <c>Result</c>, which can be large: use <see cref="GetAsync"/> for those, and don't save a listed request back.
+    /// </summary>
+    Task<IReadOnlyList<AdHocRequest>> ListAsync(string? repositoryPath = null, CancellationToken ct = default);
+    Task UpdateAsync(AdHocRequest request, CancellationToken ct = default);
+    Task DeleteAsync(int id, CancellationToken ct = default);
+}
+
 public interface ISettingsStore
 {
     Task<FactorySettings> GetAsync(CancellationToken ct = default);

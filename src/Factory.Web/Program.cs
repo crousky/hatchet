@@ -1,3 +1,4 @@
+using Factory.Engine.AdHoc;
 using Factory.Engine.Llm;
 using Factory.Engine.Orchestration;
 using Factory.Engine.Skills;
@@ -33,6 +34,16 @@ builder.Services.AddSingleton<ICommandRunner, ShellCommandRunner>();
 builder.Services.AddSingleton(_ => new SkillLibrary(SkillLibrary.DefaultUserDirectory));
 builder.Services.AddSingleton<FactoryOrchestrator>();
 
+// Ad hoc requests: status reports, running the software, commands and questions, kept per repository. Commands run
+// in isolated copies of the latest commit under Hatchet's data folder.
+var hatchetData = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Hatchet");
+builder.Services.AddSingleton<IAdHocStore, EfAdHocStore>();
+builder.Services.AddSingleton<IClaudeAsker>(_ => new ClaudeCodeAsker(Path.Combine(hatchetData, "claude-code")));
+builder.Services.AddSingleton(sp => new AdHocManager(
+    sp.GetRequiredService<IAdHocStore>(), sp.GetRequiredService<IRunStore>(), sp.GetRequiredService<ISettingsStore>(),
+    sp.GetRequiredService<ICommandRunner>(), sp.GetRequiredService<IClaudeAsker>(), sp.GetRequiredService<FactoryEventBus>(),
+    sp.GetRequiredService<ILogger<AdHocManager>>(), hatchetData, sp.GetRequiredService<FactoryOrchestrator>()));
+
 // Local models can take minutes per response. The client enforces its own stall timeout instead.
 builder.Services.AddSingleton<ILlmClient>(_ => new RoutingLlmClient(
     new OpenAiCompatibleLlmClient(new HttpClient { Timeout = Timeout.InfiniteTimeSpan }),
@@ -43,7 +54,8 @@ builder.Services.AddSingleton(_ => new LmStudioModelLoader(new HttpClient { Time
 // MCP endpoint for Claude Code and other clients. The tools never call back into the client, so no sessions are kept.
 builder.Services.AddMcpServer(options => options.ServerInfo = new() { Name = "hatchet", Version = "1.0.0" })
     .WithHttpTransport(options => options.Stateless = true)
-    .WithTools<HatchetTools>();
+    .WithTools<HatchetTools>()
+    .WithTools<AdHocTools>();
 
 builder.Services.AddSingleton<ModelHealthService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<ModelHealthService>());
@@ -57,6 +69,9 @@ await using (var scope = app.Services.CreateAsyncScope())
     await using var db = await factory.CreateDbContextAsync();
     await db.Database.MigrateAsync();
 }
+
+// Requests that were running when Hatchet last stopped can't still be tracked.
+await app.Services.GetRequiredService<AdHocManager>().ReconcileAsync();
 
 if (!app.Environment.IsDevelopment())
 {
@@ -79,6 +94,15 @@ app.Use(async (context, next) =>
 app.UseAntiforgery();
 app.MapStaticAssets();
 app.MapRazorComponents<App>().AddInteractiveServerRenderMode();
+
+// The screenshots that came with a report, for its page. Only a saved file's exact name is served, and only as a picture.
+app.MapGet("/requests/{id:int}/screenshots/{name}", (int id, string name, AdHocManager manager, HttpContext context) =>
+{
+    if (manager.GetAttachmentPath(id, name) is not { } path) return Results.NotFound();
+    context.Response.Headers.XContentTypeOptions = "nosniff";
+    var type = Path.GetExtension(path).ToLowerInvariant() switch { ".png" => "image/png", ".jpg" => "image/jpeg", ".gif" => "image/gif", ".webp" => "image/webp", _ => null };
+    return type is null ? Results.NotFound() : Results.File(path, type);
+});
 app.MapMcp(McpPath);
 
 app.Run();

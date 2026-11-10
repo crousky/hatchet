@@ -43,7 +43,8 @@ public sealed record NewRunRequest(
     string ArchitectureSpec,
     string? Title,
     string? VerificationCommand,
-    bool RequirePlanApproval);
+    bool RequirePlanApproval,
+    string? ModelChoice = null);
 
 public sealed record SubtaskEdit(
     int? Id,

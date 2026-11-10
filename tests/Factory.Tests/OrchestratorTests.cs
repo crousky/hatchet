@@ -52,8 +52,8 @@ public class OrchestratorTests : IAsyncLifetime
     private static string Verdict(bool passed, params string[] issues) => JsonSerializer.Serialize(
         new ReviewVerdictResponse(passed, 90, issues.ToList(), []), LlmSchemas.SerializerOptions);
 
-    private Task<FactoryRun> StartAsync(bool approval = false, string command = "verify", string? repository = null) =>
-        _orchestrator.StartRunAsync(new NewRunRequest(repository ?? _repo.Path, "# Spec", null, command, approval));
+    private Task<FactoryRun> StartAsync(bool approval = false, string command = "verify", string? repository = null, string? model = null) =>
+        _orchestrator.StartRunAsync(new NewRunRequest(repository ?? _repo.Path, "# Spec", null, command, approval, model));
 
     /// <summary>A second repository, for runs that shouldn't share the first one's working tree.</summary>
     private async Task<TempDirectory> SecondRepositoryAsync()
@@ -221,7 +221,7 @@ public class OrchestratorTests : IAsyncLifetime
         _llm.Enqueue(AgentRole.CodeGenerator, Patch("wrong.txt"), Patch("alpha.txt"));
         _llm.Enqueue(AgentRole.BugFixer, Patch("wrong.txt", "1"), Patch("wrong.txt", "2"), Patch("wrong.txt", "3"));
         _llm.Enqueue(AgentRole.StaticReviewer, Verdict(true));
-        for (var i = 0; i < 4; i++) _commands.Results.Enqueue((1, "still broken"));
+        for (var i = 0; i < 4; i++) _commands.Results.Enqueue((1, $"still broken {i}"));
         var run = await WaitForAsync((await StartAsync()).Id, RunStatus.NeedsHuman);
 
         var path = await _orchestrator.SaveGuidanceAsSkillAsync(run.Id, "Alpha Files", "Writing alpha files.", "Write alpha.txt, never wrong.txt.");
@@ -332,7 +332,7 @@ public class OrchestratorTests : IAsyncLifetime
         _llm.Enqueue(AgentRole.ContextSpecifier, Refined());
         _llm.Enqueue(AgentRole.CodeGenerator, Patch("alpha.txt"));
         _llm.Enqueue(AgentRole.BugFixer, Patch("alpha.txt", "1"), Patch("alpha.txt", "2"), Patch("alpha.txt", "3"));
-        for (var i = 0; i < 4; i++) _commands.Results.Enqueue((1, "still broken"));
+        for (var i = 0; i < 4; i++) _commands.Results.Enqueue((1, $"still broken {i}"));
 
         var run = await WaitForAsync((await StartAsync()).Id, RunStatus.NeedsHuman);
 
@@ -370,7 +370,7 @@ public class OrchestratorTests : IAsyncLifetime
         _llm.Enqueue(AgentRole.CodeGenerator, Patch("alpha.txt", "broken"));
         _llm.Enqueue(AgentRole.BugFixer, Patch("alpha.txt", "1"), Patch("alpha.txt", "2"), Patch("alpha.txt", "builds"), Patch("alpha.txt", "to spec"));
         _llm.Enqueue(AgentRole.StaticReviewer, Verdict(false, "Use the component the spec names"), Verdict(true));
-        for (var i = 0; i < 3; i++) _commands.Results.Enqueue((1, "error CS0246"));
+        for (var i = 0; i < 3; i++) _commands.Results.Enqueue((1, $"error CS0246 {i}"));
 
         var run = await WaitForAsync((await StartAsync()).Id, RunStatus.ReadyToMerge);
 
@@ -399,7 +399,7 @@ public class OrchestratorTests : IAsyncLifetime
         var run = await WaitForAsync((await StartAsync()).Id, RunStatus.ReadyToMerge);
 
         var subtask = (await _store.GetSubtasksAsync(run.Id)).Single();
-        Assert.Equal(2, subtask.FixAttempts);
+        Assert.Equal(1, subtask.FixAttempts); // The refused fix changed nothing, so it didn't spend an attempt.
         Assert.Equal("new FancyPicker { Label = \"x\" }", File.ReadAllText(_repo.File("alpha.txt")));
         var second = _llm.Calls.Where(c => c.Role == AgentRole.BugFixer).Last().Prompt;
         Assert.Contains("took out `FancyPicker`, which the specification asks for", second);
@@ -426,6 +426,29 @@ public class OrchestratorTests : IAsyncLifetime
     }
 
     [Fact]
+    public void A_word_in_a_comment_that_matches_a_type_name_does_not_hold_a_fix_back()
+    {
+        // The real case: "In" starts a sentence in a comment, and a package declares a type called In.
+        _repo.Write("src/In.cs", "public enum In { A }\n");
+        _repo.Write("alpha.txt", "// In OnAfterRender, import the module.\nvar x = 1;\n/* In a block comment too. */\n<!-- In markup. -->\n@* In Razor. *@\n");
+        var subtask = new FactorySubtask { Title = "alpha", Description = "In OnAfterRender, import the module." };
+
+        FilePatchSetResponse Writes(string content) => new("x", [new FileOperationDto("alpha.txt", FileActions.Overwrite, content)]);
+
+        Assert.Empty(FactoryOrchestrator.DroppedRequiredTypes(_repo.Path, subtask, Writes("var x = 2;"), []));
+
+        // The same name used in code is still protected, and a mention in a comment doesn't count as keeping it.
+        _repo.Write("alpha.txt", "var x = In.A;\n");
+        Assert.Equal(["In"], FactoryOrchestrator.DroppedRequiredTypes(_repo.Path, subtask, Writes("var x = 2;"), []));
+        Assert.Equal(["In"], FactoryOrchestrator.DroppedRequiredTypes(_repo.Path, subtask, Writes("// In.A was here\nvar x = 2;"), []));
+        Assert.Empty(FactoryOrchestrator.DroppedRequiredTypes(_repo.Path, subtask, Writes("var x = In.A; // kept"), []));
+
+        // A URL's slashes don't start a comment, so names after it still count.
+        _repo.Write("alpha.txt", "var u = \"https://example.com\"; var x = In.A;\n");
+        Assert.Equal(["In"], FactoryOrchestrator.DroppedRequiredTypes(_repo.Path, subtask, Writes("var u = 1;"), []));
+    }
+
+    [Fact]
     public async Task Skip_rolls_back_the_failed_subtask_and_advances()
     {
         _llm.Enqueue(AgentRole.TaskPlanner, Plan("alpha", "beta"));
@@ -433,7 +456,7 @@ public class OrchestratorTests : IAsyncLifetime
         _llm.Enqueue(AgentRole.CodeGenerator, Patch("alpha.txt"), Patch("beta.txt"));
         _llm.Enqueue(AgentRole.BugFixer, Patch("alpha.txt", "1"), Patch("alpha.txt", "2"), Patch("alpha.txt", "3"));
         _llm.Enqueue(AgentRole.StaticReviewer, Verdict(true));
-        for (var i = 0; i < 4; i++) _commands.Results.Enqueue((1, "still broken"));
+        for (var i = 0; i < 4; i++) _commands.Results.Enqueue((1, $"still broken {i}"));
         var run = await WaitForAsync((await StartAsync()).Id, RunStatus.NeedsHuman);
 
         await _orchestrator.ResumeAsync(run.Id, HumanDecision.SkipSubtask, null);
@@ -454,7 +477,7 @@ public class OrchestratorTests : IAsyncLifetime
         _llm.Enqueue(AgentRole.CodeGenerator, Patch("alpha.txt"));
         _llm.Enqueue(AgentRole.BugFixer, Patch("alpha.txt", "1"), Patch("alpha.txt", "2"), Patch("alpha.txt", "3"), Patch("alpha.txt", "human"));
         _llm.Enqueue(AgentRole.StaticReviewer, Verdict(true));
-        for (var i = 0; i < 4; i++) _commands.Results.Enqueue((1, "still broken"));
+        for (var i = 0; i < 4; i++) _commands.Results.Enqueue((1, $"still broken {i}"));
         var run = await WaitForAsync((await StartAsync()).Id, RunStatus.NeedsHuman);
 
         await _orchestrator.ResumeAsync(run.Id, HumanDecision.RetryFixer, "Use the other API");
@@ -472,7 +495,7 @@ public class OrchestratorTests : IAsyncLifetime
         _llm.Enqueue(AgentRole.CodeGenerator, Patch("alpha.txt"));
         _llm.Enqueue(AgentRole.BugFixer, Patch("alpha.txt", "1"), Patch("alpha.txt", "2"), Patch("alpha.txt", "3"));
         _llm.Enqueue(AgentRole.StaticReviewer, Verdict(true));
-        for (var i = 0; i < 4; i++) _commands.Results.Enqueue((1, "still broken"));
+        for (var i = 0; i < 4; i++) _commands.Results.Enqueue((1, $"still broken {i}"));
         var run = await WaitForAsync((await StartAsync()).Id, RunStatus.NeedsHuman);
 
         File.WriteAllText(_repo.File("alpha.txt"), "fixed by hand");
@@ -491,7 +514,7 @@ public class OrchestratorTests : IAsyncLifetime
         _llm.Enqueue(AgentRole.CodeGenerator, Patch("wrong.txt"), Patch("alpha.txt"));
         _llm.Enqueue(AgentRole.BugFixer, Patch("wrong.txt", "1"), Patch("wrong.txt", "2"), Patch("wrong.txt", "3"));
         _llm.Enqueue(AgentRole.StaticReviewer, Verdict(true));
-        for (var i = 0; i < 4; i++) _commands.Results.Enqueue((1, "still broken"));
+        for (var i = 0; i < 4; i++) _commands.Results.Enqueue((1, $"still broken {i}"));
         var run = await WaitForAsync((await StartAsync()).Id, RunStatus.NeedsHuman);
 
         await _orchestrator.ResumeAsync(run.Id, HumanDecision.RestartSubtask, null);
@@ -850,7 +873,7 @@ public class OrchestratorTests : IAsyncLifetime
         _llm.Enqueue(AgentRole.ContextSpecifier, Refined());
         _llm.Enqueue(AgentRole.CodeGenerator, Patch("alpha.txt"));
         _llm.Enqueue(AgentRole.BugFixer, Patch("alpha.txt", "1"), Patch("alpha.txt", "2"), Patch("alpha.txt", "3"));
-        for (var i = 0; i < 4; i++) _commands.Results.Enqueue((1, "broken"));
+        for (var i = 0; i < 4; i++) _commands.Results.Enqueue((1, $"broken {i}"));
         var run = await WaitForAsync((await StartAsync()).Id, RunStatus.NeedsHuman);
 
         await _orchestrator.CancelAsync(run.Id);
@@ -978,6 +1001,149 @@ public class OrchestratorTests : IAsyncLifetime
         await WaitForAsync(run.Id, RunStatus.ReadyToMerge);
 
         Assert.Equal([false, true], _llm.Engines.Where(e => e.Role == AgentRole.BugFixer).Select(e => e.OnClaude));
+    }
+
+    private void MakeSonnetTheFixer() =>
+        _settings.Settings.ProfileOverrides.Add(new AgentProfileOverride
+        {
+            Role = AgentRole.BugFixer, ReasoningEffort = "xhigh", Temperature = 0.2,
+            Engine = AgentEngine.Local, ClaudeModel = "sonnet", ClaudeEffort = "high"
+        });
+
+    [Fact]
+    public async Task One_last_fix_on_the_strongest_claude_model_comes_before_the_run_asks_for_help()
+    {
+        MakeSonnetTheFixer();
+        _llm.Enqueue(AgentRole.TaskPlanner, Plan("alpha"));
+        _llm.Enqueue(AgentRole.ContextSpecifier, Refined());
+        _llm.Enqueue(AgentRole.CodeGenerator, Patch("alpha.txt"));
+        _llm.Enqueue(AgentRole.BugFixer, Patch("alpha.txt", "1"), Patch("alpha.txt", "2"), Patch("alpha.txt", "3"), Patch("alpha.txt", "4"));
+        for (var i = 0; i < 5; i++) _commands.Results.Enqueue((1, $"error CS000{i}: different every time"));
+
+        var run = await WaitForAsync((await StartAsync()).Id, RunStatus.NeedsHuman);
+
+        var subtask = (await _store.GetSubtasksAsync(run.Id)).Single();
+        Assert.Equal(4, subtask.FixAttempts); // Three normal attempts, then the last try.
+        Assert.Equal(["", "sonnet", "sonnet", "opus"], _llm.Engines.Where(e => e.Role == AgentRole.BugFixer).Select(e => e.OnClaude ? e.ClaudeModel : ""));
+        Assert.Contains(await _store.GetLogsAsync(run.Id), l => l.Message.Contains("Claude Opus makes one last try before Hatchet asks you"));
+    }
+
+    [Fact]
+    public async Task The_last_try_can_land_the_fix()
+    {
+        MakeSonnetTheFixer();
+        _llm.Enqueue(AgentRole.TaskPlanner, Plan("alpha"));
+        _llm.Enqueue(AgentRole.ContextSpecifier, Refined());
+        _llm.Enqueue(AgentRole.CodeGenerator, Patch("alpha.txt"));
+        _llm.Enqueue(AgentRole.BugFixer, Patch("alpha.txt", "1"), Patch("alpha.txt", "2"), Patch("alpha.txt", "3"), Patch("alpha.txt", "fixed"));
+        _llm.Enqueue(AgentRole.StaticReviewer, Verdict(true));
+        for (var i = 0; i < 4; i++) _commands.Results.Enqueue((1, $"error CS000{i}: different every time"));
+
+        var run = await WaitForAsync((await StartAsync()).Id, RunStatus.ReadyToMerge);
+
+        Assert.Equal("fixed", File.ReadAllText(_repo.File("alpha.txt")));
+        Assert.Equal(4, (await _store.GetSubtasksAsync(run.Id)).Single().FixAttempts);
+    }
+
+    [Fact]
+    public void No_last_try_is_made_when_the_fixer_is_already_on_the_strongest_model()
+    {
+        // The default Bug Fixer profile names Opus, so there is nothing stronger to turn to.
+        Assert.Null(FactoryOrchestrator.LastResortModel(_settings.Settings));
+        Assert.Equal(_settings.Settings.MaxFixRetries, FactoryOrchestrator.FixBudget(_settings.Settings));
+    }
+
+    [Fact]
+    public void The_last_try_needs_a_claude_to_hand_over_to_and_a_budget_to_follow()
+    {
+        MakeSonnetTheFixer();
+        Assert.Equal("opus", FactoryOrchestrator.LastResortModel(_settings.Settings));
+        Assert.Equal(_settings.Settings.MaxFixRetries + 1, FactoryOrchestrator.FixBudget(_settings.Settings));
+
+        _settings.Settings.EscalateFixesToClaudeAfter = 0; // Claude is switched off for fixes.
+        Assert.Null(FactoryOrchestrator.LastResortModel(_settings.Settings));
+
+        _settings.Settings.EscalateFixesToClaudeAfter = 1;
+        _settings.Settings.MaxFixRetries = 0; // No retries were asked for, so no extra one either.
+        Assert.Null(FactoryOrchestrator.LastResortModel(_settings.Settings));
+        Assert.Equal(0, FactoryOrchestrator.FixBudget(_settings.Settings));
+    }
+
+    [Fact]
+    public async Task The_same_error_after_claude_has_had_a_go_stops_the_retries()
+    {
+        _llm.Enqueue(AgentRole.TaskPlanner, Plan("alpha"));
+        _llm.Enqueue(AgentRole.ContextSpecifier, Refined());
+        _llm.Enqueue(AgentRole.CodeGenerator, Patch("alpha.txt"));
+        _llm.Enqueue(AgentRole.BugFixer, Patch("alpha.txt", "1"), Patch("alpha.txt", "2"), Patch("alpha.txt", "3"));
+        // Only the line number changes, which a fix can do without touching the cause.
+        _commands.Results.Enqueue((1, "lib.js(3,1): error CS0246: the library file is only a placeholder"));
+        _commands.Results.Enqueue((1, "lib.js(3,1): error CS0246: the library file is only a placeholder"));
+        _commands.Results.Enqueue((1, "lib.js(9,4): error CS0246: the library file is only a placeholder"));
+
+        var run = await WaitForAsync((await StartAsync()).Id, RunStatus.NeedsHuman);
+
+        var subtask = (await _store.GetSubtasksAsync(run.Id)).Single();
+        Assert.Equal(2, subtask.FixAttempts); // One local, one on Claude, and the same error after both.
+        Assert.Equal(2, _llm.Calls.Count(c => c.Role == AgentRole.BugFixer));
+        Assert.Contains("fails with the same error after 2 fix attempts", run.PauseReason);
+        var brief = PauseBriefBuilder.Build(run, subtask)!;
+        Assert.Equal("\"alpha\" keeps failing with the same error.", brief.Headline);
+        Assert.Contains(brief.Findings, f => f.Contains("only a placeholder"));
+    }
+
+    [Fact]
+    public async Task The_same_error_twice_from_the_local_model_alone_does_not_stop_the_retries()
+    {
+        _settings.Settings.EscalateFixesToClaudeAfter = 2;
+        _llm.Enqueue(AgentRole.TaskPlanner, Plan("alpha"));
+        _llm.Enqueue(AgentRole.ContextSpecifier, Refined());
+        _llm.Enqueue(AgentRole.CodeGenerator, Patch("alpha.txt"));
+        _llm.Enqueue(AgentRole.BugFixer, Patch("alpha.txt", "1"), Patch("alpha.txt", "2"), Patch("alpha.txt", "3"));
+        for (var i = 0; i < 4; i++) _commands.Results.Enqueue((1, "error CS0246: still the same"));
+
+        var run = await WaitForAsync((await StartAsync()).Id, RunStatus.NeedsHuman);
+
+        Assert.Equal(3, (await _store.GetSubtasksAsync(run.Id)).Single().FixAttempts); // Claude took the third, and only then did it stop.
+        Assert.Equal([false, false, true], _llm.Engines.Where(e => e.Role == AgentRole.BugFixer).Select(e => e.OnClaude));
+    }
+
+    [Fact]
+    public void Only_failed_checks_in_a_row_count_as_the_same_error()
+    {
+        const string failed = "\nWhat failed next:\n";
+        Assert.True(FactoryOrchestrator.SameErrorTwice([$"Attempt 1: a{failed}x.cs(1,2): error CS1", $"Attempt 2: b{failed}x.cs(8,5): error CS1"]));
+        Assert.False(FactoryOrchestrator.SameErrorTwice([$"Attempt 1: a{failed}error CS1"]));
+        Assert.False(FactoryOrchestrator.SameErrorTwice([$"Attempt 1: a{failed}error CS1", $"Attempt 2: b{failed}error CS2"]));
+        // A person stepped in between: the numbers start again, so these are not two tries in a row.
+        Assert.False(FactoryOrchestrator.SameErrorTwice([$"Attempt 3: a{failed}error CS1", $"Attempt 1: b{failed}error CS1"]));
+        // A reviewer's objection is an opinion, not an error that repeats.
+        Assert.False(FactoryOrchestrator.SameErrorTwice([$"Attempt 1: a{failed}The reviewer rejected it: no", $"Attempt 2: b{failed}The reviewer rejected it: no"]));
+    }
+
+    [Fact]
+    public async Task Fixes_the_guard_refuses_one_after_another_pause_the_run_without_spending_attempts()
+    {
+        _repo.Write("src/Ui/FancyPicker.cs", "public sealed class FancyPicker { public string Label { get; set; } }\n");
+        await _git.StageAllAsync();
+        await _git.CommitStagedAsync("Add the picker");
+        _llm.Enqueue(AgentRole.TaskPlanner, JsonSerializer.Serialize(
+            new TaskGraphResponse([new SubtaskDto(1, "alpha", "Let the user choose with a FancyPicker.", [], ["alpha.txt"], [], "")]),
+            LlmSchemas.SerializerOptions));
+        _llm.Enqueue(AgentRole.ContextSpecifier, Refined());
+        _llm.Enqueue(AgentRole.CodeGenerator, Patch("alpha.txt", "new FancyPicker { Text = \"x\" }"));
+        _llm.Enqueue(AgentRole.BugFixer, Patch("alpha.txt", "<select>1</select>"), Patch("alpha.txt", "<select>2</select>"), Patch("alpha.txt", "<select>3</select>"));
+        _commands.Results.Enqueue((1, "error CS0117: 'FancyPicker' does not contain a definition for 'Text'"));
+
+        var run = await WaitForAsync((await StartAsync()).Id, RunStatus.NeedsHuman);
+
+        var subtask = (await _store.GetSubtasksAsync(run.Id)).Single();
+        Assert.Equal(0, subtask.FixAttempts);
+        Assert.Equal(3, _llm.Calls.Count(c => c.Role == AgentRole.BugFixer));
+        Assert.Equal(3, FactoryOrchestrator.RefusedInARow(subtask));
+        Assert.Contains("were refused in a row", run.PauseReason);
+        Assert.Contains("took out `FancyPicker`", subtask.LastFailure);
+        Assert.StartsWith("The fixer can't fix", PauseBriefBuilder.Build(run, subtask)!.Headline);
     }
 
     [Fact]
@@ -1206,6 +1372,89 @@ public class OrchestratorTests : IAsyncLifetime
         Assert.Equal(first.BaseBranch, started.BaseBranch); // It started from the user's branch, not the first run's.
     }
 
+    private async Task FinishOneSubtaskRunAsync(string? model)
+    {
+        _llm.Enqueue(AgentRole.TaskPlanner, Plan("alpha"));
+        _llm.Enqueue(AgentRole.ContextSpecifier, Refined());
+        _llm.Enqueue(AgentRole.CodeGenerator, Patch("alpha.txt"));
+        _llm.Enqueue(AgentRole.StaticReviewer, Verdict(true));
+        await WaitForAsync((await StartAsync(model: model)).Id, RunStatus.ReadyToMerge);
+    }
+
+    [Fact]
+    public async Task A_run_given_a_claude_model_puts_every_agent_on_it_and_leaves_the_settings_alone()
+    {
+        await FinishOneSubtaskRunAsync("claude:sonnet");
+
+        Assert.NotEmpty(_llm.Engines);
+        Assert.All(_llm.Engines, e => Assert.Equal((true, "sonnet"), (e.OnClaude, e.ClaudeModel)));
+        Assert.Empty(_settings.Settings.ProfileOverrides); // Other runs, and the Settings page, are unaffected.
+    }
+
+    [Fact]
+    public async Task A_run_given_a_local_model_uses_it_for_every_agent_even_where_settings_have_agents_on_claude()
+    {
+        RunEveryAgentOnClaude();
+        await FinishOneSubtaskRunAsync("local:qwen-small");
+
+        Assert.NotEmpty(_llm.Engines);
+        Assert.All(_llm.Engines, e => Assert.False(e.OnClaude));
+        Assert.All(_llm.ModelIds, id => Assert.Equal("qwen-small", id));
+        Assert.Equal("qwen3.8", _settings.Settings.ModelId);
+    }
+
+    [Fact]
+    public async Task A_run_with_no_model_choice_runs_as_settings_say()
+    {
+        RunEveryAgentOnClaude();
+        await FinishOneSubtaskRunAsync(null);
+
+        Assert.All(_llm.Engines, e => Assert.True(e.OnClaude));
+        Assert.All(_llm.ModelIds, id => Assert.Equal("qwen3.8", id));
+    }
+
+    [Fact]
+    public async Task The_model_choice_is_kept_with_the_task_so_a_rerun_uses_it_too()
+    {
+        _llm.Enqueue(AgentRole.TaskPlanner, Plan("alpha"), Plan("alpha"));
+        var run = await StartAsync(approval: true, model: "opus");
+        await WaitForAsync(run.Id, RunStatus.AwaitingPlanApproval);
+        await _orchestrator.CancelAsync(run.Id);
+
+        var again = await _orchestrator.RerunAsync(run.Id);
+
+        Assert.Equal("claude:opus", (await _store.GetRunAsync(again.Id)).Task.ModelChoice);
+    }
+
+    [Fact]
+    public async Task An_unknown_model_choice_is_refused_before_anything_starts()
+    {
+        var error = await Assert.ThrowsAsync<FactoryValidationException>(() => StartAsync(model: "gpt-9"));
+
+        Assert.Contains("isn't a model choice", error.Message);
+        Assert.Empty(await _store.ListRunsAsync());
+    }
+
+    [Fact]
+    public async Task A_run_on_a_claude_model_does_not_wait_for_the_local_model()
+    {
+        using var other = await SecondRepositoryAsync();
+        _llm.Enqueue(AgentRole.TaskPlanner, Plan("alpha"), Plan("beta"));
+        _llm.Hold = AgentRole.TaskPlanner;
+
+        var first = await StartAsync(approval: true); // On the local model, which serves one run at a time.
+        await _llm.HoldStarted.Task.WaitAsync(TimeSpan.FromSeconds(30));
+        _llm.Hold = null; // Only the first call stays held.
+        var second = await StartAsync(approval: true, repository: other.Path, model: "claude:haiku");
+
+        await WaitForAsync(second.Id, RunStatus.AwaitingPlanApproval);
+        Assert.Null(_orchestrator.GetQueueSpot(second.Id));
+        Assert.Equal(RunStatus.Decomposing, (await _store.GetRunAsync(first.Id)).Status);
+
+        _llm.Release.TrySetResult();
+        await WaitForAsync(first.Id, RunStatus.AwaitingPlanApproval);
+    }
+
     [Fact]
     public async Task Runs_on_the_local_model_past_the_limit_wait_in_line()
     {
@@ -1343,7 +1592,7 @@ public class OrchestratorTests : IAsyncLifetime
         _llm.Enqueue(AgentRole.ContextSpecifier, Refined());
         _llm.Enqueue(AgentRole.CodeGenerator, Patch("alpha.txt"));
         _llm.Enqueue(AgentRole.BugFixer, Patch("alpha.txt", "1"), Patch("alpha.txt", "2"), Patch("alpha.txt", "3"));
-        for (var i = 0; i < 4; i++) _commands.Results.Enqueue((1, "still broken"));
+        for (var i = 0; i < 4; i++) _commands.Results.Enqueue((1, $"still broken {i}"));
         var paused = await WaitForAsync((await StartAsync()).Id, RunStatus.NeedsHuman);
 
         using var other = await SecondRepositoryAsync();
@@ -1497,7 +1746,10 @@ public class OrchestratorTests : IAsyncLifetime
         public AgentRole? Offline { get; set; }
         public AgentRole? Hang { get; set; }
         public bool ClaudeOffline { get; set; }
-        public List<(AgentRole Role, bool OnClaude)> Engines { get; } = [];
+        public List<(AgentRole Role, bool OnClaude, string ClaudeModel)> Engines { get; } = [];
+
+        /// <summary>The local model id each call was made with, whether or not it ended up on Claude.</summary>
+        public List<string> ModelIds { get; } = [];
         public string FinishReason { get; set; } = "stop";
 
         /// <summary>Finish reasons for the next calls, before falling back to <see cref="FinishReason"/>.</summary>
@@ -1537,7 +1789,8 @@ public class OrchestratorTests : IAsyncLifetime
             if (role == Offline) throw new LlmException("Connection refused.");
             lock (_responses)
             {
-                Engines.Add((role, request.Profile.UsesClaude));
+                Engines.Add((role, request.Profile.UsesClaude, request.Profile.ClaudeModel));
+                ModelIds.Add(settings.ModelId);
                 Requests.Add((role, request.Profile.Temperature, request.UserPrompt));
             }
             if (request.Profile.UsesClaude && ClaudeOffline) throw new LlmException("Claude Code isn't logged in.");
