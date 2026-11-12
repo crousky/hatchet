@@ -101,6 +101,19 @@
             <ConfirmButton Text="Skip subtask" ConfirmText="Discard and skip?" IconName="skip" Disabled="Busy" Title="Discard this subtask's uncommitted changes and move to the next one" OnConfirmed="@(() => Decide(HumanDecision.SkipSubtask))" />
         </div>
     }
+    else if (FinalCheckFailed)
+    {
+        @* Nothing is in progress at this stage, so the failure is handed to the Bug Fixer as one more subtask. *@
+        <textarea autocomplete="off" data-1p-ignore data-lpignore="true" class="guidance" rows="2" placeholder="@(_brief?.GuidanceHint ?? "Guidance for the Bug Fixer (optional).")" @bind="_guidance" @bind:event="oninput"></textarea>
+        <div class="action-row">
+            <button class="btn btn-primary" disabled="@Busy" title="Give the final check's errors and your guidance to the Bug Fixer as one more subtask, then run the final check again" @onclick="@(() => Decide(HumanDecision.RetryFixer))">
+                <Icon Name="wrench" Size="14" /> Hand to the Fixer
+            </button>
+            <button class="btn" disabled="@Busy" title="Run the final check on what is committed on the run's branch. Use this after committing a fix yourself." @onclick="@(() => Decide(HumanDecision.Resume))">
+                <Icon Name="play" Size="14" /> @ResumeLabel
+            </button>
+        </div>
+    }
     else
     {
         <div class="action-row">
@@ -146,6 +159,8 @@
     }
 
     private bool Interrupted => Run.PauseReason == FactoryOrchestrator.InterruptedReason;
+
+    private bool FinalCheckFailed => _brief?.Kind == PauseKind.FinalCheckFailed;
 
     private string Title => Run.PausedByUser
         ? Paused is not null ? $"Paused on \"{Paused.Title}\"" : "Paused"

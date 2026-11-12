@@ -29,6 +29,36 @@ public static partial class FailureDigest
         return errors;
     }
 
+    /// <summary>
+    /// The repository files that error lines point at, such as <c>C:\repo\src\A.cs(12,5): error</c> or
+    /// <c>src/a.ts:12:5 - error</c>, as repository-relative paths with forward slashes, in order of first mention. Paths
+    /// outside the repository or that don't exist are left out.
+    /// </summary>
+    public static IReadOnlyList<string> FilesNamed(IEnumerable<string> errorLines, string repositoryPath, int max = 10)
+    {
+        var root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(repositoryPath)) + Path.DirectorySeparatorChar;
+        var files = new List<string>();
+        foreach (var line in errorLines)
+        {
+            foreach (Match match in FileReference().Matches(line))
+            {
+                string full;
+                try { full = Path.GetFullPath(Path.IsPathRooted(match.Groups["path"].Value) ? match.Groups["path"].Value : Path.Combine(root, match.Groups["path"].Value)); }
+                catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException) { continue; }
+                if (!full.StartsWith(root, StringComparison.OrdinalIgnoreCase) || !File.Exists(full)) continue;
+
+                var relative = full[root.Length..].Replace('\\', '/');
+                if (!files.Contains(relative, StringComparer.OrdinalIgnoreCase)) files.Add(relative);
+                if (files.Count == max) return files;
+            }
+        }
+        return files;
+    }
+
+    // A path with a file extension, followed by the "(line" or ":line" compilers put after it.
+    [GeneratedRegex(@"(?<path>(?:[A-Za-z]:[\\/])?[\w.\-\\/]+\.\w{1,10})(?=\(\d|:\d)")]
+    private static partial Regex FileReference();
+
     [GeneratedRegex(@"\berror\b|\bfailed\b|\bexception\b|^FAIL\b|AssertionError|npm ERR!|Traceback", RegexOptions.IgnoreCase)]
     private static partial Regex ErrorLine();
 

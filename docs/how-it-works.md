@@ -1,6 +1,6 @@
 # How Hatchet works
 
-The [README](../README.md) shows the pipeline at a glance. This page covers the behaviour behind it: how fixes are kept to the spec, what agents are told about types, how runaway answers are handled, and how runs queue.
+The [README](../README.md) shows the pipeline at a glance. This page covers the behaviour behind it: how fixes are kept to the spec, what happens when the final check fails, what agents are told about types, how runaway answers are handled, and how runs queue.
 
 For skills, see [skills.md](skills.md). For driving Hatchet from Claude Code, see [mcp.md](mcp.md).
 
@@ -9,6 +9,18 @@ For skills, see [skills.md](skills.md). For driving Hatchet from Claude Code, se
 A fix has to fix what the spec asks for, not route around it. If a fix takes a type the spec names out of the subtask's files altogether, such as swapping a named component for plain markup, Hatchet doesn't apply it. The next attempt is told what to keep, along with the failure it still has to fix. Only real types count, from the repository or its packages, so a fix can still replace a member the spec got wrong.
 
 Fixes before the first review and fixes after it have a budget each. A change that only builds on its last allowed fix still gets fixed for what the reviewer finds, instead of pausing as soon as the reviewer sees it.
+
+## When the final check fails
+
+Each subtask is checked on its own, and the final check then builds and tests the whole branch from scratch. That can turn up what no single subtask did, such as a member one subtask uses and another never declared, or markup that only a full rebuild compiles.
+
+When the final check fails, Hatchet doesn't stop at once:
+
+1. **Hand it to the Bug Fixer.** Hatchet adds one more subtask, "Make the final check pass". It starts at the Bug Fixer with the check's errors and the files they point at, and uses the final check as its own check. It has the same fix budget, escalation to Claude, guard and review as any other subtask, and is committed as `fix(integrate): ...`.
+2. **Check again.** Once that subtask is committed, the final check runs again.
+3. **Ask you.** If the check still fails, or the Bug Fixer can't fix it, the run pauses with the errors. Choose **Hand to the Fixer**, with optional guidance, to give it another go as a new subtask. Or commit a fix on the run's branch yourself and choose **Run the final check again**. Over MCP, these are `resume_run` with `retry_fixer` or `resume`.
+
+The Bug Fixer gets one automatic try, so a fix that doesn't hold ends with you rather than a loop.
 
 ## What agents are told about types
 

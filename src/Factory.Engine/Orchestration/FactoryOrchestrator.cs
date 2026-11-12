@@ -387,7 +387,8 @@ public sealed partial class FactoryOrchestrator(
                 await PlanAsync(context, ct);
                 return;
             case PipelineStage.Integrate:
-                await IntegrateAsync(context, ct);
+                // "Hand to the Fixer" always hands it over, even after an earlier final-check fix.
+                await IntegrateAsync(context, ct, handOff: decision == HumanDecision.RetryFixer, guidance);
                 return;
         }
 
@@ -827,7 +828,10 @@ public sealed partial class FactoryOrchestrator(
 
             PauseIfRequested(run.Id);
             run.CurrentSubtaskId = subtask.Id;
-            var entry = resumePoint?.SubtaskId == subtask.Id ? resumePoint.Entry : SubtaskEntry.Start;
+            var entry = resumePoint?.SubtaskId == subtask.Id ? resumePoint.Entry
+                // A final-check fix has nothing to build, so it starts at the Bug Fixer with the failure it was made for.
+                : subtask.IsIntegrationFix ? SubtaskEntry.Fix
+                : SubtaskEntry.Start;
             var finished = await ProcessSubtaskAsync(context, subtask, entry, ct);
             if (!finished) return;
         }
@@ -1425,7 +1429,8 @@ public sealed partial class FactoryOrchestrator(
         else
         {
             var title = subtask.Title.ReplaceLineEndings(" ").Trim();
-            subtask.CommitSha = await git.CommitStagedAsync($"feat(subtask): {title}", ct);
+            var message = subtask.IsIntegrationFix ? $"fix(integrate): {title}" : $"feat(subtask): {title}";
+            subtask.CommitSha = await git.CommitStagedAsync(message, ct);
             var snapshot = await store.AddDiffAsync(new DiffSnapshot
             {
                 RunId = run.Id,
@@ -1436,14 +1441,20 @@ public sealed partial class FactoryOrchestrator(
                 CommitSha = subtask.CommitSha
             }, ct);
             bus.Publish(new DiffCaptured(run.Id, subtask.Id, snapshot.Id));
-            await LogAsync(run.Id, subtask.Id, AgentLogKind.Info, PipelineStage.Review, $"Committed {subtask.CommitSha[..8]}: feat(subtask): {title}", ct);
+            await LogAsync(run.Id, subtask.Id, AgentLogKind.Info, PipelineStage.Review, $"Committed {subtask.CommitSha[..8]}: {message}", ct);
         }
 
         subtask.LastFailure = null;
         await SetSubtaskStatusAsync(subtask, SubtaskStatus.Completed, ct);
     }
 
-    private async Task IntegrateAsync(PipelineContext context, CancellationToken ct)
+    internal const string IntegrationFixTitle = "Make the final check pass";
+
+    /// <param name="handOff">
+    /// A person chose to hand the failure to the Bug Fixer. Without it, a failure goes to the Bug Fixer only the first
+    /// time, so a fix that doesn't hold ends with a person rather than a loop.
+    /// </param>
+    private async Task IntegrateAsync(PipelineContext context, CancellationToken ct, bool handOff = false, string? guidance = null)
     {
         var (run, task, git) = (context.Run, context.Task, context.Git);
         PauseIfRequested(run.Id);
@@ -1466,7 +1477,20 @@ public sealed partial class FactoryOrchestrator(
             run.IntegrationPassed = result.Success;
             if (!result.Success)
             {
-                await PauseRunAsync(run, $"The final check failed: `{command}` exited with code {result.ExitCode}.", ct);
+                if (!handOff && subtasks.Any(s => s.IsIntegrationFix))
+                {
+                    await PauseRunAsync(run, FinalCheckReason(result), ct);
+                    return;
+                }
+
+                // Each subtask passed on its own, so what breaks is where they meet. The Bug Fixer takes it on as one
+                // more subtask: the same fix budget, escalation, guard, review and commit as the rest of the run.
+                var fix = await AddIntegrationFixAsync(context, subtasks, command, result, guidance, ct);
+                await SetRunStatusAsync(run, RunStatus.Executing, ct);
+                run.CurrentSubtaskId = fix.Id;
+                if (!await ProcessSubtaskAsync(context, fix, SubtaskEntry.Fix, ct)) return;
+                run.CurrentSubtaskId = null;
+                await IntegrateAsync(context, ct);
                 return;
             }
         }
@@ -1476,6 +1500,47 @@ public sealed partial class FactoryOrchestrator(
         bus.Publish(new DiffCaptured(run.Id, null, snapshot.Id));
 
         await SetRunStatusAsync(run, RunStatus.ReadyToMerge, ct);
+    }
+
+    /// <summary>The subtask that hands a failed final check to the Bug Fixer, saved after the run's other subtasks.</summary>
+    private async Task<FactorySubtask> AddIntegrationFixAsync(PipelineContext context, IReadOnlyList<FactorySubtask> subtasks, string command,
+        CommandResult result, string? guidance, CancellationToken ct)
+    {
+        var run = context.Run;
+        var errors = FailureDigest.Errors(result.Output);
+        var fix = await store.AddSubtaskAsync(new FactorySubtask
+        {
+            RunId = run.Id,
+            Order = subtasks.Count == 0 ? 1 : subtasks.Max(s => s.Order) + 1,
+            Title = IntegrationFixTitle,
+            Description = $"Every planned subtask passed its own check and is committed, but the final check over the whole branch fails: `{command}`. "
+                + "Find what breaks where the subtasks' work meets, such as a member one subtask uses and another never declared, or a project only a full rebuild compiles, "
+                + "and fix it with the smallest change. Keep what each subtask built; don't remove features, types or tests to get the check through.",
+            // The files the errors point at, so the Bug Fixer sees them without being told.
+            TargetFilesToModify = [.. FailureDigest.FilesNamed(errors, context.Task.RepositoryPath)],
+            VerificationCommand = command,
+            CommandApproved = true,
+            IsIntegrationFix = true,
+            LastFailure = DescribeFailure(result, context.Settings),
+            HumanGuidance = string.IsNullOrWhiteSpace(guidance) ? null : guidance.Trim(),
+            // It starts from a failure, never from Refine and Build, and counts as built for the pause options.
+            SummaryOfChanges = "Nothing yet: the Bug Fixer starts from the final check's failure."
+        }, ct);
+        bus.Publish(new PlanChanged(run.Id));
+        await LogAsync(run.Id, fix.Id, AgentLogKind.Warning, PipelineStage.Integrate,
+            $"The final check failed, so the Bug Fixer takes it on as subtask {fix.Order}, \"{fix.Title}\"."
+            + (fix.TargetFilesToModify.Count > 0 ? $" The errors point at {string.Join(", ", fix.TargetFilesToModify)}." : ""), ct);
+        return fix;
+    }
+
+    /// <summary>Why a run paused on its final check, with the errors under "Errors:" so the pause can show them.</summary>
+    private static string FinalCheckReason(CommandResult result)
+    {
+        var what = result.TimedOut
+            ? $"The final check timed out: `{result.Command}` ran for {result.Duration.TotalSeconds:0} seconds."
+            : $"The final check failed: `{result.Command}` exited with code {result.ExitCode}.";
+        var errors = FailureDigest.Errors(result.Output);
+        return errors.Count == 0 ? what : $"{what}\nErrors:\n{string.Join('\n', errors.Take(8))}";
     }
 
     // ---- Agents and commands ----
@@ -1889,6 +1954,16 @@ public sealed partial class FactoryOrchestrator(
         var built = subtask.SummaryOfChanges is not null;
         switch (decision)
         {
+            // A final-check fix has no plan to build from: starting over means dropping its changes, running the check
+            // again and fixing what fails, with a fresh budget.
+            case HumanDecision.RestartSubtask when subtask.IsIntegrationFix:
+                await RollbackAsync(run, ct);
+                subtask.ReviewJson = null;
+                subtask.FixAttempts = 0;
+                subtask.ReviewFixAttempts = 0;
+                subtask.FixHistory.Clear();
+                return new ResumePoint(subtask.Id, SubtaskEntry.Verify);
+
             case HumanDecision.RestartSubtask:
                 await RollbackAsync(run, ct);
                 subtask.RefinedSpecJson = null;
@@ -1925,7 +2000,7 @@ public sealed partial class FactoryOrchestrator(
 
             default:
                 await SetSubtaskStatusAsync(subtask, SubtaskStatus.Pending, ct);
-                return new ResumePoint(subtask.Id, SubtaskEntry.Start);
+                return new ResumePoint(subtask.Id, subtask.IsIntegrationFix ? SubtaskEntry.Fix : SubtaskEntry.Start);
         }
     }
 

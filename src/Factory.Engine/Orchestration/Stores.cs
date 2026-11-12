@@ -15,6 +15,8 @@ public interface IRunStore
     Task<IReadOnlyList<FactorySubtask>> GetSubtasksForRunsAsync(IReadOnlyCollection<int> runIds, CancellationToken ct = default);
     Task UpdateSubtaskAsync(FactorySubtask subtask, CancellationToken ct = default);
     Task ReplaceSubtasksAsync(int runId, IReadOnlyList<FactorySubtask> subtasks, CancellationToken ct = default);
+    /// <summary>Adds one subtask to a run, keeping the others and their ids. Returns it with its id set.</summary>
+    Task<FactorySubtask> AddSubtaskAsync(FactorySubtask subtask, CancellationToken ct = default);
 
     Task<AgentLogEntry> AppendLogAsync(AgentLogEntry entry, CancellationToken ct = default);
     /// <summary>Entries with an id above <paramref name="afterId"/>, so live views can fetch only what is new.</summary>

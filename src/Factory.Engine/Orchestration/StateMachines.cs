@@ -14,7 +14,8 @@ public static class RunStateMachine
         [RunStatus.AwaitingPlanApproval] = [RunStatus.Executing, RunStatus.Decomposing, RunStatus.Cancelled],
         [RunStatus.Executing] = [RunStatus.Integrating, RunStatus.NeedsHuman, RunStatus.Failed, RunStatus.Cancelled],
         [RunStatus.NeedsHuman] = [RunStatus.Ingesting, RunStatus.Decomposing, RunStatus.Executing, RunStatus.Integrating, RunStatus.Cancelled],
-        [RunStatus.Integrating] = [RunStatus.ReadyToMerge, RunStatus.NeedsHuman, RunStatus.Failed, RunStatus.Cancelled],
+        // Back to Executing when a failed final check is handed to the Bug Fixer.
+        [RunStatus.Integrating] = [RunStatus.ReadyToMerge, RunStatus.Executing, RunStatus.NeedsHuman, RunStatus.Failed, RunStatus.Cancelled],
         [RunStatus.ReadyToMerge] = [RunStatus.Merged, RunStatus.Closed],
         [RunStatus.Merged] = [],
         [RunStatus.Closed] = [],
@@ -45,7 +46,8 @@ public static class SubtaskStateMachine
 {
     private static readonly Dictionary<SubtaskStatus, SubtaskStatus[]> Allowed = new()
     {
-        [SubtaskStatus.Pending] = [SubtaskStatus.Refining, SubtaskStatus.Building, SubtaskStatus.NeedsHuman, SubtaskStatus.Skipped, SubtaskStatus.Cancelled],
+        // Straight to Fixing for a final-check fix, which starts from a failure rather than a build.
+        [SubtaskStatus.Pending] = [SubtaskStatus.Refining, SubtaskStatus.Building, SubtaskStatus.Fixing, SubtaskStatus.NeedsHuman, SubtaskStatus.Skipped, SubtaskStatus.Cancelled],
         [SubtaskStatus.Refining] = [SubtaskStatus.Building, SubtaskStatus.NeedsHuman, SubtaskStatus.Cancelled],
         [SubtaskStatus.Building] = [SubtaskStatus.Verifying, SubtaskStatus.Fixing, SubtaskStatus.NeedsHuman, SubtaskStatus.Cancelled],
         [SubtaskStatus.Verifying] = [SubtaskStatus.Reviewing, SubtaskStatus.Fixing, SubtaskStatus.NeedsHuman, SubtaskStatus.Cancelled],

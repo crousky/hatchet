@@ -83,6 +83,13 @@ public sealed class FactorySubtask
     public bool CommandApproved { get; set; }
 
     public SubtaskStatus Status { get; set; } = SubtaskStatus.Pending;
+
+    /// <summary>
+    /// Added by Hatchet when the final check fails after every planned subtask is committed. It starts at the Bug Fixer
+    /// with the check's failure, uses the final check as its own, and goes through review and commit like any other.
+    /// </summary>
+    public bool IsIntegrationFix { get; set; }
+
     public int FixAttempts { get; set; }
 
     /// <summary>

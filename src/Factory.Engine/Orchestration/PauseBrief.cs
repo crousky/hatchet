@@ -216,16 +216,26 @@ public static class PauseBriefBuilder
         "Nothing is needed once the cause is fixed. Add guidance only if you want to steer the agents.",
         [.. StepErrorOptions(paused)]);
 
-    private static PauseBrief FinalCheck(FactoryRun run, string reason) => new(
-        PauseKind.FinalCheckFailed,
-        "Every subtask is committed, but the final check failed.",
-        $"{reason} Each subtask passed on its own, so something breaks when the pieces come together.",
-        "Find what breaks, fix it on the run's branch and commit it, then run the final check again. Hatchet doesn't edit anything at this stage.",
-        "The failing check",
-        [reason],
-        "Nothing to add here. Guidance isn't used by the final check.",
-        [new PauseOption("resume", "Run the final check again", "You've fixed the problem.",
-            $"A fix committed on {run.BranchName ?? "the run's branch"} in {run.Task.RepositoryPath}. Uncommitted changes aren't part of the check. The Log tab shows the command's output.")]);
+    private static PauseBrief FinalCheck(FactoryRun run, string reason)
+    {
+        var summary = reason.Split('\n', 2)[0].Trim();
+        var errors = ErrorLines(reason);
+        return new PauseBrief(
+            PauseKind.FinalCheckFailed,
+            "Every subtask is committed, but the final check failed.",
+            $"{summary} Each subtask passed on its own, so something breaks when the pieces come together.",
+            "Hand the failure to the Bug Fixer, or fix it on the run's branch yourself and run the final check again.",
+            errors.Count > 0 ? "Errors from the final check" : "The failing check",
+            errors.Count > 0 ? errors : [summary],
+            "Optional, for the Bug Fixer: what you think breaks, such as \"the settings window uses a member the hotkey code never declared\".",
+            [
+                new PauseOption("retry_fixer", "Hand to the Fixer",
+                    "You'd rather an agent finds and fixes it.",
+                    "Optionally, guidance in the box above. The Bug Fixer gets the errors and a fresh budget as one more subtask, which is reviewed and committed like the others, and then the final check runs again."),
+                new PauseOption("resume", "Run the final check again", "You've fixed the problem yourself.",
+                    $"A fix committed on {run.BranchName ?? "the run's branch"} in {run.Task.RepositoryPath}. Uncommitted changes aren't part of the check. The Log tab shows the command's output.")
+            ]);
+    }
 
     private static PauseBrief Other(FactoryRun run, string reason) => new(
         PauseKind.Other,
