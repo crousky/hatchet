@@ -51,6 +51,14 @@ Both bugs came in with 3d4e52f, which added EDIT, because the code around it sti
 - Detect it after the patch is applied and either repair it or put it in front of the fixer, before a build cycle is spent on it.
 - Log every repair.
 
+**5b. Make the subtask check as strict as the final check.** Run 6 later stalled at the final check. `dotnet build --no-incremental` found two errors that every incremental `dotnet test` had missed:
+- `HotkeyModifiers.None` was used by subtask 23 but never declared by subtask 12.
+- A `bool[]` attached property in a DataTemplate broke from subtask 20 onward (WPF error MC4102).
+
+WPF's markup pass is skipped when its outputs look current. A failed final check now goes to the Bug Fixer automatically (see how-it-works.md), but it is cheaper to catch these at the subtask that causes them:
+- Run the final check's command as the subtask check whenever a subtask touches `.xaml`, project files or shared types, or on every fifth subtask.
+- Or clean `obj/` for projects that have XAML before checking.
+
 ### P2: cost and trust
 
 **6. A token budget per subtask.** Refused fixes don't count as attempts, so a run can spend a lot before it stops.

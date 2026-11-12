@@ -694,6 +694,7 @@ public class AdHocTests : IAsyncLifetime
         public Task<IReadOnlyList<FactorySubtask>> GetSubtasksAsync(int runId, CancellationToken ct = default) => throw new NotSupportedException();
         public Task UpdateSubtaskAsync(FactorySubtask subtask, CancellationToken ct = default) => throw new NotSupportedException();
         public Task ReplaceSubtasksAsync(int runId, IReadOnlyList<FactorySubtask> subtasks, CancellationToken ct = default) => throw new NotSupportedException();
+        public Task<FactorySubtask> AddSubtaskAsync(FactorySubtask subtask, CancellationToken ct = default) => throw new NotSupportedException();
         public Task<AgentLogEntry> AppendLogAsync(AgentLogEntry entry, CancellationToken ct = default) => throw new NotSupportedException();
         public Task<IReadOnlyList<AgentLogEntry>> GetLogsAsync(int runId, long afterId = 0, CancellationToken ct = default) => throw new NotSupportedException();
         public Task<DiffSnapshot> AddDiffAsync(DiffSnapshot diff, CancellationToken ct = default) => throw new NotSupportedException();

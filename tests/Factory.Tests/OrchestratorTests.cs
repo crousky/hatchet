@@ -409,6 +409,77 @@ public class OrchestratorTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task A_failed_final_check_goes_to_the_bug_fixer_as_one_more_subtask()
+    {
+        // The real case: every subtask passed on its own, but a full rebuild found a member one subtask used and another never declared.
+        _repo.Write("src/Settings.cs", "var mods = HotkeyModifiers.None;\n");
+        await _git.StageAllAsync();
+        await _git.CommitStagedAsync("Add settings");
+        const string error = "src/Settings.cs(1,12): error CS0117: 'HotkeyModifiers' does not contain a definition for 'None'";
+        _llm.Enqueue(AgentRole.TaskPlanner, Plan("alpha"));
+        _llm.Enqueue(AgentRole.ContextSpecifier, Refined());
+        _llm.Enqueue(AgentRole.CodeGenerator, Patch("alpha.txt"));
+        _llm.Enqueue(AgentRole.BugFixer, Patch("src/Hotkeys.cs", "enum HotkeyModifiers { None, Alt }"));
+        _llm.Enqueue(AgentRole.StaticReviewer, Verdict(true), Verdict(true));
+        _commands.Results.Enqueue((0, "ok"));    // alpha's own check
+        _commands.Results.Enqueue((1, error));   // the final check
+        // Then the fix's check and the final check again pass.
+
+        var run = await WaitForAsync((await StartAsync()).Id, RunStatus.ReadyToMerge);
+
+        Assert.True(run.IntegrationPassed);
+        var subtasks = await _store.GetSubtasksAsync(run.Id);
+        Assert.Equal(2, subtasks.Count);
+        var fix = subtasks[1];
+        Assert.True(fix.IsIntegrationFix);
+        Assert.Equal(FactoryOrchestrator.IntegrationFixTitle, fix.Title);
+        Assert.Equal(SubtaskStatus.Completed, fix.Status);
+        Assert.Equal(["src/Settings.cs"], fix.TargetFilesToModify); // The file the error points at.
+        Assert.NotNull(fix.CommitSha);
+
+        var prompt = _llm.Calls.Single(c => c.Role == AgentRole.BugFixer).Prompt;
+        Assert.Contains("error CS0117", prompt);
+        Assert.Contains("HotkeyModifiers.None", prompt); // It sees the file the error is in.
+        Assert.DoesNotContain(_llm.Calls, c => c.Role == AgentRole.CodeGenerator && c.Prompt.Contains(FactoryOrchestrator.IntegrationFixTitle));
+        var logs = await _store.GetLogsAsync(run.Id);
+        Assert.Contains(logs, l => l.Message.StartsWith("The final check failed, so the Bug Fixer takes it on as subtask 2"));
+        Assert.Contains(logs, l => l.Message.Contains(": fix(integrate): Make the final check pass"));
+        Assert.Equal(["verify", "verify", "verify", "verify"], _commands.Commands); // alpha, final, the fix's check, final.
+    }
+
+    [Fact]
+    public async Task A_final_check_that_still_fails_after_its_fix_waits_for_a_person_who_can_hand_it_over_again()
+    {
+        _llm.Enqueue(AgentRole.TaskPlanner, Plan("alpha"));
+        _llm.Enqueue(AgentRole.ContextSpecifier, Refined());
+        _llm.Enqueue(AgentRole.CodeGenerator, Patch("alpha.txt"));
+        _llm.Enqueue(AgentRole.BugFixer, Patch("alpha.txt", "first"), Patch("alpha.txt", "second"));
+        _llm.Enqueue(AgentRole.StaticReviewer, Verdict(true), Verdict(true), Verdict(true));
+        _commands.Results.Enqueue((0, "ok"));                       // alpha's own check
+        _commands.Results.Enqueue((1, "error E1: broken"));         // final check
+        _commands.Results.Enqueue((0, "ok"));                       // the fix's own check
+        _commands.Results.Enqueue((1, "error E2: flaky at scale")); // final check again: no second automatic hand-off
+
+        var run = await WaitForAsync((await StartAsync()).Id, RunStatus.NeedsHuman);
+
+        Assert.Equal(PipelineStage.Integrate, run.PausedStage);
+        var brief = PauseBriefBuilder.Build(run, null)!;
+        Assert.Equal(PauseKind.FinalCheckFailed, brief.Kind);
+        Assert.Equal(["error E2: flaky at scale"], brief.Findings); // The errors, not just the exit code.
+        Assert.Equal("retry_fixer", brief.Options[0].Action);
+
+        _commands.Results.Enqueue((1, "error E2: flaky at scale")); // the check runs again before the hand-off
+        await _orchestrator.ResumeAsync(run.Id, HumanDecision.RetryFixer, "Give the tests their own folders.");
+        run = await WaitForAsync(run.Id, RunStatus.ReadyToMerge);
+
+        var fixes = (await _store.GetSubtasksAsync(run.Id)).Where(s => s.IsIntegrationFix).ToList();
+        Assert.Equal(2, fixes.Count);
+        Assert.Equal("Give the tests their own folders.", fixes[1].HumanGuidance);
+        Assert.Contains("Give the tests their own folders.", _llm.Calls.Last(c => c.Role == AgentRole.BugFixer).Prompt);
+        Assert.Equal("second", File.ReadAllText(_repo.File("alpha.txt")));
+    }
+
+    [Fact]
     public async Task A_rejected_fix_keeps_the_failure_it_was_meant_to_fix()
     {
         _llm.Enqueue(AgentRole.TaskPlanner, Plan("alpha"));
@@ -888,22 +959,27 @@ public class OrchestratorTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task Failed_integration_pauses_and_resume_reruns_only_integration()
+    public async Task Failed_integration_pauses_after_its_fix_and_resume_reruns_only_integration()
     {
         _llm.Enqueue(AgentRole.TaskPlanner, Plan("alpha"));
         _llm.Enqueue(AgentRole.ContextSpecifier, Refined());
         _llm.Enqueue(AgentRole.CodeGenerator, Patch("alpha.txt"));
-        _llm.Enqueue(AgentRole.StaticReviewer, Verdict(true));
-        _commands.Results.Enqueue((0, "ok"));
-        _commands.Results.Enqueue((1, "integration broke"));
+        _llm.Enqueue(AgentRole.BugFixer, Patch("alpha.txt", "fixed"));
+        _llm.Enqueue(AgentRole.StaticReviewer, Verdict(true), Verdict(true));
+        _commands.Results.Enqueue((0, "ok"));                 // alpha's own check
+        _commands.Results.Enqueue((1, "integration broke"));  // final check: handed to the Bug Fixer
+        _commands.Results.Enqueue((0, "ok"));                 // the fix's own check
+        _commands.Results.Enqueue((1, "integration broke"));  // final check again: a person decides
         var run = await WaitForAsync((await StartAsync()).Id, RunStatus.NeedsHuman);
         Assert.False(run.IntegrationPassed);
 
+        // A person fixed and committed it, so the plain resume only runs the check, with no second hand-off.
         await _orchestrator.ResumeAsync(run.Id, HumanDecision.Resume, null);
         run = await WaitForAsync(run.Id, RunStatus.ReadyToMerge);
 
         Assert.True(run.IntegrationPassed);
         Assert.Single(_llm.Calls, c => c.Role == AgentRole.CodeGenerator);
+        Assert.Single(_llm.Calls, c => c.Role == AgentRole.BugFixer);
     }
 
     [Fact]
@@ -1898,7 +1974,8 @@ public class OrchestratorTests : IAsyncLifetime
         {
             Id = s.Id, RunId = s.RunId, Order = s.Order, Title = s.Title, Description = s.Description,
             TargetFilesToModify = s.TargetFilesToModify, TargetFilesToCreate = s.TargetFilesToCreate, ContextFilesToRead = s.ContextFilesToRead,
-            Skills = [.. s.Skills], VerificationCommand = s.VerificationCommand, CommandApproved = s.CommandApproved, Status = s.Status, FixAttempts = s.FixAttempts, ReviewFixAttempts = s.ReviewFixAttempts,
+            Skills = [.. s.Skills], VerificationCommand = s.VerificationCommand, CommandApproved = s.CommandApproved, Status = s.Status, IsIntegrationFix = s.IsIntegrationFix,
+            FixAttempts = s.FixAttempts, ReviewFixAttempts = s.ReviewFixAttempts,
             LastFailure = s.LastFailure, FixHistory = [.. s.FixHistory], HumanGuidance = s.HumanGuidance, RefinedSpecJson = s.RefinedSpecJson,
             SummaryOfChanges = s.SummaryOfChanges, ReviewJson = s.ReviewJson, CommitSha = s.CommitSha
         };
@@ -1966,6 +2043,16 @@ public class OrchestratorTests : IAsyncLifetime
                 }
             }
             return Task.CompletedTask;
+        }
+
+        public Task<FactorySubtask> AddSubtaskAsync(FactorySubtask subtask, CancellationToken ct = default)
+        {
+            lock (_gate)
+            {
+                subtask.Id = _nextId++;
+                _subtasks.Add(Clone(subtask));
+            }
+            return Task.FromResult(subtask);
         }
 
         public Task<AgentLogEntry> AppendLogAsync(AgentLogEntry entry, CancellationToken ct = default)

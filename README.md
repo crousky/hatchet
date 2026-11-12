@@ -56,7 +56,7 @@ Hatchet works from an architecture spec: a markdown document describing the stru
 | Verify | | | | Runs your command. A failure goes to the Fixer, and the Reviewer doesn't run until it passes. |
 | Review | Static Reviewer | `xhigh` | 0.3 | Checks the diff against the refined spec. Approval commits as `feat(subtask): ...`. |
 | Fix | Bug Fixer | `xhigh` | 0.2 | Runs only after a failed Verify or a rejected Review. Gets 3 attempts before the first review, and 3 more after it. |
-| Integrate | | | | Runs the full check once more, then offers one-click merge or a PR draft. |
+| Integrate | | | | Runs the full check once more, then offers one-click merge or a PR draft. If it fails, the Bug Fixer gets the errors as one more subtask, "Make the final check pass", which is reviewed and committed as `fix(integrate): ...`. |
 
 Roles differ by system prompt, JSON schema, temperature and `reasoning_effort`, all of which can be changed in Settings:
 

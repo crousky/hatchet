@@ -68,6 +68,15 @@ public sealed class EfRunStore(IDbContextFactory<FactoryDbContext> factory) : IR
         await transaction.CommitAsync(ct);
     }
 
+    public async Task<FactorySubtask> AddSubtaskAsync(FactorySubtask subtask, CancellationToken ct = default)
+    {
+        await using var db = await factory.CreateDbContextAsync(ct);
+        db.Subtasks.Add(subtask);
+        await db.SaveChangesAsync(ct);
+        db.Entry(subtask).State = EntityState.Detached;
+        return subtask;
+    }
+
     public async Task<AgentLogEntry> AppendLogAsync(AgentLogEntry entry, CancellationToken ct = default)
     {
         await using var db = await factory.CreateDbContextAsync(ct);

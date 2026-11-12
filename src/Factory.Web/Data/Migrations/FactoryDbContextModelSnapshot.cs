@@ -296,6 +296,9 @@ namespace Factory.Web.Data.Migrations
                     b.Property<string>("HumanGuidance")
                         .HasColumnType("TEXT");
 
+                    b.Property<bool>("IsIntegrationFix")
+                        .HasColumnType("INTEGER");
+
                     b.Property<string>("LastFailure")
                         .HasColumnType("TEXT");
 

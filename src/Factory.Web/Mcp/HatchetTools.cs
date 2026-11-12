@@ -164,7 +164,7 @@ public sealed class HatchetTools(FactoryOrchestrator orchestrator, IRunStore sto
     [Description("""
         Continues a paused run. action is one of:
         - resume: carry on from where it stopped.
-        - retry_fixer: send the last failure, with your guidance, to the Bug Fixer with a fresh budget of attempts.
+        - retry_fixer: send the last failure, with your guidance, to the Bug Fixer with a fresh budget of attempts. On a failed final check, this hands the check's errors to the Bug Fixer as one more subtask, then runs the final check again.
         - reverify: run the checks again on the working tree as it is, for example after you fixed the code yourself.
         - restart_subtask: discard the subtask's uncommitted changes and build it again.
         - skip_subtask: discard its changes and move on to the next subtask.

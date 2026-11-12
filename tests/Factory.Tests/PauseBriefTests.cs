@@ -110,14 +110,26 @@ public class PauseBriefTests
     }
 
     [Fact]
-    public void A_failed_final_check_says_the_fix_must_be_committed()
+    public void A_failed_final_check_offers_the_fixer_and_says_a_hand_fix_must_be_committed()
     {
         var brief = PauseBriefBuilder.Build(Run("The final check failed: `dotnet test` exited with code 1.", PipelineStage.Integrate), null)!;
 
         Assert.Equal(PauseKind.FinalCheckFailed, brief.Kind);
-        var option = Assert.Single(brief.Options);
-        Assert.Equal("Run the final check again", option.Label);
-        Assert.Contains("committed", option.YouProvide);
+        Assert.Equal(["retry_fixer", "resume"], brief.Options.Select(o => o.Action));
+        Assert.Equal("Hand to the Fixer", brief.Options[0].Label);
+        Assert.Equal("Run the final check again", brief.Options[1].Label);
+        Assert.Contains("committed", brief.Options[1].YouProvide);
+        Assert.Equal(["The final check failed: `dotnet test` exited with code 1."], brief.Findings);
+    }
+
+    [Fact]
+    public void A_failed_final_check_shows_its_errors()
+    {
+        var reason = "The final check failed: `dotnet build` exited with code 1.\nErrors:\nA.cs(1,2): error CS0117: no None\nB.xaml(3,4): error MC4102: not supported";
+        var brief = PauseBriefBuilder.Build(Run(reason, PipelineStage.Integrate), null)!;
+
+        Assert.Equal(["A.cs(1,2): error CS0117: no None", "B.xaml(3,4): error MC4102: not supported"], brief.Findings);
+        Assert.StartsWith("The final check failed: `dotnet build` exited with code 1. Each subtask", brief.Why);
     }
 
     [Fact]
