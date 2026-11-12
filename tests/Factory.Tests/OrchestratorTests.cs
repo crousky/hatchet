@@ -409,6 +409,27 @@ public class OrchestratorTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task A_rejected_fix_keeps_the_failure_it_was_meant_to_fix()
+    {
+        _llm.Enqueue(AgentRole.TaskPlanner, Plan("alpha"));
+        _llm.Enqueue(AgentRole.ContextSpecifier, Refined());
+        _llm.Enqueue(AgentRole.CodeGenerator, Patch("alpha.txt", "broken"));
+        var unappliable = JsonSerializer.Serialize(new FilePatchSetResponse("Edit alpha",
+            [new FileOperationDto("alpha.txt", FileActions.Edit, "<<<<<<< SEARCH\nnot in the file\n=======\nfixed\n>>>>>>> REPLACE\n")]),
+            LlmSchemas.SerializerOptions);
+        _llm.Enqueue(AgentRole.BugFixer, unappliable, Patch("alpha.txt", "fixed"));
+        _llm.Enqueue(AgentRole.StaticReviewer, Verdict(true));
+        _commands.Results.Enqueue((1, "error CS0723: Cannot declare a variable of static type 'ProjectScanner'"));
+
+        var run = await WaitForAsync((await StartAsync()).Id, RunStatus.ReadyToMerge);
+
+        Assert.Equal("fixed", File.ReadAllText(_repo.File("alpha.txt")));
+        var second = _llm.Calls.Where(c => c.Role == AgentRole.BugFixer).Last().Prompt;
+        Assert.Contains("nothing was written", second);
+        Assert.Contains("error CS0723", second); // Not just the rejection: the build error is still in front of the fixer.
+    }
+
+    [Fact]
     public void Only_real_types_the_spec_names_count_as_taken_out()
     {
         _repo.Write("src/Ui/FancyPicker.cs", "public sealed class FancyPicker { }\n");
@@ -446,6 +467,26 @@ public class OrchestratorTests : IAsyncLifetime
         // A URL's slashes don't start a comment, so names after it still count.
         _repo.Write("alpha.txt", "var u = \"https://example.com\"; var x = In.A;\n");
         Assert.Equal(["In"], FactoryOrchestrator.DroppedRequiredTypes(_repo.Path, subtask, Writes("var u = 1;"), []));
+    }
+
+    [Fact]
+    public void An_edit_is_judged_by_the_file_it_leaves_not_by_its_blocks()
+    {
+        // The real case: a fix added a using line to ProjectIndexTests.cs with an EDIT. Its blocks don't name the class,
+        // so reading them as the whole file made the class look taken out, and every fix was refused.
+        _repo.Write("src/ProjectIndexTests.cs", "using Xunit;\n\npublic class ProjectIndexTests\n{\n    public void Works() { }\n}\n");
+        var subtask = new FactorySubtask { Title = "index", Description = "ProjectIndexTests cover the index." };
+
+        FilePatchSetResponse Edits(string blocks) => new("x", [new FileOperationDto("src/ProjectIndexTests.cs", FileActions.Edit, blocks)]);
+
+        Assert.Empty(FactoryOrchestrator.DroppedRequiredTypes(_repo.Path, subtask,
+            Edits("<<<<<<< SEARCH\nusing Xunit;\n=======\nusing Xunit;\nusing Zingiber.Core.Indexing;\n>>>>>>> REPLACE\n"), []));
+        // An edit that does take the class out is still refused.
+        Assert.Equal(["ProjectIndexTests"], FactoryOrchestrator.DroppedRequiredTypes(_repo.Path, subtask,
+            Edits("<<<<<<< SEARCH\npublic class ProjectIndexTests\n=======\npublic class Renamed\n>>>>>>> REPLACE\n"), []));
+        // An edit that can't apply is left to the patcher, which explains what's wrong with it.
+        Assert.Empty(FactoryOrchestrator.DroppedRequiredTypes(_repo.Path, subtask,
+            Edits("<<<<<<< SEARCH\nnot in the file\n=======\nx\n>>>>>>> REPLACE\n"), []));
     }
 
     [Fact]

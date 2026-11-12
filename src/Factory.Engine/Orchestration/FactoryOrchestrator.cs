@@ -1143,6 +1143,17 @@ public sealed partial class FactoryOrchestrator(
     private const string RefusedFixLead = "The last fix was not applied, because it took out ";
     private const string FailureToFixLead = "The failure it was meant to fix:";
 
+    /// <summary>
+    /// The build, test or review failure under <paramref name="lastFailure"/>, without the notes about fixes that were
+    /// refused or rejected on the way, so those notes never replace the failure itself.
+    /// </summary>
+    private static string FailureBeingFixed(string? lastFailure)
+    {
+        var failure = lastFailure ?? "(no failure was recorded)";
+        var marker = failure.LastIndexOf(FailureToFixLead, StringComparison.Ordinal);
+        return marker >= 0 ? failure[(marker + FailureToFixLead.Length)..].TrimStart() : failure;
+    }
+
     [GeneratedRegex(@"\b[A-Za-z_][A-Za-z0-9_]*\b")]
     private static partial Regex Identifier();
 
@@ -1181,10 +1192,14 @@ public sealed partial class FactoryOrchestrator(
             if (Read(path) is { } content) before.UnionWith(CodeNames(content).Where(named.Contains));
         if (before.Count == 0) return [];
 
-        // After the fix: what it writes, and the subtask's other changed files as they are.
+        // After the fix: each file it touches as the patch would leave it (an EDIT carries only its SEARCH/REPLACE blocks,
+        // so the blocks alone would make everything else in the file look taken out), and the subtask's other changed files as they are.
+        IReadOnlyDictionary<string, string?> preview;
+        try { preview = FilePatcher.Preview(repositoryPath, patch.Operations); }
+        catch (PatchRejectedException) { return []; } // Applying it fails with a clearer message than this guard's.
         var after = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var operation in patch.Operations.Where(o => !o.Action.Equals("DELETE", StringComparison.OrdinalIgnoreCase)))
-            after.UnionWith(CodeNames(operation.FileContent ?? ""));
+        foreach (var content in preview.Values)
+            if (content is not null) after.UnionWith(CodeNames(content));
         foreach (var path in changedFiles.Select(NormalizePath).Where(p => !patched.Contains(p)))
             if (Read(path) is { } content) after.UnionWith(CodeNames(content));
 
@@ -1200,9 +1215,7 @@ public sealed partial class FactoryOrchestrator(
     {
         var names = string.Join(", ", dropped.Select(n => $"`{n}`"));
         var (it, isIt) = dropped.Count == 1 ? ("it", "it is") : ("them", "they are");
-        var failure = subtask.LastFailure ?? "(no failure was recorded)";
-        var marker = failure.IndexOf(FailureToFixLead, StringComparison.Ordinal);
-        if (marker >= 0) failure = failure[(marker + FailureToFixLead.Length)..].TrimStart();
+        var failure = FailureBeingFixed(subtask.LastFailure);
 
         subtask.LastFailure = $"{RefusedFixLead}{names}, which the specification asks for. Keep {it} and fix how {isIt} used instead. "
             + $"The definitions below show {(dropped.Count == 1 ? "its" : "their")} namespace and members, where Hatchet found them.\n\n{FailureToFixLead}\n{failure}";
@@ -1336,7 +1349,9 @@ public sealed partial class FactoryOrchestrator(
         }
         catch (PatchRejectedException ex)
         {
-            subtask.LastFailure = $"The previous patch was rejected and nothing was written: {ex.Message}";
+            // Keep the failure the patch was meant to fix, or the next fix works blind, from the rejection alone.
+            var rejection = $"The previous patch was rejected and nothing was written: {ex.Message}";
+            subtask.LastFailure = subtask.LastFailure is null ? rejection : $"{rejection}\n\n{FailureToFixLead}\n{FailureBeingFixed(subtask.LastFailure)}";
             await store.UpdateSubtaskAsync(subtask, ct);
             await LogAsync(run.Id, subtask.Id, AgentLogKind.Warning, stage, subtask.LastFailure, ct);
             return false;
