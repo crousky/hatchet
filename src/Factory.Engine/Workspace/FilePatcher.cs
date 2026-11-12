@@ -28,6 +28,31 @@ public static class FilePatcher
     /// </summary>
     public static PatchResult Apply(string repositoryPath, IReadOnlyList<FileOperationDto> operations)
     {
+        var (state, applied, warnings) = Plan(repositoryPath, operations);
+        foreach (var (path, content) in state)
+        {
+            if (content is null)
+            {
+                if (File.Exists(path)) File.Delete(path);
+                continue;
+            }
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            WritePreservingStyle(path, content, File.Exists(path));
+        }
+
+        return new PatchResult(applied, warnings);
+    }
+
+    /// <summary>
+    /// What each file the operations touch would hold once they're applied, keyed by full path, with null for a deleted
+    /// file. Writes nothing. Code that judges a patch must read this, not FileContent: an EDIT's FileContent is only
+    /// its SEARCH/REPLACE blocks, not the file. Throws <see cref="PatchRejectedException"/> as Apply would.
+    /// </summary>
+    public static IReadOnlyDictionary<string, string?> Preview(string repositoryPath, IReadOnlyList<FileOperationDto> operations) =>
+        Plan(repositoryPath, operations).State;
+
+    private static (Dictionary<string, string?> State, List<string> Applied, List<string> Warnings) Plan(string repositoryPath, IReadOnlyList<FileOperationDto> operations)
+    {
         var root = Path.GetFullPath(repositoryPath);
         var resolved = operations
             .Select(op => (Op: op, Action: NormalizeAction(op), Path: ResolveSafePath(root, op.RelativeFilePath)))
@@ -73,18 +98,7 @@ public static class FilePatcher
             applied.Add($"{action} {relative}");
         }
 
-        foreach (var (path, content) in state)
-        {
-            if (content is null)
-            {
-                if (File.Exists(path)) File.Delete(path);
-                continue;
-            }
-            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-            WritePreservingStyle(path, content, File.Exists(path));
-        }
-
-        return new PatchResult(applied, warnings);
+        return (state, applied, warnings);
     }
 
     private static void RejectTruncation(string relative, string existing, string content)
