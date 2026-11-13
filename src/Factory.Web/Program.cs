@@ -11,15 +11,15 @@ using Microsoft.EntityFrameworkCore;
 
 var builder = WebApplication.CreateBuilder(args);
 
+// Hatchet's data folder: the database, the MCP token and ad hoc work. Hatchet:DataDirectory moves all of it, for tests.
+var hatchetData = builder.Configuration["Hatchet:DataDirectory"]
+    ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Hatchet");
+Directory.CreateDirectory(hatchetData);
 var connectionString = builder.Configuration.GetConnectionString("Factory");
-if (string.IsNullOrEmpty(connectionString))
-{
-    var dataDirectory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Hatchet");
-    Directory.CreateDirectory(dataDirectory);
-    connectionString = $"Data Source={Path.Combine(dataDirectory, "hatchet.db")}";
-}
+if (string.IsNullOrEmpty(connectionString)) connectionString = $"Data Source={Path.Combine(hatchetData, "hatchet.db")}";
+builder.Services.AddSingleton(new McpToken(hatchetData));
 
-// A pasted architecture spec arrives as one SignalR message, and the default limit is 32 KB.
+// The spec editor sends a pasted architecture spec as one SignalR message, and the default limit is 32 KB.
 builder.Services.AddRazorComponents()
     .AddInteractiveServerComponents()
     .AddHubOptions(options => options.MaximumReceiveMessageSize = 16 * 1024 * 1024);
@@ -36,7 +36,6 @@ builder.Services.AddSingleton<FactoryOrchestrator>();
 
 // Ad hoc requests: status reports, running the software, commands and questions, kept per repository. Commands run
 // in isolated copies of the latest commit under Hatchet's data folder.
-var hatchetData = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Hatchet");
 builder.Services.AddSingleton<IAdHocStore, EfAdHocStore>();
 builder.Services.AddSingleton<IClaudeAsker>(_ => new ClaudeCodeAsker(Path.Combine(hatchetData, "claude-code")));
 builder.Services.AddSingleton(sp => new AdHocManager(
@@ -63,6 +62,26 @@ builder.Services.AddHostedService<OrchestratorLifetime>();
 
 var app = builder.Build();
 
+// Hatchet is for this machine only. A null address is the in-memory test server. This runs before anything else.
+app.Use(async (context, next) =>
+{
+    if (context.Connection.RemoteIpAddress is { } address && !Program.IsLoopback(address))
+    {
+        context.Response.StatusCode = StatusCodes.Status403Forbidden;
+        return;
+    }
+    await next();
+});
+
+app.Use(async (context, next) =>
+{
+    var headers = context.Response.Headers;
+    headers.XContentTypeOptions = "nosniff";
+    headers["Referrer-Policy"] = "no-referrer";
+    headers.ContentSecurityPolicy = "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss:; object-src 'none'; base-uri 'self'; frame-ancestors 'self'";
+    await next();
+});
+
 await using (var scope = app.Services.CreateAsyncScope())
 {
     var factory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<FactoryDbContext>>();
@@ -78,14 +97,28 @@ if (!app.Environment.IsDevelopment())
     app.UseExceptionHandler("/error", createScopeForErrors: true);
 }
 
-// A web page in the user's browser could otherwise reach the MCP tools, including pages of apps Hatchet builds and
-// serves on other localhost ports. MCP clients send no Origin; browsers always do, so only Hatchet's own pages get through.
+// A web page in the user's browser could otherwise reach Hatchet, including pages of apps it builds and serves on other
+// localhost ports. Browsers always send an Origin on cross-site requests and WebSockets, so only Hatchet's own pages get
+// through. Clients that send none, such as MCP clients and curl, pass here, and MCP then needs its token.
 app.Use(async (context, next) =>
 {
-    if (context.Request.Path.StartsWithSegments(McpPath) && context.Request.Headers.Origin.Count > 0
+    if (context.Request.Headers.Origin.Count > 0
         && !string.Equals(context.Request.Headers.Origin.ToString(), $"{context.Request.Scheme}://{context.Request.Host}", StringComparison.OrdinalIgnoreCase))
     {
         context.Response.StatusCode = StatusCodes.Status403Forbidden;
+        return;
+    }
+    await next();
+});
+
+// MCP tools can run commands, so every request to them must carry the install's token.
+app.Use(async (context, next) =>
+{
+    if (context.Request.Path.StartsWithSegments(McpPath)
+        && !context.RequestServices.GetRequiredService<McpToken>().Matches(context.Request.Headers.Authorization.ToString()))
+    {
+        context.Response.Headers.WWWAuthenticate = "Bearer";
+        context.Response.StatusCode = StatusCodes.Status401Unauthorized;
         return;
     }
     await next();
@@ -110,6 +143,10 @@ app.Run();
 public partial class Program
 {
     public const string McpPath = "/mcp";
+
+    /// <summary>Loopback, including an IPv4 address carried inside an IPv6 one.</summary>
+    public static bool IsLoopback(System.Net.IPAddress address) =>
+        System.Net.IPAddress.IsLoopback(address.IsIPv4MappedToIPv6 ? address.MapToIPv4() : address);
 
     /// <summary>The first address Hatchet listens on, for links and setup commands.</summary>
     public static string BaseUrl(IConfiguration configuration) =>

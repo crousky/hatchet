@@ -18,13 +18,13 @@
         <div class="reconnect-card">
             <div class="reconnect-title">Connection to Hatchet lost</div>
             <div class="reconnect-text">Running pipelines keep going on the server. This page will reconnect if it can.</div>
-            <button class="btn" onclick="location.reload()">Reload page</button>
+            <button class="btn" data-reload>Reload page</button>
         </div>
     </div>
 
     <div id="blazor-error-ui">
         <span>Hatchet hit an error and this page stopped updating. Running pipelines are not affected.</span>
-        <button class="btn btn-small" onclick="location.reload()">Reload</button>
+        <button class="btn btn-small" data-reload>Reload</button>
     </div>
 
     <script src="@Assets["_framework/blazor.web.js"]"></script>
