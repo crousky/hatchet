@@ -25,6 +25,21 @@ public sealed class ShellCommandRunner : ICommandRunner
         "MSBUILD_EXE_PATH", "MSBuildSDKsPath", "MSBuildExtensionsPath", "MSBuildLoadMicrosoftTargetsReadOnly"
     ];
 
+    private static readonly string[] SecretVariableNames =
+    [
+        "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GITHUB_TOKEN", "GH_TOKEN", "NPM_TOKEN", "NUGET_API_KEY",
+        "AWS_SESSION_TOKEN", "AWS_SECRET_ACCESS_KEY"
+    ];
+
+    private static readonly string[] SecretVariableSuffixes = ["_KEY", "_TOKEN", "_SECRET", "_PASSWORD", "_PAT"];
+    private static readonly string[] SecretVariableFragments = ["SECRET", "PASSWORD", "CREDENTIAL"];
+
+    /// <summary>True for variables that look like credentials, which a build or test command must not inherit.</summary>
+    internal static bool IsSecretVariable(string name) =>
+        SecretVariableNames.Contains(name, StringComparer.OrdinalIgnoreCase)
+        || SecretVariableSuffixes.Any(s => name.EndsWith(s, StringComparison.OrdinalIgnoreCase))
+        || SecretVariableFragments.Any(f => name.Contains(f, StringComparison.OrdinalIgnoreCase));
+
     public async Task<CommandResult> RunAsync(string command, string workingDirectory, TimeSpan timeout, Action<string>? onLine, CancellationToken ct)
     {
         var info = new ProcessStartInfo
@@ -52,6 +67,7 @@ public sealed class ShellCommandRunner : ICommandRunner
         }
 
         foreach (var name in InheritedVariablesToClear) info.Environment.Remove(name);
+        foreach (var name in info.Environment.Keys.Where(IsSecretVariable).ToList()) info.Environment.Remove(name);
         info.Environment["CI"] = "true";
         info.Environment["NO_COLOR"] = "1";
         info.Environment["DOTNET_NOLOGO"] = "1";
@@ -73,7 +89,10 @@ public sealed class ShellCommandRunner : ICommandRunner
         process.OutputDataReceived += (_, e) => { if (e.Data is null) stdoutClosed.TrySetResult(); else capture.Add(e.Data); };
         process.ErrorDataReceived += (_, e) => { if (e.Data is null) stderrClosed.TrySetResult(); else capture.Add(e.Data); };
 
+        // On Windows the job kills everything the command started when it closes, however the command ends.
+        using var job = ProcessJob.TryCreate();
         process.Start();
+        var assigned = job?.TryAssign(process) ?? false;
         process.StandardInput.Close();
         process.BeginOutputReadLine();
         process.BeginErrorReadLine();
@@ -85,14 +104,19 @@ public sealed class ShellCommandRunner : ICommandRunner
         try
         {
             await exited.Task.WaitAsync(timeoutSource.Token);
+            // Background children are not waited for. Without a job (Unix, or assignment failed) they are killed here best-effort.
+            if (!assigned) KillTree(process);
         }
         catch (OperationCanceledException)
         {
             KillTree(process);
+            job?.Dispose();
             ct.ThrowIfCancellationRequested();
             timedOut = true;
             capture.Add($"[Hatchet] Timed out after {timeout.TotalSeconds:0} seconds; the process tree was killed.");
         }
+
+        job?.Dispose();
 
         // A grandchild can hold the pipes open past exit, so draining is bounded.
         await Task.WhenAny(Task.WhenAll(stdoutClosed.Task, stderrClosed.Task), Task.Delay(TimeSpan.FromSeconds(3), CancellationToken.None));
