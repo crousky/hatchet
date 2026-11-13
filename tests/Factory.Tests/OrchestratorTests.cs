@@ -674,6 +674,14 @@ public class OrchestratorTests : IAsyncLifetime
         Assert.Equal(["package.json"], Tampered(("./package.json", "EDIT")));
         Assert.Equal(["App.sln", "tests/Foo.Tests.csproj", "go.mod"], Tampered(("App.sln", "EDIT"), ("tests/Foo.Tests.csproj", "OVERWRITE"), ("go.mod", "DELETE")));
         Assert.Empty(Tampered(("src/Foo.csproj", "EDIT"), ("src/Latest.cs", "DELETE")));
+        Assert.Equal(["test_foo.py", "pkg/foo_test.go", "FooTests.cs", "web/foo.spec.ts", "Specs/a.rb"],
+            Tampered(("test_foo.py", "DELETE"), ("pkg/foo_test.go", "DELETE"), ("FooTests.cs", "DELETE"), ("web/foo.spec.ts", "DELETE"), ("Specs/a.rb", "DELETE")));
+        Assert.Empty(Tampered(("latest.txt", "DELETE"), ("contest.cs", "DELETE"), ("src/attest.md", "DELETE"), ("testing-notes.md", "DELETE")));
+        Assert.Equal(
+            ["Directory.Build.props", "src/Directory.Build.targets", "build/Common.targets", "pyproject.toml", "conftest.py", "setup.cfg", "build.gradle", "build.gradle.kts", "pom.xml", "jest.config.ts", "vitest.config.mjs"],
+            Tampered(("Directory.Build.props", "EDIT"), ("src/Directory.Build.targets", "EDIT"), ("build/Common.targets", "EDIT"), ("pyproject.toml", "EDIT"), ("conftest.py", "EDIT"),
+                ("setup.cfg", "EDIT"), ("build.gradle", "EDIT"), ("build.gradle.kts", "EDIT"), ("pom.xml", "EDIT"), ("jest.config.ts", "EDIT"), ("vitest.config.mjs", "EDIT")));
+        Assert.Empty(Tampered(("src/jest.configuration.md", "EDIT"), ("README.md", "EDIT")));
         Assert.Empty(Tampered(("Makefile", "EDIT"))); // A planned target.
     }
 

@@ -1332,23 +1332,36 @@ public sealed partial class FactoryOrchestrator(
         return touched.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
     }
 
-    private static readonly string[] TestFolders = ["test", "tests", "__tests__", "spec"];
-    private static readonly string[] CheckFiles = ["package.json", "pytest.ini", "tox.ini", "makefile", "cargo.toml", "go.mod"];
+    private static readonly string[] TestFolders = ["test", "tests", "__tests__", "spec", "specs"];
+    private static readonly string[] CheckFiles =
+    [
+        "package.json", "pytest.ini", "tox.ini", "makefile", "cargo.toml", "go.mod", "directory.build.props", "directory.build.targets",
+        "pyproject.toml", "conftest.py", "setup.cfg", "build.gradle", "build.gradle.kts", "pom.xml",
+    ];
 
+    /// <summary>
+    /// A test folder in the path, or a file named like a test: test_x, x_test.go, x.test.js, x.spec.ts, XTest.cs, XTests.cs.
+    /// Not a loose "test" in the name, which would take latest.txt and contest.cs.
+    /// </summary>
     private static bool LooksLikeTestFile(string path)
     {
         var segments = path.Split('/', StringSplitOptions.RemoveEmptyEntries);
         var name = segments[^1];
+        var stem = Path.GetFileNameWithoutExtension(name);
         return segments[..^1].Any(s => TestFolders.Contains(s, StringComparer.OrdinalIgnoreCase))
-            || name.Contains("Test", StringComparison.Ordinal)
+            || name.StartsWith("test_", StringComparison.OrdinalIgnoreCase)
+            || name.Contains("_test.", StringComparison.OrdinalIgnoreCase)
             || name.Contains(".test.", StringComparison.OrdinalIgnoreCase) || name.Contains(".spec.", StringComparison.OrdinalIgnoreCase)
-            || name.Contains("_test.", StringComparison.OrdinalIgnoreCase);
+            || stem.EndsWith("Test", StringComparison.Ordinal) || stem.EndsWith("Tests", StringComparison.Ordinal)
+            || stem.EndsWith("_test", StringComparison.OrdinalIgnoreCase) || stem.EndsWith("_tests", StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool DefinesCheck(string path)
     {
         var name = path[(path.LastIndexOf('/') + 1)..];
         return CheckFiles.Contains(name, StringComparer.OrdinalIgnoreCase)
+            || name.EndsWith(".targets", StringComparison.OrdinalIgnoreCase)
+            || name.StartsWith("jest.config.", StringComparison.OrdinalIgnoreCase) || name.StartsWith("vitest.config.", StringComparison.OrdinalIgnoreCase)
             || name.EndsWith(".sln", StringComparison.OrdinalIgnoreCase) || name.EndsWith(".slnx", StringComparison.OrdinalIgnoreCase)
             || ((name.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase) || name.EndsWith(".fsproj", StringComparison.OrdinalIgnoreCase))
                 && name.Contains("Test", StringComparison.OrdinalIgnoreCase));
