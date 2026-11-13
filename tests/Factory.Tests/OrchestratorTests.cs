@@ -601,6 +601,40 @@ public class OrchestratorTests : IAsyncLifetime
         Assert.Contains("Use the other API", _llm.Calls.Last(c => c.Role == AgentRole.BugFixer).Prompt);
     }
 
+    private static string PlanCreating(string title, params string[] files) => JsonSerializer.Serialize(
+        new TaskGraphResponse([new SubtaskDto(1, title, $"Build {title}", [], files.ToList(), [], "")]), LlmSchemas.SerializerOptions);
+
+    private static string Patch(params (string File, string Action, string Content)[] operations) => JsonSerializer.Serialize(
+        new FilePatchSetResponse("Changed files", operations.Select(o => new FileOperationDto(o.File, o.Action, o.Content)).ToList()), LlmSchemas.SerializerOptions);
+
+    [Fact]
+    public async Task A_write_to_ci_config_outside_the_subtasks_files_pauses_the_run_and_writes_nothing()
+    {
+        _llm.Enqueue(AgentRole.TaskPlanner, Plan("alpha"));
+        _llm.Enqueue(AgentRole.ContextSpecifier, Refined());
+        _llm.Enqueue(AgentRole.CodeGenerator, Patch(("alpha.txt", FileActions.Create, "code"), ("./.github/workflows/x.yml", FileActions.Create, "on: push")));
+
+        var run = await WaitForAsync((await StartAsync()).Id, RunStatus.NeedsHuman);
+
+        Assert.Contains("wants to write `.github/workflows/x.yml`", run.PauseReason);
+        Assert.False(File.Exists(_repo.File(".github/workflows/x.yml")));
+        Assert.False(File.Exists(_repo.File("alpha.txt"))); // The whole patch is held back.
+        Assert.Equal(SubtaskStatus.NeedsHuman, (await _store.GetSubtasksAsync(run.Id)).Single().Status);
+    }
+
+    [Fact]
+    public async Task A_write_to_ci_config_is_applied_when_the_plan_lists_it()
+    {
+        _llm.Enqueue(AgentRole.TaskPlanner, PlanCreating("alpha", "alpha.txt", ".github/workflows/x.yml"));
+        _llm.Enqueue(AgentRole.ContextSpecifier, Refined());
+        _llm.Enqueue(AgentRole.CodeGenerator, Patch(("alpha.txt", FileActions.Create, "code"), (".github/workflows/x.yml", FileActions.Create, "on: push")));
+        _llm.Enqueue(AgentRole.StaticReviewer, Verdict(true));
+
+        await WaitForAsync((await StartAsync()).Id, RunStatus.ReadyToMerge);
+
+        Assert.True(File.Exists(_repo.File(".github/workflows/x.yml")));
+    }
+
     [Fact]
     public async Task Reverify_accepts_a_manual_fix_from_the_human()
     {

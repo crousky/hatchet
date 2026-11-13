@@ -923,9 +923,9 @@ public sealed partial class FactoryOrchestrator(
                 needsFix = true;
             }
         }
-        catch (Exception ex) when (ex is LlmException or GitException or IOException or UnauthorizedAccessException)
+        catch (Exception ex) when (ex is LlmException or GitException or IOException or UnauthorizedAccessException or GatePauseException)
         {
-            await LogAsync(run.Id, subtask.Id, AgentLogKind.Error, run.CurrentStage, ex.Message, CancellationToken.None);
+            if (ex is not GatePauseException) await LogAsync(run.Id, subtask.Id, AgentLogKind.Error, run.CurrentStage, ex.Message, CancellationToken.None);
             await PauseForSubtaskAsync(run, subtask, ex.Message, CancellationToken.None);
             return false;
         }
@@ -1346,6 +1346,7 @@ public sealed partial class FactoryOrchestrator(
         bool finished = true)
     {
         var run = context.Run;
+        await RequireNoUnplannedSensitiveWritesAsync(context, subtask, patch, stage, ct);
         PatchResult result;
         try
         {
@@ -1371,6 +1372,48 @@ public sealed partial class FactoryOrchestrator(
 
         await CaptureDiffAsync(context, subtask, stage, ct);
         return true;
+    }
+
+    /// <summary>A gate stopped the pipeline for a person. The message is the pause reason.</summary>
+    private sealed class GatePauseException(string message) : Exception(message);
+
+    /// <summary>The path as the patcher will resolve it, relative to the repository, so "./" and ".." can't hide it. Null if it won't resolve.</summary>
+    private static string? ResolvedRelativePath(string repositoryPath, string path)
+    {
+        try { return NormalizePath(Path.GetRelativePath(Path.GetFullPath(repositoryPath), FilePatcher.ResolveSafePath(repositoryPath, path))); }
+        catch (PatchRejectedException) { return null; } // Applying it fails with a clearer message than this gate's.
+    }
+
+    /// <summary>The subtask's planned targets, in the form <see cref="ResolvedRelativePath"/> gives.</summary>
+    private static HashSet<string> PlannedTargets(string repositoryPath, FactorySubtask subtask) =>
+        subtask.TargetFilesToModify.Concat(subtask.TargetFilesToCreate)
+            .Select(p => ResolvedRelativePath(repositoryPath, p) ?? NormalizePath(p))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// CI, agent, editor and hook config can run code or change how tools behave, so a patch may only touch them when
+    /// the subtask's plan, which a person approved or supplied, names them. Otherwise nothing is written and the run pauses.
+    /// </summary>
+    private async Task RequireNoUnplannedSensitiveWritesAsync(PipelineContext context, FactorySubtask subtask, FilePatchSetResponse patch, PipelineStage stage, CancellationToken ct)
+    {
+        var repository = context.Task.RepositoryPath;
+        var planned = PlannedTargets(repository, subtask);
+        var unplanned = patch.Operations
+            .Select(o => ResolvedRelativePath(repository, o.RelativeFilePath))
+            .Where(p => p is not null && FilePatcher.IsSensitivePath(p) && !planned.Contains(p))
+            .Select(p => p!)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        if (unplanned.Count == 0) return;
+
+        var names = string.Join(", ", unplanned.Select(p => $"`{p}`"));
+        var reason = $"The change wants to write {names}, which can run code or change how tools behave and {(unplanned.Count == 1 ? "is" : "are")} not in this subtask's files. "
+            + "Nothing was written. Add the file to the subtask's files or to your guidance if it is really needed, or make the change yourself, then resume; otherwise retry or skip the subtask.";
+        // Kept as the failure, so "Hand to the Fixer" has something to work from.
+        subtask.LastFailure = subtask.LastFailure is null ? reason : $"{reason}\n\n{FailureToFixLead}\n{FailureBeingFixed(subtask.LastFailure)}";
+        await store.UpdateSubtaskAsync(subtask, ct);
+        await LogAsync(context.Run.Id, subtask.Id, AgentLogKind.Warning, stage, reason, ct);
+        throw new GatePauseException(reason);
     }
 
     /// <summary>Returns null when there is nothing to run yet: no command was given and no build or tests can be detected.</summary>
