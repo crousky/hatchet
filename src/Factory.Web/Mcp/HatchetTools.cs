@@ -92,7 +92,7 @@ public sealed class HatchetTools(FactoryOrchestrator orchestrator, IRunStore sto
         // A client may send null for a list or field it leaves empty.
         var edits = plan?.Select(step => new SubtaskEdit(null, step.Title ?? "", step.Description ?? "",
             step.FilesToModify ?? [], step.FilesToCreate ?? [], step.FilesToRead ?? [], step.VerificationCommand ?? "", step.Skills ?? [])).ToList();
-        var run = await Do(() => orchestrator.StartRunAsync(new NewRunRequest(repositoryPath, spec, title, verificationCommand, reviewPlanInHatchet), edits, ct));
+        var run = await Do(() => orchestrator.StartRunAsync(new NewRunRequest(repositoryPath, spec, title, verificationCommand, reviewPlanInHatchet, PlanReviewByUser: false), edits, ct));
         return await DescribeRunAsync(run.Id, ct);
     }
 
@@ -137,6 +137,7 @@ public sealed class HatchetTools(FactoryOrchestrator orchestrator, IRunStore sto
         Approves the plan of a run waiting for plan review, as it stands, and starts building.
         Verification commands proposed by Hatchet's own planner are dropped, because only the user can approve those, in Hatchet's UI.
         Those subtasks are checked with the run's verification command instead. Commands in a plan you supplied with start_run are kept.
+        Only works for a run you started yourself with reviewPlanInHatchet. A plan the user asked to review, such as one for a reported defect, or one longer than Hatchet builds unattended, is approved by the user in Hatchet's UI, and this refuses it.
         """ + " " + McpNotes.Data)]
     public async Task<RunDetails> ApprovePlan([Description("The run's id.")] int runId, CancellationToken ct = default)
     {
@@ -146,7 +147,7 @@ public sealed class HatchetTools(FactoryOrchestrator orchestrator, IRunStore sto
             .Select(s => new SubtaskEdit(s.Id, s.Title, s.Description, s.TargetFilesToModify, s.TargetFilesToCreate, s.ContextFilesToRead,
                 s.CommandApproved ? s.VerificationCommand : "", s.Skills))
             .ToList();
-        await Do(() => orchestrator.ApprovePlanAsync(runId, plan, ct));
+        await Do(() => orchestrator.ApprovePlanAsDrivingAgentAsync(runId, plan, ct));
         return await DescribeRunAsync(runId, ct);
     }
 
@@ -188,7 +189,8 @@ public sealed class HatchetTools(FactoryOrchestrator orchestrator, IRunStore sto
             _ => throw new McpException($"Unknown action \"{action}\". Use resume, retry_fixer, reverify, restart_subtask or skip_subtask.")
         };
         await RequireRunAsync(runId, ct);
-        await Do(() => orchestrator.ResumeAsync(runId, decision, guidance, ct));
+        // Guidance sent here is the driving agent's, and carries less weight with Hatchet's agents than the user's. retry_fixer is capped.
+        await Do(() => orchestrator.ResumeAsDrivingAgentAsync(runId, decision, guidance, ct));
         return await DescribeRunAsync(runId, ct);
     }
 

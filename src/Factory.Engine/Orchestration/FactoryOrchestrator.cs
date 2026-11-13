@@ -45,7 +45,8 @@ public sealed partial class FactoryOrchestrator(
     /// a restart, and nothing it asks for happens until the run's turn comes.
     /// </summary>
     /// <param name="Text">The plan feedback for <see cref="RequestKind.Regenerate"/>, or the guidance for <see cref="RequestKind.Resume"/>.</param>
-    private sealed record QueuedRequest(RequestKind Kind, HumanDecision Decision = HumanDecision.Resume, string? Text = null)
+    /// <param name="FromDrivingAgent">The resume came through MCP, so its guidance is the driving agent's and not the user's.</param>
+    private sealed record QueuedRequest(RequestKind Kind, HumanDecision Decision = HumanDecision.Resume, string? Text = null, bool FromDrivingAgent = false)
     {
         /// <summary>The status a run has while it waits with this request.</summary>
         public RunStatus WaitingStatus => Kind switch
@@ -258,6 +259,7 @@ public sealed partial class FactoryOrchestrator(
             ArchitectureSpec = request.ArchitectureSpec,
             VerificationCommand = command,
             RequirePlanApproval = request.RequirePlanApproval,
+            PlanReviewByUser = request.RequirePlanApproval && request.PlanReviewByUser,
             SuppliedPlanJson = plan is null ? null : JsonSerializer.Serialize(plan),
             ModelChoice = modelChoice
         };
@@ -304,6 +306,22 @@ public sealed partial class FactoryOrchestrator(
         Launch(runId, new QueuedRequest(RequestKind.Approve));
     }
 
+    /// <summary>
+    /// Approves a plan for an MCP client. A plan the user asked to review, in the UI or by filing a report, or one that came out
+    /// too long to build unattended, is the user's to approve, so the driving agent can't wave it through.
+    /// </summary>
+    public async Task ApprovePlanAsDrivingAgentAsync(int runId, IReadOnlyList<SubtaskEdit> plan, CancellationToken ct = default)
+    {
+        var run = await store.GetRunAsync(runId, ct);
+        RequireStatus(run, RunStatus.AwaitingPlanApproval);
+        if (run.Task.PlanReviewByUser)
+            throw new FactoryValidationException($"Run #{runId}'s plan was set up for the user to review, so it has to be approved in Hatchet's UI, where they can trim or reject it. "
+                + "Tell the user it is waiting for them.");
+        if (run.PlanHeldForUser)
+            throw new FactoryValidationException($"Run #{runId}'s plan is longer than Hatchet builds without the user's say-so, so it has to be approved in Hatchet's UI. Tell the user it is waiting for them.");
+        await ApprovePlanAsync(runId, plan, ct);
+    }
+
     public async Task RegeneratePlanAsync(int runId, string? feedback, CancellationToken ct = default)
     {
         var run = await store.GetRunAsync(runId, ct);
@@ -311,12 +329,47 @@ public sealed partial class FactoryOrchestrator(
         Launch(runId, new QueuedRequest(RequestKind.Regenerate, Text: feedback));
     }
 
-    public async Task ResumeAsync(int runId, HumanDecision decision, string? guidance, CancellationToken ct = default)
+    public Task ResumeAsync(int runId, HumanDecision decision, string? guidance, CancellationToken ct = default) =>
+        ResumeAsync(runId, decision, guidance, false, ct);
+
+    /// <summary>The most times a driving agent may reset one subtask's fix budgets. After that the user has to resume it in Hatchet.</summary>
+    public const int MaxAgentFixerResets = 3;
+
+    /// <summary>
+    /// Resumes a run for an MCP client. Its guidance is passed on as the driving agent's, not the user's, and it may hand a
+    /// subtask back to the Bug Fixer only <see cref="MaxAgentFixerResets"/> times.
+    /// </summary>
+    public Task ResumeAsDrivingAgentAsync(int runId, HumanDecision decision, string? guidance, CancellationToken ct = default) =>
+        ResumeAsync(runId, decision, guidance, true, ct);
+
+    private async Task ResumeAsync(int runId, HumanDecision decision, string? guidance, bool fromDrivingAgent, CancellationToken ct)
     {
         var run = await store.GetRunAsync(runId, ct);
         RequireStatus(run, RunStatus.NeedsHuman);
+        if (fromDrivingAgent && decision == HumanDecision.RetryFixer) await CountAgentFixerResetAsync(run, ct);
         // The decision is carried out when the run's turn comes, so leaving the line first undoes nothing.
-        Launch(runId, new QueuedRequest(RequestKind.Resume, decision, guidance));
+        Launch(runId, new QueuedRequest(RequestKind.Resume, decision, guidance, fromDrivingAgent));
+    }
+
+    /// <summary>Each retry_fixer from an agent resets the fix budgets, so without a cap an agent could keep a run going for ever with nobody looking.</summary>
+    private async Task CountAgentFixerResetAsync(FactoryRun run, CancellationToken ct)
+    {
+        var subtasks = await store.GetSubtasksAsync(run.Id, ct);
+        var refusal = new FactoryValidationException($"The Bug Fixer's fix budget has already been reset {MaxAgentFixerResets} times through MCP. "
+            + "Ask the user to resume it in Hatchet, where resets aren't limited.");
+        // A failed final check starts a new subtask for every hand-over, so those are what is counted there.
+        if (run.PausedStage == PipelineStage.Integrate)
+        {
+            if (subtasks.Count(s => s.IsIntegrationFix) >= MaxAgentFixerResets) throw refusal;
+            return;
+        }
+
+        var paused = subtasks.FirstOrDefault(s => s.Status == SubtaskStatus.NeedsHuman);
+        if (paused is null) return;
+        if (paused.AgentFixerResets >= MaxAgentFixerResets) throw refusal;
+        // Saved before the pipeline starts, which reads the subtask and writes it back whole.
+        paused.AgentFixerResets++;
+        await store.UpdateSubtaskAsync(paused, ct);
     }
 
     /// <summary>
@@ -369,10 +422,10 @@ public sealed partial class FactoryOrchestrator(
         RequestKind.Start => RunFromIngestAsync(context, ct),
         RequestKind.Approve => ExecuteAsync(context, null, ct),
         RequestKind.Regenerate => DecomposeAndContinueAsync(context, request.Text, ct),
-        _ => ResumeFromPauseAsync(context, request.Decision, request.Text, ct)
+        _ => ResumeFromPauseAsync(context, request.Decision, request.Text, request.FromDrivingAgent, ct)
     };
 
-    private async Task ResumeFromPauseAsync(PipelineContext context, HumanDecision decision, string? guidance, CancellationToken ct)
+    private async Task ResumeFromPauseAsync(PipelineContext context, HumanDecision decision, string? guidance, bool fromDrivingAgent, CancellationToken ct)
     {
         var run = context.Run;
         RequireStatus(run, RunStatus.NeedsHuman);
@@ -392,7 +445,7 @@ public sealed partial class FactoryOrchestrator(
                 return;
             case PipelineStage.Integrate:
                 // "Hand to the Fixer" always hands it over, even after an earlier final-check fix.
-                await IntegrateAsync(context, ct, handOff: decision == HumanDecision.RetryFixer, guidance);
+                await IntegrateAsync(context, ct, handOff: decision == HumanDecision.RetryFixer, guidance, fromDrivingAgent);
                 return;
         }
 
@@ -407,7 +460,11 @@ public sealed partial class FactoryOrchestrator(
         // Carrying on after a passing review of a file it couldn't see in full is how the person accepts the gap.
         if (decision is HumanDecision.Resume or HumanDecision.Reverify && run.PauseReason?.Contains(OversizeReasonMarker, StringComparison.Ordinal) == true)
             paused.ReviewGapAccepted = true;
-        paused.HumanGuidance = string.IsNullOrWhiteSpace(guidance) ? paused.HumanGuidance : guidance.Trim();
+        if (!string.IsNullOrWhiteSpace(guidance))
+        {
+            paused.HumanGuidance = guidance.Trim();
+            paused.GuidanceFromAgent = fromDrivingAgent;
+        }
         var resumePoint = await ApplyDecisionAsync(run, paused, decision, ct);
         await store.UpdateSubtaskAsync(paused, ct);
         await ExecuteAsync(context, resumePoint, ct);
@@ -809,7 +866,13 @@ public sealed partial class FactoryOrchestrator(
         bus.Publish(new PlanChanged(run.Id));
         await LogAsync(run.Id, null, AgentLogKind.Info, PipelineStage.Decompose, $"Planned {subtasks.Count} subtasks.", ct);
 
-        if (task.RequirePlanApproval)
+        // Hatchet's own planner is model output, so a plan this long isn't built without someone reading it first.
+        run.PlanHeldForUser = context.Settings.MaxPlannedSubtasks > 0 && subtasks.Count > context.Settings.MaxPlannedSubtasks;
+        if (run.PlanHeldForUser)
+            await LogAsync(run.Id, null, AgentLogKind.Warning, PipelineStage.Decompose,
+                $"The Task Planner planned {subtasks.Count} subtasks, more than the {context.Settings.MaxPlannedSubtasks} Hatchet builds without asking. "
+                + "Read the plan in Hatchet, cut it down or approve it as it is, and then it builds.", ct);
+        if (task.RequirePlanApproval || run.PlanHeldForUser)
         {
             await SetRunStatusAsync(run, RunStatus.AwaitingPlanApproval, ct);
             return;
@@ -954,7 +1017,7 @@ public sealed partial class FactoryOrchestrator(
         var definitions = await ReadDefinitionsAsync(context, subtask, AgentRole.ContextSpecifier, planned, files, ct, subtask.Title, subtask.Description, subtask.HumanGuidance);
         var fileContext = RepositoryScanner.Render(files);
         var prompt = await FitPromptAsync(context, subtask, AgentRole.ContextSpecifier, definitions,
-            (d, k) => PromptBuilder.Refine(subtask, context.Task.ArchitectureSpec, run.RepoMap, fileContext, d, subtask.HumanGuidance, k), ct);
+            (d, k) => PromptBuilder.Refine(subtask, context.Task.ArchitectureSpec, run.RepoMap, fileContext, d, subtask.HumanGuidance, k, GuidanceOf(subtask)), ct);
 
         var refined = await InvokeAgentAsync<RefinedSpecResponse>(context, AgentRole.ContextSpecifier, subtask.Id, prompt, null, ct);
         subtask.RefinedSpecJson = PromptBuilder.ToJson(refined);
@@ -990,8 +1053,8 @@ public sealed partial class FactoryOrchestrator(
                 subtask.Title, subtask.Description, subtask.RefinedSpecJson, subtask.HumanGuidance);
             var fileContext = RepositoryScanner.Render(files);
             var prompt = await FitPromptAsync(context, subtask, AgentRole.CodeGenerator, definitions, (d, k) => cutOff is null
-                ? PromptBuilder.Build(subtask, fileContext, d, subtask.HumanGuidance, k)
-                : PromptBuilder.BuildRest(subtask, fileContext, written, remaining, cutOff, d, subtask.HumanGuidance, k), ct);
+                ? PromptBuilder.Build(subtask, fileContext, d, subtask.HumanGuidance, k, GuidanceOf(subtask))
+                : PromptBuilder.BuildRest(subtask, fileContext, written, remaining, cutOff, d, subtask.HumanGuidance, k, GuidanceOf(subtask)), ct);
 
             var answer = await AskAgentAsync<FilePatchSetResponse>(
                 context, AgentRole.CodeGenerator, subtask.Id, prompt,
@@ -1021,6 +1084,9 @@ public sealed partial class FactoryOrchestrator(
 
     private static (FilePatchSetResponse Value, string? CutOffPath)? KeepWholeFiles(string content) =>
         StructuredOutputParser.SalvagePatch(content) is { } kept ? (kept.Patch, kept.CutOffPath) : null;
+
+    /// <summary>Whose words the subtask's guidance is, which decides how much weight the prompts give it.</summary>
+    private static GuidanceSource GuidanceOf(FactorySubtask subtask) => subtask.GuidanceFromAgent ? GuidanceSource.DrivingAgent : GuidanceSource.Human;
 
     private static string NormalizePath(string path)
     {
@@ -1102,7 +1168,7 @@ public sealed partial class FactoryOrchestrator(
             subtask.LastFailure, subtask.HumanGuidance, subtask.Title, subtask.Description, subtask.RefinedSpecJson);
         var fileContext = RepositoryScanner.Render(files);
         var prompt = await FitPromptAsync(context, subtask, AgentRole.BugFixer, definitions,
-            (d, k) => PromptBuilder.Fix(subtask, subtask.LastFailure ?? "(no failure was recorded)", fileContext, subtask.HumanGuidance, d, k), ct);
+            (d, k) => PromptBuilder.Fix(subtask, subtask.LastFailure ?? "(no failure was recorded)", fileContext, subtask.HumanGuidance, d, k, GuidanceOf(subtask)), ct);
 
         Func<FilePatchSetResponse, string?> validate = p => p.Operations.Count == 0 ? "The operations list is empty, so nothing would change and the failure would repeat." : null;
         var claude = ClaudeCodeOptions.ModelLabel(AgentProfiles.Resolve(settings, AgentRole.BugFixer).ClaudeModel);
@@ -1452,6 +1518,10 @@ public sealed partial class FactoryOrchestrator(
         catch (PatchRejectedException) { return null; } // Applying it fails with a clearer message than this gate's.
     }
 
+    /// <summary>The user's own guidance names the file, so they have approved writing it. Guidance from a driving agent doesn't count.</summary>
+    private static bool NamedByUser(FactorySubtask subtask, string path) =>
+        !subtask.GuidanceFromAgent && subtask.HumanGuidance is { } guidance && guidance.Replace('\\', '/').Contains(path, StringComparison.OrdinalIgnoreCase);
+
     /// <summary>The subtask's planned targets, in the form <see cref="ResolvedRelativePath"/> gives.</summary>
     private static HashSet<string> PlannedTargets(string repositoryPath, FactorySubtask subtask) =>
         subtask.TargetFilesToModify.Concat(subtask.TargetFilesToCreate)
@@ -1468,7 +1538,7 @@ public sealed partial class FactoryOrchestrator(
         var planned = PlannedTargets(repository, subtask);
         var unplanned = patch.Operations
             .Select(o => ResolvedRelativePath(repository, o.RelativeFilePath))
-            .Where(p => p is not null && FilePatcher.IsSensitivePath(p) && !planned.Contains(p))
+            .Where(p => p is not null && FilePatcher.IsSensitivePath(p) && !planned.Contains(p) && !NamedByUser(subtask, p))
             .Select(p => p!)
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
@@ -1476,7 +1546,7 @@ public sealed partial class FactoryOrchestrator(
 
         var names = string.Join(", ", unplanned.Select(p => $"`{p}`"));
         var reason = $"The change wants to write {names}, which can run code or change how tools behave and {(unplanned.Count == 1 ? "is" : "are")} not in this subtask's files. "
-            + "Nothing was written. Add the file to the subtask's files or to your guidance if it is really needed, or make the change yourself, then resume; otherwise retry or skip the subtask.";
+            + "Nothing was written. If it is really needed, name the file in your guidance (typed in Hatchet, not sent by an agent) and retry, or make the change yourself and re-verify; otherwise skip the subtask.";
         // Kept as the failure, so "Hand to the Fixer" has something to work from.
         subtask.LastFailure = subtask.LastFailure is null ? reason : $"{reason}\n\n{FailureToFixLead}\n{FailureBeingFixed(subtask.LastFailure)}";
         await store.UpdateSubtaskAsync(subtask, ct);
@@ -1569,7 +1639,7 @@ public sealed partial class FactoryOrchestrator(
         for (var i = 0; i < chunks.Count; i++)
         {
             var shown = chunks.Count == 1 ? chunks[i].Diff : $"[Part {i + 1} of {chunks.Count} of this change]\n{chunks[i].Diff}";
-            var prompt = PromptBuilder.Review(subtask, shown, testSummary, subtask.HumanGuidance);
+            var prompt = PromptBuilder.Review(subtask, shown, testSummary, subtask.HumanGuidance, GuidanceOf(subtask));
             var part = await InvokeAgentAsync<ReviewVerdictResponse>(context, AgentRole.StaticReviewer, subtask.Id, prompt, null, ct);
             // A pass that lists blocking issues contradicts itself, and the issues win.
             verdicts.Add(part.Passed && part.BlockingIssues.Count > 0 ? part with { Passed = false } : part);
@@ -1699,7 +1769,7 @@ public sealed partial class FactoryOrchestrator(
     /// A person chose to hand the failure to the Bug Fixer. Without it, a failure goes to the Bug Fixer only the first
     /// time, so a fix that doesn't hold ends with a person rather than a loop.
     /// </param>
-    private async Task IntegrateAsync(PipelineContext context, CancellationToken ct, bool handOff = false, string? guidance = null)
+    private async Task IntegrateAsync(PipelineContext context, CancellationToken ct, bool handOff = false, string? guidance = null, bool guidanceFromAgent = false)
     {
         var (run, task, git) = (context.Run, context.Task, context.Git);
         PauseIfRequested(run.Id);
@@ -1739,7 +1809,7 @@ public sealed partial class FactoryOrchestrator(
 
                 // Each subtask passed on its own, so what breaks is where they meet. The Bug Fixer takes it on as one
                 // more subtask: the same fix budget, escalation, guard, review and commit as the rest of the run.
-                var fix = await AddIntegrationFixAsync(context, subtasks, command, result, guidance, ct);
+                var fix = await AddIntegrationFixAsync(context, subtasks, command, result, guidance, guidanceFromAgent, ct);
                 await SetRunStatusAsync(run, RunStatus.Executing, ct);
                 run.CurrentSubtaskId = fix.Id;
                 if (!await ProcessSubtaskAsync(context, fix, SubtaskEntry.Fix, ct)) return;
@@ -1758,7 +1828,7 @@ public sealed partial class FactoryOrchestrator(
 
     /// <summary>The subtask that hands a failed final check to the Bug Fixer, saved after the run's other subtasks.</summary>
     private async Task<FactorySubtask> AddIntegrationFixAsync(PipelineContext context, IReadOnlyList<FactorySubtask> subtasks, string command,
-        CommandResult result, string? guidance, CancellationToken ct)
+        CommandResult result, string? guidance, bool guidanceFromAgent, CancellationToken ct)
     {
         var run = context.Run;
         var errors = FailureDigest.Errors(result.Output);
@@ -1777,6 +1847,7 @@ public sealed partial class FactoryOrchestrator(
             IsIntegrationFix = true,
             LastFailure = DescribeFailure(result, context.Settings),
             HumanGuidance = string.IsNullOrWhiteSpace(guidance) ? null : guidance.Trim(),
+            GuidanceFromAgent = guidanceFromAgent,
             // It starts from a failure, never from Refine and Build, and counts as built for the pause options.
             SummaryOfChanges = "Nothing yet: the Bug Fixer starts from the final check's failure."
         }, ct);

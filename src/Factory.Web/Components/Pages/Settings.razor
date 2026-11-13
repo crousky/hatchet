@@ -301,6 +301,11 @@
                         <div class="hint">Build failures and review rejections share this budget. Then the run pauses for you.</div>
                     </div>
                     <div class="field">
+                        <label for="max-subtasks">Subtasks Hatchet's planner may plan unattended</label>
+                        <input autocomplete="off" data-1p-ignore data-lpignore="true" id="max-subtasks" type="number" min="1" max="500" @bind="_settings.MaxPlannedSubtasks" />
+                        <div class="hint">If the Task Planner plans more than this, the plan waits for your approval, even when plan review is off. Plans you supply are not limited.</div>
+                    </div>
+                    <div class="field">
                         <label for="escalate">Hand stubborn fixes to Claude after</label>
                         <input autocomplete="off" data-1p-ignore data-lpignore="true" id="escalate" type="number" min="0" max="20" @bind="_settings.EscalateFixesToClaudeAfter" />
                         <div class="hint">Failed fix attempts on the local model before the Bug Fixer switches to Claude Code for that subtask. Local models often guess library APIs wrong. 0 keeps fixes local.</div>
