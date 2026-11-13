@@ -57,7 +57,7 @@ public sealed partial class SkillLibrary(string? userDirectory)
     public string? UserDirectory => userDirectory;
 
     /// <summary>
-    /// The skills a run in the repository can use, by name. A project skill hides a user skill of the same name, and
+    /// The skills a run in the repository can use, by name. A user skill hides a project skill of the same name, and
     /// one in <c>.hatchet/skills</c> hides one in <c>.claude/skills</c>.
     /// </summary>
     public IReadOnlyList<Skill> Load(string? repositoryPath)
@@ -76,13 +76,17 @@ public sealed partial class SkillLibrary(string? userDirectory)
 
     private IEnumerable<(string Directory, SkillSource Source)> Places(string? repositoryPath)
     {
+        // The user's own skills come first: a repository, which may be untrusted, can't replace one by reusing its name.
+        if (!string.IsNullOrWhiteSpace(userDirectory)) yield return (userDirectory, SkillSource.User);
         if (!string.IsNullOrWhiteSpace(repositoryPath))
         {
             yield return (System.IO.Path.Combine(repositoryPath, ProjectFolder), SkillSource.Project);
             yield return (System.IO.Path.Combine(repositoryPath, ClaudeProjectFolder), SkillSource.ClaudeProject);
         }
-        if (!string.IsNullOrWhiteSpace(userDirectory)) yield return (userDirectory, SkillSource.User);
     }
+
+    /// <summary>The largest <c>SKILL.md</c> that is read. A bigger one is skipped.</summary>
+    internal const long MaxFileBytes = 64 * 1024;
 
     private static IEnumerable<Skill> LoadFolder(string directory, SkillSource source)
     {
@@ -104,7 +108,10 @@ public sealed partial class SkillLibrary(string? userDirectory)
             string text;
             try
             {
-                if (!File.Exists(file)) continue;
+                // A link could lead out of the repository to any file, and a huge file would fill a prompt.
+                if (new DirectoryInfo(folder).LinkTarget is not null) continue;
+                var info = new FileInfo(file);
+                if (!info.Exists || info.LinkTarget is not null || info.Length > MaxFileBytes) continue;
                 text = File.ReadAllText(file);
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)

@@ -92,7 +92,7 @@ public class SkillTests : IDisposable
     }
 
     [Fact]
-    public void Project_skills_hide_claude_project_skills_which_hide_user_skills()
+    public void User_skills_hide_project_skills_and_hatchet_project_skills_hide_claude_project_skills()
     {
         _repo.Write(".hatchet/skills/shared/SKILL.md", "---\nname: shared\ndescription: from hatchet\n---\nA");
         _repo.Write(".claude/skills/shared-copy/SKILL.md", "---\nname: Shared\ndescription: from claude\n---\nB");
@@ -105,10 +105,44 @@ public class SkillTests : IDisposable
 
         Assert.Equal(["alpha", "beta", "shared"], skills.Select(s => s.Name));
         Assert.Equal(SkillSource.User, skills[0].Source);
-        Assert.Equal(("claude only", SkillSource.ClaudeProject), (skills[1].Description, skills[1].Source));
+        Assert.Equal(("user", SkillSource.User), (skills[1].Description, skills[1].Source));
         Assert.Equal(("from hatchet", SkillSource.Project), (skills[2].Description, skills[2].Source));
         Assert.Equal(["alpha", "beta"], new SkillLibrary(_user.Path).LoadUser().Select(s => s.Name));
         Assert.Empty(new SkillLibrary(null).Load(null));
+    }
+
+    [Fact]
+    public void A_skill_file_over_64_kb_is_skipped()
+    {
+        _repo.Write(".hatchet/skills/big/SKILL.md", "---\nname: big\ndescription: d\n---\n" + new string('x', 70 * 1024));
+        _repo.Write(".hatchet/skills/small/SKILL.md", "---\nname: small\ndescription: d\n---\nok");
+
+        var skills = new SkillLibrary(null).Load(_repo.Path);
+
+        Assert.Equal(["small"], skills.Select(s => s.Name));
+    }
+
+    [Fact]
+    public void A_symlinked_skill_file_or_folder_is_skipped()
+    {
+        var secret = System.IO.Path.Combine(_user.Path, "secret.md");
+        File.WriteAllText(secret, "---\nname: linked\ndescription: d\n---\nsecret");
+        var skillsRoot = System.IO.Path.Combine(_repo.Path, ".hatchet", "skills");
+        Directory.CreateDirectory(System.IO.Path.Combine(skillsRoot, "linked"));
+        _repo.Write(".hatchet/skills/real/SKILL.md", "---\nname: real\ndescription: d\n---\nok");
+        try
+        {
+            File.CreateSymbolicLink(System.IO.Path.Combine(skillsRoot, "linked", "SKILL.md"), secret);
+            Directory.CreateSymbolicLink(System.IO.Path.Combine(skillsRoot, "dirlink"), _user.Path);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or PlatformNotSupportedException)
+        {
+            return; // Creating links needs a privilege this machine hasn't granted.
+        }
+
+        var skills = new SkillLibrary(null).Load(_repo.Path);
+
+        Assert.Equal(["real"], skills.Select(s => s.Name));
     }
 
     [Theory]
