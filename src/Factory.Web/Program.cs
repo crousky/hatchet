@@ -75,10 +75,15 @@ app.Use(async (context, next) =>
 
 app.Use(async (context, next) =>
 {
-    var headers = context.Response.Headers;
-    headers.XContentTypeOptions = "nosniff";
-    headers["Referrer-Policy"] = "no-referrer";
-    headers.ContentSecurityPolicy = "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss:; object-src 'none'; base-uri 'self'; frame-ancestors 'self'";
+    // Set as the response starts, so a header the framework adds itself doesn't end up twice.
+    context.Response.OnStarting(() =>
+    {
+        var headers = context.Response.Headers;
+        headers.XContentTypeOptions = "nosniff";
+        headers["Referrer-Policy"] = "no-referrer";
+        headers.ContentSecurityPolicy = "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss:; object-src 'none'; base-uri 'self'; frame-ancestors 'self'";
+        return Task.CompletedTask;
+    });
     await next();
 });
 
