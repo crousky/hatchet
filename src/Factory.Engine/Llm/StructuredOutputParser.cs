@@ -24,8 +24,8 @@ public static partial class StructuredOutputParser
 
     public static string? ExtractJsonObject(string content)
     {
-        var text = ThinkBlock().Replace(content, "");
-        var start = text.IndexOf('{');
+        var text = content;
+        var start = JsonStart(content);
         if (start < 0) return null;
 
         var depth = 0;
@@ -62,8 +62,8 @@ public static partial class StructuredOutputParser
     /// <returns>Null if the output holds no complete operation.</returns>
     public static SalvagedPatch? SalvagePatch(string content)
     {
-        var text = ThinkBlock().Replace(content, "");
-        var start = text.IndexOf('{');
+        var text = content;
+        var start = JsonStart(content);
         if (start < 0) return null;
 
         var operations = new List<FileOperationDto>();
@@ -164,6 +164,27 @@ public static partial class StructuredOutputParser
     [GeneratedRegex(@"""relativeFilePath""\s*:\s*""((?:[^""\\]|\\.)*)""")]
     private static partial Regex PathProperty();
 
-    [GeneratedRegex(@"<think>.*?(</think>|$)", RegexOptions.Singleline)]
-    private static partial Regex ThinkBlock();
+    /// <summary>
+    /// Where the JSON answer begins: the first <c>{</c> that isn't inside a think block. Think blocks are only
+    /// markup before the answer starts; inside it, <c>&lt;think&gt;</c> is ordinary text, such as in a generated file.
+    /// An unterminated think block runs to the end, so it hides everything after it.
+    /// </summary>
+    private static int JsonStart(string content)
+    {
+        const string open = "<think>";
+        const string close = "</think>";
+        var i = 0;
+        while (i < content.Length)
+        {
+            if (string.CompareOrdinal(content, i, open, 0, open.Length) == 0)
+            {
+                var end = content.IndexOf(close, i + open.Length, StringComparison.Ordinal);
+                if (end < 0) return -1;
+                i = end + close.Length;
+            }
+            else if (content[i] == '{') return i;
+            else i++;
+        }
+        return -1;
+    }
 }

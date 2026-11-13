@@ -123,6 +123,20 @@ public class LlmClientTests
     }
 
     [Fact]
+    public async Task Think_tags_inside_the_answer_are_left_alone()
+    {
+        var handler = new StubHandler(_ => Sse(
+            Delta("content", "<think>plan</think>{\"f\":\"a <thi"),
+            Delta("content", "nk>b</think> c\"}")));
+        var client = new OpenAiCompatibleLlmClient(new HttpClient(handler));
+
+        var result = await client.StreamAsync(new FactorySettings(), Request(AgentProfiles.TaskPlanner), null, default);
+
+        Assert.Equal("plan", result.Thinking);
+        Assert.Equal("{\"f\":\"a <think>b</think> c\"}", result.Content);
+    }
+
+    [Fact]
     public async Task A_400_steps_down_extended_parameters_and_stays_down()
     {
         var handler = new StubHandler(body =>
