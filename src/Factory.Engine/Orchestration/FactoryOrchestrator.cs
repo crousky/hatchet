@@ -1664,13 +1664,13 @@ public sealed partial class FactoryOrchestrator(
     /// <summary>A part of a change that is reviewed in one call, and the files in it that were cut short to fit.</summary>
     internal sealed record ReviewChunk(string Diff, IReadOnlyList<string> TooLarge);
 
-    private static readonly string[] GeneratedNames = ["packages.lock.json", "package-lock.json", "yarn.lock", "pnpm-lock.yaml"];
+    // Package lock files only. Exempting by any other name (*.Designer.cs, *.min.js) would let a model pick that name to dodge the full review.
+    private static readonly string[] LockFileNames = ["packages.lock.json", "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "Cargo.lock", "poetry.lock", "go.sum"];
 
-    private static bool IsLockOrGenerated(string path)
+    private static bool IsPackageLockFile(string path)
     {
         var name = path[(path.LastIndexOf('/') + 1)..];
-        return GeneratedNames.Contains(name, StringComparer.OrdinalIgnoreCase)
-            || name.EndsWith(".Designer.cs", StringComparison.OrdinalIgnoreCase) || name.EndsWith(".min.js", StringComparison.OrdinalIgnoreCase);
+        return LockFileNames.Contains(name, StringComparer.OrdinalIgnoreCase);
     }
 
     /// <summary>
@@ -1708,15 +1708,15 @@ public sealed partial class FactoryOrchestrator(
 
     /// <summary>
     /// A file too large for the reviewer to see in full can hide anything past what it saw, so a passing review isn't enough
-    /// to commit it: the run pauses, unless the file is a lock or generated file, or a person has already said to carry on.
+    /// to commit it: the run pauses, unless the file is a package lock file, or a person has already said to carry on.
     /// </summary>
     private async Task RequireReviewedInFullAsync(PipelineContext context, FactorySubtask subtask, IReadOnlyList<string> tooLarge, CancellationToken ct)
     {
         var (run, limit) = (context.Run, context.Settings.MaxDiffChars);
-        foreach (var path in tooLarge.Where(IsLockOrGenerated))
+        foreach (var path in tooLarge.Where(IsPackageLockFile))
             await LogAsync(run.Id, subtask.Id, AgentLogKind.Info, PipelineStage.Review,
-                $"{path} is a lock or generated file too large for the reviewer to see in full, so it was committed without that.", ct);
-        var unseen = tooLarge.Where(p => !IsLockOrGenerated(p)).ToList();
+                $"{path} is a package lock file too large for the reviewer to see in full, so it was committed without that.", ct);
+        var unseen = tooLarge.Where(p => !IsPackageLockFile(p)).ToList();
         if (unseen.Count == 0) return;
 
         var names = string.Join(", ", unseen.Select(p => $"`{p}`"));

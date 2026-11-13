@@ -826,7 +826,22 @@ public class OrchestratorTests : IAsyncLifetime
 
         var run = await WaitForAsync((await StartAsync()).Id, RunStatus.ReadyToMerge);
 
-        Assert.Contains(await _store.GetLogsAsync(run.Id), l => l.Message.StartsWith("package-lock.json is a lock or generated file"));
+        Assert.Contains(await _store.GetLogsAsync(run.Id), l => l.Message.StartsWith("package-lock.json is a package lock file"));
+    }
+
+    [Fact]
+    public async Task A_generated_looking_file_name_does_not_exempt_an_oversize_file_from_review()
+    {
+        _settings.Settings.MaxDiffChars = 400;
+        _llm.Enqueue(AgentRole.TaskPlanner, PlanCreating("alpha", "Evil.Designer.cs"));
+        _llm.Enqueue(AgentRole.ContextSpecifier, Refined());
+        _llm.Enqueue(AgentRole.CodeGenerator, Patch("Evil.Designer.cs", Lines(200)));
+        _llm.Enqueue(AgentRole.StaticReviewer, Verdict(true));
+
+        var run = await WaitForAsync((await StartAsync()).Id, RunStatus.NeedsHuman);
+
+        Assert.Contains("`Evil.Designer.cs`", run.PauseReason);
+        Assert.Contains("saw only the start", run.PauseReason);
     }
 
     [Fact]
