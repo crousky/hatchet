@@ -33,7 +33,7 @@ public sealed class GitWorkspace(string repositoryPath)
         {
             var workspace = new GitWorkspace(path);
             var detected = VerificationDetector.Detect(path);
-            var (inside, _) = await workspace.TryGitAsync(ct, "rev-parse", "--is-inside-work-tree");
+            var (inside, _) = await workspace.TryReadAsync(ct, "rev-parse", "--is-inside-work-tree");
             if (!inside) return new RepositoryProbe(true, false, false, false, null, detected, null);
 
             var hasCommits = await workspace.HasCommitsAsync(ct);
@@ -50,23 +50,23 @@ public sealed class GitWorkspace(string repositoryPath)
     public async Task InitializeAsync(CancellationToken ct = default) => await GitAsync(ct, "init");
 
     public async Task<bool> HasCommitsAsync(CancellationToken ct = default) =>
-        (await TryGitAsync(ct, "rev-parse", "--verify", "--quiet", "HEAD")).Success;
+        (await TryReadAsync(ct, "rev-parse", "--verify", "--quiet", "HEAD")).Success;
 
     public async Task<string> GetCurrentBranchAsync(CancellationToken ct = default) =>
-        (await GitAsync(ct, "symbolic-ref", "--short", "-q", "HEAD")).Trim();
+        ValidateRefName((await ReadAsync(ct, "symbolic-ref", "--short", "-q", "HEAD")).Trim());
 
     public async Task<string> GetHeadShaAsync(CancellationToken ct = default) =>
-        (await GitAsync(ct, "rev-parse", "HEAD")).Trim();
+        (await ReadAsync(ct, "rev-parse", "HEAD")).Trim();
 
     /// <summary>Build output doesn't count, so a verified run in a repo with no .gitignore doesn't block the next one.</summary>
     public async Task<bool> IsCleanAsync(CancellationToken ct = default)
     {
         string[] args = ["status", "--porcelain", "--", ".", .. ArtifactExclusions];
-        return (await GitAsync(ct, args)).Trim().Length == 0;
+        return (await ReadAsync(ct, args)).Trim().Length == 0;
     }
 
     public async Task<bool> HasRemoteAsync(CancellationToken ct = default) =>
-        (await GitAsync(ct, "remote")).Trim().Length > 0;
+        (await ReadAsync(ct, "remote")).Trim().Length > 0;
 
     /// <summary>A branch has nothing to base on until the repository has a commit.</summary>
     public async Task EnsureInitialCommitAsync(CancellationToken ct = default)
@@ -86,32 +86,64 @@ public sealed class GitWorkspace(string repositoryPath)
     /// <summary>Checks out the branch, creating it from HEAD on first use.</summary>
     public async Task EnsureBranchAsync(string branch, CancellationToken ct = default)
     {
+        ValidateRefName(branch);
         if (await GetCurrentBranchOrNullAsync(ct) == branch) return;
 
-        if (await BranchExistsAsync(branch, ct)) await GitAsync(ct, "checkout", branch);
+        if (await BranchExistsAsync(branch, ct)) await GitAsync(ct, "checkout", branch, "--");
         else await GitAsync(ct, "checkout", "-b", branch);
     }
 
     private async Task<bool> BranchExistsAsync(string branch, CancellationToken ct) =>
-        (await TryGitAsync(ct, "rev-parse", "--verify", "--quiet", $"refs/heads/{branch}")).Success;
+        (await TryReadAsync(ct, "rev-parse", "--verify", "--quiet", $"refs/heads/{ValidateRefName(branch)}")).Success;
 
     public async Task CheckoutAsync(string branch, CancellationToken ct = default) =>
-        await GitAsync(ct, "checkout", branch);
+        await GitAsync(ct, "checkout", ValidateRefName(branch), "--");
 
     public async Task StageAllAsync(CancellationToken ct = default)
     {
         string[] args = ["add", "-A", "--", ".", .. ArtifactExclusions];
         await GitAsync(ct, args);
+        await UnstageSecretsAsync(ct);
+    }
+
+    /// <summary>Newly added files that look like secrets are unstaged (and left on disk) so they are never committed.</summary>
+    private async Task UnstageSecretsAsync(CancellationToken ct)
+    {
+        var added = await GitAsync(ct, "diff", "--cached", "--name-only", "--diff-filter=A", "-z", "--no-ext-diff", "--no-textconv");
+        var secrets = added.Split('\0', StringSplitOptions.RemoveEmptyEntries).Where(IsSecretPath).ToList();
+        if (secrets.Count == 0) return;
+        await GitAsync(ct, ["reset", "-q", "--", .. secrets.Select(p => ":(literal)" + p)]);
+    }
+
+    // Same list as FilePatcher.IsSecretPath; unify when both are merged.
+    private static bool IsSecretPath(string path)
+    {
+        var name = path[(path.LastIndexOfAny(['/', '\\']) + 1)..].ToLowerInvariant();
+        if (name == ".env" || name.StartsWith(".env."))
+            return name is not (".env.example" or ".env.sample" or ".env.template");
+        return name == "credentials"
+            || name.EndsWith(".pem") || name.EndsWith(".pfx") || name.EndsWith(".p12") || name.EndsWith(".key")
+            || name.EndsWith(".tfvars")
+            || name.StartsWith("id_rsa") || name.StartsWith("id_ed25519") || name.StartsWith("id_ecdsa")
+            || name.StartsWith("secrets.");
+    }
+
+    /// <summary>Refuses a name that git would read as an option or that holds whitespace or control characters.</summary>
+    private static string ValidateRefName(string name)
+    {
+        if (string.IsNullOrEmpty(name) || name.StartsWith('-') || name.Any(c => char.IsWhiteSpace(c) || char.IsControl(c)))
+            throw new GitException($"Refusing unsafe branch or revision name '{name}'.");
+        return name;
     }
 
     public async Task<string> GetStagedDiffAsync(CancellationToken ct = default) =>
-        await GitAsync(ct, "diff", "--cached", "HEAD");
+        await ReadAsync(ct, "diff", "--no-ext-diff", "--no-textconv", "--cached", "HEAD");
 
     public async Task<string> GetRangeDiffAsync(string fromCommit, string toCommit, CancellationToken ct = default) =>
-        await GitAsync(ct, "diff", $"{fromCommit}..{toCommit}");
+        await ReadAsync(ct, "diff", "--no-ext-diff", "--no-textconv", $"{ValidateRefName(fromCommit)}..{ValidateRefName(toCommit)}");
 
     public async Task<IReadOnlyList<string>> GetStagedFilesAsync(CancellationToken ct = default) =>
-        (await GitAsync(ct, "diff", "--cached", "--name-only", "HEAD"))
+        (await ReadAsync(ct, "diff", "--no-ext-diff", "--no-textconv", "--cached", "--name-only", "HEAD"))
             .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 
     public async Task<string> CommitStagedAsync(string message, CancellationToken ct = default)
@@ -163,39 +195,41 @@ public sealed class GitWorkspace(string repositoryPath)
     public async Task<IReadOnlyList<string>> GetUncommittedChangesAsync(CancellationToken ct = default)
     {
         string[] args = ["status", "--porcelain", "--", ".", .. ArtifactExclusions];
-        return (await GitAsync(ct, args)).Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        return (await ReadAsync(ct, args)).Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
     }
 
     /// <summary>The latest commits on a revision, newest first, as "shortsha subject".</summary>
     public async Task<IReadOnlyList<string>> GetRecentCommitsAsync(string revision, int count, CancellationToken ct = default)
     {
-        var (success, output) = await TryGitAsync(ct, "log", $"-{count}", "--format=%h %s", revision);
+        var (success, output) = await TryReadAsync(ct, "log", $"-{count}", "--format=%h %s", "--no-ext-diff", "--no-textconv", ValidateRefName(revision), "--");
         return success ? output.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries) : [];
     }
 
     /// <summary>Commits on <paramref name="branch"/> that <paramref name="baseRevision"/> doesn't have. Zero if either is missing.</summary>
     public async Task<int> CountCommitsAheadAsync(string baseRevision, string branch, CancellationToken ct = default)
     {
-        var (success, output) = await TryGitAsync(ct, "rev-list", "--count", $"{baseRevision}..{branch}");
+        var (success, output) = await TryReadAsync(ct, "rev-list", "--count", $"{ValidateRefName(baseRevision)}..{ValidateRefName(branch)}");
         return success && int.TryParse(output.Trim(), out var count) ? count : 0;
     }
 
     /// <summary>Merges into the base branch. On conflict the merge is aborted and the original branch restored.</summary>
     public async Task<string> MergeIntoAsync(string baseBranch, string branch, string message, CancellationToken ct = default)
     {
-        await GitAsync(ct, "checkout", baseBranch);
+        ValidateRefName(baseBranch);
+        ValidateRefName(branch);
+        await GitAsync(ct, "checkout", baseBranch, "--");
         var (merged, output) = await TryGitWithIdentityAsync(ct, "merge", "--no-ff", "-m", message, branch);
         if (merged) return await GetHeadShaAsync(ct);
 
         await TryGitAsync(ct, "merge", "--abort");
-        await GitAsync(ct, "checkout", branch);
+        await GitAsync(ct, "checkout", branch, "--");
         throw new GitException($"The merge into '{baseBranch}' did not complete and was aborted:\n{output}");
     }
 
     private async Task<string?> GetCurrentBranchOrNullAsync(CancellationToken ct)
     {
-        var (success, output) = await TryGitAsync(ct, "symbolic-ref", "--short", "-q", "HEAD");
-        return success ? output.Trim() : null;
+        var (success, output) = await TryReadAsync(ct, "symbolic-ref", "--short", "-q", "HEAD");
+        return success ? ValidateRefName(output.Trim()) : null;
     }
 
     private async Task CommitInternalAsync(CancellationToken ct, params string[] commitArgs)
@@ -206,18 +240,32 @@ public sealed class GitWorkspace(string repositoryPath)
 
     private async Task<(bool Success, string Output)> TryGitWithIdentityAsync(CancellationToken ct, params string[] args)
     {
-        var (hasIdentity, _) = await TryGitAsync(ct, "config", "user.email");
+        var (hasIdentity, _) = await TryReadAsync(ct, "config", "user.email");
         string[] withIdentity = hasIdentity ? args : ["-c", "user.name=Hatchet", "-c", "user.email=hatchet@localhost", .. args];
         return await TryGitAsync(ct, withIdentity);
     }
 
-    private async Task<string> GitAsync(CancellationToken ct, params string[] args)
+    private async Task<string> GitAsync(CancellationToken ct, params string[] args) => await RunAsync(false, ct, args);
+
+    /// <summary>For read-only queries: hooks are ignored and the call gets a shorter timeout.</summary>
+    private async Task<string> ReadAsync(CancellationToken ct, params string[] args) => await RunAsync(true, ct, args);
+
+    private async Task<string> RunAsync(bool readOnly, CancellationToken ct, string[] args)
     {
-        var (success, output) = await TryGitAsync(ct, args);
+        var (success, output) = await TryGitCoreAsync(readOnly, ct, args);
         return success ? output : throw new GitException($"git {string.Join(' ', args)} failed: {output}");
     }
 
-    private async Task<(bool Success, string Output)> TryGitAsync(CancellationToken ct, params string[] args)
+    private Task<(bool Success, string Output)> TryGitAsync(CancellationToken ct, params string[] args) => TryGitCoreAsync(false, ct, args);
+
+    private Task<(bool Success, string Output)> TryReadAsync(CancellationToken ct, params string[] args) => TryGitCoreAsync(true, ct, args);
+
+    private static readonly Lazy<string> EmptyHooksDirectory = new(() =>
+        Directory.CreateDirectory(Path.Combine(Path.GetTempPath(), "hatchet-no-hooks")).FullName.Replace('\\', '/'));
+
+    private const int MaxOutputChars = 20_000_000;
+
+    private async Task<(bool Success, string Output)> TryGitCoreAsync(bool readOnly, CancellationToken ct, string[] args)
     {
         var info = new ProcessStartInfo("git")
         {
@@ -229,27 +277,62 @@ public sealed class GitWorkspace(string repositoryPath)
             StandardOutputEncoding = Encoding.UTF8,
             StandardErrorEncoding = Encoding.UTF8
         };
+        // The repository may be untrusted: neutralise config that would run programs from it.
         info.ArgumentList.Add("-c");
         info.ArgumentList.Add("core.quotepath=off");
+        info.ArgumentList.Add("-c");
+        info.ArgumentList.Add("core.fsmonitor=false");
+        info.ArgumentList.Add("-c");
+        info.ArgumentList.Add("safe.bareRepository=explicit");
+        if (readOnly)
+        {
+            info.ArgumentList.Add("-c");
+            info.ArgumentList.Add($"core.hooksPath={EmptyHooksDirectory.Value}");
+        }
         foreach (var arg in args) info.ArgumentList.Add(arg);
         info.Environment["GIT_TERMINAL_PROMPT"] = "0";
 
+        var timeout = readOnly ? TimeSpan.FromSeconds(60) : TimeSpan.FromMinutes(10);
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        cts.CancelAfter(timeout);
+
         using var process = Process.Start(info) ?? throw new GitException("Could not start git.");
-        var stdout = process.StandardOutput.ReadToEndAsync(ct);
-        var stderr = process.StandardError.ReadToEndAsync(ct);
+        var stdout = ReadCappedAsync(process.StandardOutput, cts.Token);
+        var stderr = process.StandardError.ReadToEndAsync(cts.Token);
         try
         {
-            await process.WaitForExitAsync(ct);
+            await process.WaitForExitAsync(cts.Token);
+            var output = await stdout;
+            var error = await stderr;
+            return process.ExitCode == 0
+                ? (true, output)
+                : (false, string.Join('\n', new[] { error, output }.Where(s => s.Length > 0)).Trim());
         }
         catch (OperationCanceledException)
         {
-            process.Kill(entireProcessTree: true);
-            throw;
+            try { process.Kill(entireProcessTree: true); } catch (InvalidOperationException) { }
+            _ = stdout.ContinueWith(t => _ = t.Exception, TaskContinuationOptions.OnlyOnFaulted);
+            _ = stderr.ContinueWith(t => _ = t.Exception, TaskContinuationOptions.OnlyOnFaulted);
+            if (ct.IsCancellationRequested) throw;
+            throw new GitException($"git {string.Join(' ', args)} timed out after {timeout.TotalSeconds:0} seconds and was stopped.");
         }
+    }
 
-        var output = await stdout;
-        return process.ExitCode == 0
-            ? (true, output)
-            : (false, string.Join('\n', new[] { await stderr, output }.Where(s => s.Length > 0)).Trim());
+    /// <summary>Reads to the end but keeps only the first <see cref="MaxOutputChars"/> characters, still draining the pipe.</summary>
+    private static async Task<string> ReadCappedAsync(StreamReader reader, CancellationToken ct)
+    {
+        var sb = new StringBuilder();
+        var buffer = new char[8192];
+        var truncated = false;
+        int read;
+        while ((read = await reader.ReadAsync(buffer.AsMemory(), ct)) > 0)
+        {
+            if (sb.Length >= MaxOutputChars) { truncated = true; continue; }
+            var take = Math.Min(read, MaxOutputChars - sb.Length);
+            sb.Append(buffer, 0, take);
+            if (take < read) truncated = true;
+        }
+        if (truncated) sb.Append("\n[output truncated]\n");
+        return sb.ToString();
     }
 }
