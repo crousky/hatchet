@@ -37,9 +37,11 @@ public sealed class ClaudeCodeLlmClient(string workingDirectory) : ILlmClient
                 StandardErrorEncoding = Encoding.UTF8,
                 StandardInputEncoding = new UTF8Encoding(false)
             };
+            ClaudeCodeSafety.RejectUnsafeShimArguments(settings.ClaudeCodePath, VariableArguments(request, systemPromptFile));
             foreach (var argument in Arguments(request, systemPromptFile)) start.ArgumentList.Add(argument);
             // Hatchet may itself be started from a Claude Code session, and the child must not think it is nested.
-            start.Environment.Remove("CLAUDECODE");
+            // No CLAUDE_CODE_* setting of the environment's may reach it either.
+            ClaudeCodeSafety.ScrubEnvironment(start);
 
             using var process = StartOrThrow(start, settings.ClaudeCodePath);
             using var kill = ct.Register(() => Kill(process));
@@ -99,6 +101,7 @@ public sealed class ClaudeCodeLlmClient(string workingDirectory) : ILlmClient
         "--json-schema", request.Schema.Json,
         // A plain model call: no tools, MCP servers, skills or saved session.
         "--tools", "",
+        .. ClaudeCodeSafety.LockdownArguments,
         "--strict-mcp-config",
         "--disable-slash-commands",
         "--no-session-persistence",
@@ -106,6 +109,10 @@ public sealed class ClaudeCodeLlmClient(string workingDirectory) : ILlmClient
         "--verbose",
         "--include-partial-messages"
     ];
+
+    /// <summary>The arguments of <see cref="Arguments"/> that carry outside values, for the check on a <c>.cmd</c> shim.</summary>
+    internal static IReadOnlyList<string> VariableArguments(LlmRequest request, string systemPromptFile) =>
+        [request.Profile.ClaudeModel, request.Profile.ClaudeEffort, systemPromptFile];
 
     /// <summary>Whether Claude Code is installed and logged in, from <c>claude --version</c> and <c>claude auth status</c>.</summary>
     public static async Task<ClaudeCodeStatus> CheckAsync(string path, CancellationToken ct = default)

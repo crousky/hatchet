@@ -98,6 +98,84 @@ public class ClaudeCodeTests
     }
 
     [Fact]
+    public void Agent_calls_pin_the_exact_argument_list()
+    {
+        var arguments = ClaudeCodeLlmClient.Arguments(new LlmRequest(Planner, "plan it", LlmSchemas.TaskGraph), "system.md");
+
+        Assert.Equal(
+            ["-p", "--model", "opus", "--effort", "high", "--system-prompt-file", "system.md", "--json-schema", LlmSchemas.TaskGraph.Json,
+             "--tools", "", "--setting-sources", "user", "--permission-mode", "dontAsk", "--permission-prompts", "none",
+             "--strict-mcp-config", "--disable-slash-commands", "--no-session-persistence",
+             "--output-format", "stream-json", "--verbose", "--include-partial-messages"],
+            arguments);
+    }
+
+    [Fact]
+    public void Questions_pin_the_exact_argument_list_and_confine_the_file_tools()
+    {
+        var arguments = ClaudeCodeAsker.Arguments(@"C:\repo", "ask.md", [@"C:\shots"], null);
+
+        Assert.Equal(
+            ["-p", "--model", "sonnet", "--effort", "medium", "--system-prompt-file", "ask.md",
+             "--tools", "Read,Grep,Glob", "--allowedTools", "Read,Grep,Glob", "--restricted",
+             "--add-dir", @"C:\repo", "--add-dir", @"C:\shots",
+             "--setting-sources", "user", "--permission-mode", "dontAsk", "--permission-prompts", "none",
+             "--strict-mcp-config", "--disable-slash-commands", "--no-session-persistence",
+             "--output-format", "stream-json", "--verbose", "--include-partial-messages"],
+            arguments);
+        Assert.DoesNotContain("bypassPermissions", arguments);
+        Assert.DoesNotContain("--bare", arguments);
+    }
+
+    [Theory]
+    [InlineData("CLAUDECODE", true)]
+    [InlineData("CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD", true)]
+    [InlineData("claude_code_simple", true)]
+    [InlineData("CLAUDE_CODE_OAUTH_TOKEN", false)]
+    [InlineData("CLAUDE_CODE_USE_BEDROCK", false)]
+    [InlineData("CLAUDE_CODE_API_KEY_HELPER_TTL_MS", false)]
+    [InlineData("ANTHROPIC_API_KEY", false)]
+    [InlineData("CLAUDE_CONFIG_DIR", false)]
+    [InlineData("PATH", false)]
+    public void Only_claude_code_settings_are_dropped_from_the_environment(string name, bool dropped) =>
+        Assert.Equal(dropped, ClaudeCodeSafety.IsDroppedVariable(name));
+
+    [Fact]
+    public void The_child_environment_loses_claude_code_settings_but_keeps_the_login()
+    {
+        var start = new System.Diagnostics.ProcessStartInfo("claude");
+        start.Environment["CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD"] = "1";
+        start.Environment["CLAUDE_CODE_OAUTH_TOKEN"] = "t";
+        start.Environment["CLAUDECODE"] = "1";
+
+        ClaudeCodeSafety.ScrubEnvironment(start);
+
+        Assert.False(start.Environment.ContainsKey("CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD"));
+        Assert.False(start.Environment.ContainsKey("CLAUDECODE"));
+        Assert.True(start.Environment.ContainsKey("CLAUDE_CODE_OAUTH_TOKEN"));
+    }
+
+    [Theory]
+    [InlineData(@"C:\npm\claude.cmd", @"C:\repo & calc")]
+    [InlineData(@"C:\npm\CLAUDE.BAT", @"C:\repo|x")]
+    [InlineData(@"C:\npm\claude.cmd", "C:\\repo\nx")]
+    [InlineData(@"C:\npm\claude.cmd", @"C:\100%\repo")]
+    [InlineData(@"C:\npm\claude.cmd", @"C:\repo(1)")]
+    public void A_shim_is_refused_when_an_argument_could_be_read_by_cmd(string path, string argument)
+    {
+        var error = Assert.Throws<LlmException>(() => ClaudeCodeSafety.RejectUnsafeShimArguments(path, ["sonnet", argument]));
+
+        Assert.Contains("claude.exe", error.Message);
+    }
+
+    [Fact]
+    public void Safe_shim_arguments_and_executables_are_allowed()
+    {
+        ClaudeCodeSafety.RejectUnsafeShimArguments(@"C:\npm\claude.cmd", ["sonnet", @"C:\My Repos\app-1", "system-abc.md"]);
+        ClaudeCodeSafety.RejectUnsafeShimArguments(@"C:\bin\claude.exe", [@"C:\repo & calc"]);
+    }
+
+    [Fact]
     public void Settings_route_a_role_to_claude()
     {
         var settings = new FactorySettings
