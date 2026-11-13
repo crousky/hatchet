@@ -227,8 +227,13 @@ public static class FilePatcher
         if (segments.Length == 0) return false;
         var name = segments[^1].ToLowerInvariant();
         if (SecretTemplates.Contains(name)) return false;
-        return name == ".env" || name.StartsWith(".env.") || name == "credentials"
-            || name.EndsWith(".pem") || name.EndsWith(".pfx") || name.EndsWith(".p12") || name.EndsWith(".key") || name.EndsWith(".tfvars")
+        if (name.EndsWith(".example.env") || name.EndsWith(".sample.env")) return false;
+        // .npmrc is not here on purpose: it is a sensitive path (see IsSensitivePath) and is commonly committed.
+        return name == ".env" || name.StartsWith(".env.") || name.EndsWith(".env") || name == "credentials"
+            || name == ".netrc" || name == ".pgpass" || name == "credentials.json"
+            || (name.StartsWith("service-account") && name.EndsWith(".json"))
+            || name.EndsWith(".pem") || name.EndsWith(".pfx") || name.EndsWith(".p12") || name.EndsWith(".p8") || name.EndsWith(".key") || name.EndsWith(".tfvars")
+            || name.EndsWith(".jks") || name.EndsWith(".keystore") || name.EndsWith(".tfstate") || name.EndsWith(".tfstate.backup")
             || name.StartsWith("id_rsa") || name.StartsWith("id_ed25519") || name.StartsWith("id_ecdsa")
             || name.StartsWith("secrets.");
     }
