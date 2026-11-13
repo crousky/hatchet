@@ -15,9 +15,13 @@ Use FluentButton and FluentTextField, never plain HTML controls. ...
 
 Hatchet looks for skills in three places, and when two share a name the first one wins:
 
-1. The repository's `.hatchet/skills/<name>/SKILL.md`.
-2. The repository's `.claude/skills/<name>/SKILL.md`, shared with Claude Code.
-3. Your own `%LOCALAPPDATA%\Hatchet\skills\<name>\SKILL.md`, for every repository.
+1. Your own `%LOCALAPPDATA%\Hatchet\skills\<name>\SKILL.md`, for every repository.
+2. The repository's `.hatchet/skills/<name>/SKILL.md`.
+3. The repository's `.claude/skills/<name>/SKILL.md`, shared with Claude Code.
+
+Yours come first because a repository may not be yours: it can't replace a skill of yours by using the same name. A skill from a repository is still instructions the agents follow, so read the skills in a repository you didn't write before you run Hatchet on it.
+
+In a repository, a skill folder or `SKILL.md` that is a symbolic link is skipped, as is a `SKILL.md` larger than 64 KB. Settings doesn't list them. Your own skills folder has neither limit, so skills linked in from a dotfiles folder work.
 
 Local models can't call tools, so Hatchet chooses the skills rather than the model. The Task Planner sees each skill's name and description and lists the ones each subtask needs, beside its files. You can change them when you review the plan, and a plan handed over through MCP can name them too. The Context Specifier, Code Generator and Bug Fixer then get the bodies of that subtask's skills meant for them, in a Skills section of the prompt, and the run log says which, such as "Gave the Code Generator the skills: fluent-ui-blazor." Skills are read again for every call, so an edit reaches the next one. A prompt that wouldn't leave the local model room to answer drops the type definitions first, then skills from the end of the subtask's list, and the log says so. Claude agents get skills the same way, in the prompt; Claude Code's own skills stay off.
 

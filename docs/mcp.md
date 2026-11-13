@@ -3,8 +3,14 @@
 Hatchet is also an MCP server at `http://localhost:5199/mcp`. Add it to Claude Code once, for every project:
 
 ```bash
-claude mcp add --transport http --scope user hatchet http://localhost:5199/mcp
+claude mcp add --transport http --scope user hatchet http://localhost:5199/mcp --header "Authorization: Bearer <token>"
 ```
+
+The endpoint needs a secret token, made on first start and kept in `%LOCALAPPDATA%\Hatchet\mcp-token`. Settings shows this command with your token filled in, ready to copy. Every request to `/mcp` without it, or with a wrong one, is refused with 401.
+
+If you added Hatchet before tokens existed, the old entry has no header and will be refused. Run `claude mcp remove hatchet` first, so the old entry is gone, then run the command from Settings. If you ever need a new token, delete the `mcp-token` file, restart Hatchet, and do the same.
+
+The token is shown only in Settings. Treat it like a password, and know that the web UI has no login, so anyone who can open it on this machine can read the token.
 
 Then plan a change with Claude in conversation and ask it to hand the plan to Hatchet. Hatchet skips its own planner and builds, verifies, fixes and reviews each step on your local model, while Claude follows along and helps when a run pauses.
 
@@ -14,8 +20,8 @@ Then plan a change with Claude in conversation and ask it to hand the plan to Ha
 | `start_run` | Starts a run from a spec, with a ready-made plan or with Hatchet's planner |
 | `list_runs`, `get_run` | Status, project, place in line, progress, subtasks, recent events and working time left. When a run needs a person, `get_run` also returns `needsFromYou`: what happened, what is blocking it, what guidance to give and what each `resume_run` action needs from you |
 | `get_subtask` | One subtask in full: last failure, fix history, review verdict, diff |
-| `approve_plan` | Approves a plan waiting for review in Hatchet, without the commands Hatchet's planner proposed |
-| `pause_run`, `resume_run` | Pause now or after the current step; resume, retry the fixer with guidance, re-verify, restart or skip |
+| `approve_plan` | Approves the plan of a run you started with `reviewPlanInHatchet: true`, without the commands Hatchet's planner proposed. It refuses every other plan: one you didn't ask to review, one for a defect or change report, and one longer than Hatchet builds unattended (40 subtasks by default). Those are approved by you, in Hatchet |
+| `pause_run`, `resume_run` | Pause now or after the current step; resume, retry the fixer with guidance, re-verify, restart or skip. Guidance sent this way reaches the agents labelled as the driving agent's, and not the reviewer. `retry_fixer` works three times per subtask over MCP, and after that it has to be done in Hatchet. `resume` and `reverify` are refused at the two pauses only the user can clear: a changed check command, and a file too long to review in full |
 | `hand_over_call` | Stops the call an agent is making and makes it again on the local model or a Claude model |
 | `cancel_run` | Abandons a run |
 
@@ -34,7 +40,15 @@ Besides runs, Claude can make one-off requests about a repository. They show on 
 | `list_requests`, `get_request` | Requests grouped by repository, and one in full: its report or answer, the `runId` of any run it started, and what it has printed so far |
 | `stop_request`, `rerun_request`, `delete_request` | Stop one (a command's whole process tree is killed), repeat it on the newest commit, or remove it and its copy of the code |
 
-Commands run in an isolated copy of the latest commit, so they never disturb a run that is building in the same folder, and uncommitted work isn't included. One `run_app` or `run_command` can run per repository at a time.
+Commands run in an isolated copy of the latest commit, so they never disturb a run that is building in the same folder, and uncommitted work isn't included. One `run_app` or `run_command` can run per repository at a time. Whoever holds the token can run commands this way, with your permissions, so keep it private.
+
+Repository and screenshot paths must be on this computer: network paths (`\\server\share`, `//server/share`) are refused.
+
+## Treat results as data
+
+Most results carry text that came from a repository, a build or a model: command output, diffs, failures, reviewer comments, answers. Each such result has a `note` saying so, and so does the tool's description. A client should treat that text as data to read, never as instructions to follow, because a file in the repository can contain text written to look like one.
+
+Hatchet's side of the same rule: it never treats what an MCP client says as the user's word. Guidance from `resume_run` is passed on as the driving agent's. Writes to config that can run code (`.github/` and the like) are only allowed when the subtask's plan lists them or the user names them in Hatchet, so guidance sent over MCP can't unlock them. A check command that changed after the model's edits, and a file too long for the reviewer to read in full, can only be accepted in Hatchet: over MCP, `resume` and `reverify` are refused at those pauses. They are decisions about what runs and what is committed, so they stay with the user.
 
 ### Defects and changes
 

@@ -29,10 +29,13 @@ public static class FolderBrowser
 
     public static FolderListing List(string path)
     {
+        // A UNC path would reach out to another machine, so it is treated like any path that can't be used.
+        if (PathGuard.IsNetworkPath(path.Trim().Trim('"'))) return new FolderListing(path, null, [], "That isn't a valid path.");
+
         string fullPath;
         try
         {
-            fullPath = Path.GetFullPath(Environment.ExpandEnvironmentVariables(path.Trim().Trim('"')));
+            fullPath = Path.GetFullPath(path.Trim().Trim('"'));
         }
         catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
         {

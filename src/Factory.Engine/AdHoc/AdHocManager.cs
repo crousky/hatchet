@@ -231,7 +231,7 @@ public sealed class AdHocManager(
         if (request.IsActive || request.Status != RequestStatus.Succeeded) throw new FactoryValidationException("It hasn't finished being looked at yet.");
 
         var spec = ReportBuilder.BuildSpec(request.Kind, request.Input, request.Result, GetAttachments(id).Count);
-        var run = await starter.StartRunAsync(new NewRunRequest(request.RepositoryPath, spec, ReportBuilder.RunTitle(request.Kind, request.Input), null, RequirePlanApproval: true, request.ModelChoice), ct);
+        var run = await starter.StartRunAsync(new NewRunRequest(request.RepositoryPath, spec, ReportBuilder.RunTitle(request.Kind, request.Input), null, RequirePlanApproval: true, request.ModelChoice, PlanReviewByUser: true), ct);
         request.RunId = run.Id;
         request.Result = spec;
         await store.UpdateAsync(request, CancellationToken.None);
@@ -284,7 +284,7 @@ public sealed class AdHocManager(
             var spec = ReportBuilder.BuildSpec(request.Kind, request.Input, triage, imageCount);
             ct.ThrowIfCancellationRequested();
             Append(active, "\n\nStarting a run for it…");
-            var run = await starter.StartRunAsync(new NewRunRequest(request.RepositoryPath, spec, ReportBuilder.RunTitle(request.Kind, request.Input), null, RequirePlanApproval: true, request.ModelChoice), CancellationToken.None);
+            var run = await starter.StartRunAsync(new NewRunRequest(request.RepositoryPath, spec, ReportBuilder.RunTitle(request.Kind, request.Input), null, RequirePlanApproval: true, request.ModelChoice, PlanReviewByUser: true), CancellationToken.None);
             request.RunId = run.Id;
             request.Result = spec;
             request.Status = RequestStatus.Succeeded;
@@ -571,7 +571,9 @@ public sealed class AdHocManager(
     private static void DeleteDirectory(string directory)
     {
         // Git marks object files read-only, which blocks a recursive delete on Windows.
-        foreach (var file in Directory.EnumerateFiles(directory, "*", SearchOption.AllDirectories))
+        // Linked folders are skipped, so a junction or symlink can't lead this out of the worktree.
+        var options = new EnumerationOptions { RecurseSubdirectories = true, AttributesToSkip = FileAttributes.ReparsePoint };
+        foreach (var file in Directory.EnumerateFiles(directory, "*", options))
             File.SetAttributes(file, FileAttributes.Normal);
         Directory.Delete(directory, recursive: true);
     }

@@ -19,10 +19,17 @@
                 <pre class="code-block">git push -u origin @draft.BranchName</pre>
                 <button class="icon-button" title="Copy" @onclick="@(() => CopyAsync($"git push -u origin {draft.BranchName}"))"><Icon Name="copy" Size="14" /></button>
             </div>
-            <div class="copy-block">
-                <pre class="code-block">gh pr create --base @draft.BaseBranch --head @draft.BranchName --title "@draft.Title" --body-file pr.md</pre>
-                <button class="icon-button" title="Copy" @onclick="@(() => CopyAsync($"gh pr create --base {draft.BaseBranch} --head {draft.BranchName} --title \"{draft.Title}\" --body-file pr.md"))"><Icon Name="copy" Size="14" /></button>
-            </div>
+            @if (PrCommand(draft) is { } prCommand)
+            {
+                <div class="copy-block">
+                    <pre class="code-block">@prCommand</pre>
+                    <button class="icon-button" title="Copy" @onclick="@(() => CopyAsync(prCommand))"><Icon Name="copy" Size="14" /></button>
+                </div>
+            }
+            else
+            {
+                <p class="muted">The branch names contain unusual characters, so no <code>gh pr create</code> command is shown. Create the pull request by hand.</p>
+            }
         }
         else
         {
@@ -57,6 +64,20 @@
     [Parameter] public PullRequestDraft? Draft { get; set; }
 
     private int Completed => Subtasks.Count(s => s.Status == SubtaskStatus.Completed);
+
+    private static readonly System.Text.RegularExpressions.Regex SafeRef = new(@"^[A-Za-z0-9_.\-/]+$");
+    private static readonly System.Text.RegularExpressions.Regex SafeTitle = new(@"^[A-Za-z0-9 _.,:\-/#]+$");
+
+    /// <summary>The gh command to paste, or null when a branch name isn't safe to put in a shell. An unusual title falls back to --fill.</summary>
+    private static string? PrCommand(PullRequestDraft draft)
+    {
+        if (!IsSafeRef(draft.BaseBranch) || !IsSafeRef(draft.BranchName)) return null;
+        var title = SafeTitle.IsMatch(draft.Title ?? "") ? $"--title \"{draft.Title}\"" : "--fill";
+        return $"gh pr create --base {draft.BaseBranch} --head {draft.BranchName} {title} --body-file pr.md";
+    }
+
+    private static bool IsSafeRef(string? value) =>
+        !string.IsNullOrEmpty(value) && !value.StartsWith('-') && SafeRef.IsMatch(value);
 
     private async Task CopyAsync(string text) => await JS.InvokeVoidAsync("hatchet.copy", text);
 }

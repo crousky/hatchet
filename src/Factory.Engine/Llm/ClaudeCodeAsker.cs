@@ -54,8 +54,9 @@ public sealed class ClaudeCodeAsker(string workingDirectory) : IClaudeAsker
                 StandardErrorEncoding = Encoding.UTF8,
                 StandardInputEncoding = new UTF8Encoding(false)
             };
+            ClaudeCodeSafety.RejectUnsafeShimArguments(settings.ClaudeCodePath, VariableArguments(repositoryPath, systemPromptFile, options?.ExtraDirectories, options?.Model));
             foreach (var argument in Arguments(repositoryPath, systemPromptFile, options?.ExtraDirectories, options?.Model)) start.ArgumentList.Add(argument);
-            start.Environment.Remove("CLAUDECODE");
+            ClaudeCodeSafety.ScrubEnvironment(start);
 
             using var process = ClaudeCodeLlmClient.StartOrThrow(start, settings.ClaudeCodePath);
             using var kill = ct.Register(() => ClaudeCodeLlmClient.Kill(process));
@@ -65,7 +66,7 @@ public sealed class ClaudeCodeAsker(string workingDirectory) : IClaudeAsker
             using var stallKill = stall.Token.Register(() => ClaudeCodeLlmClient.Kill(process));
 
             var stderr = process.StandardError.ReadToEndAsync(CancellationToken.None);
-            var write = ClaudeCodeLlmClient.WritePromptToAsync(process, $"{context}\n\n---\n\nQuestion: {question}\n");
+            var write = ClaudeCodeLlmClient.WritePromptToAsync(process, Orchestration.PromptBuilder.Ask(context, question));
 
             var streamed = new StringBuilder();
             var parser = new ClaudeStreamParser(delta =>
@@ -94,6 +95,10 @@ public sealed class ClaudeCodeAsker(string workingDirectory) : IClaudeAsker
         }
     }
 
+    /// <summary>The arguments of <see cref="Arguments"/> that carry outside values, for the check on a <c>.cmd</c> shim.</summary>
+    internal static IReadOnlyList<string> VariableArguments(string repositoryPath, string systemPromptFile, IReadOnlyList<string>? extraDirectories = null, string? model = null) =>
+        [repositoryPath, systemPromptFile, model ?? Model, .. extraDirectories ?? []];
+
     /// <summary>The command line. The context and question go on stdin.</summary>
     internal static IReadOnlyList<string> Arguments(string repositoryPath, string systemPromptFile, IReadOnlyList<string>? extraDirectories = null, string? model = null) =>
     [
@@ -103,8 +108,12 @@ public sealed class ClaudeCodeAsker(string workingDirectory) : IClaudeAsker
         "--system-prompt-file", systemPromptFile,
         // Reading and searching only. Nothing that edits files or runs commands.
         "--tools", "Read,Grep,Glob",
+        "--allowedTools", "Read,Grep,Glob",
+        // Confines those tools to the working folder and the added ones, and ignores the repository's settings files.
+        "--restricted",
         "--add-dir", repositoryPath,
         .. (extraDirectories ?? []).SelectMany(directory => new[] { "--add-dir", directory }),
+        .. ClaudeCodeSafety.LockdownArguments,
         "--strict-mcp-config",
         "--disable-slash-commands",
         "--no-session-persistence",

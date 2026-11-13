@@ -33,7 +33,7 @@
             <div class="input-row">
                 <div class="input-with-icon">
                     <Icon Name="folder" Size="14" />
-                    <input autocomplete="off" data-1p-ignore data-lpignore="true" id="repo" spellcheck="false" placeholder="C:\projects\my-app" value="@_path" @oninput="OnPathInput" />
+                    <input autocomplete="off" data-1p-ignore data-lpignore="true" id="repo" spellcheck="false" placeholder="C:\projects\my-app" value="@_path" @onchange="OnPathChanged" />
                 </div>
                 <button class="btn" title="Browse for a folder" @onclick="() => _picking = true"><Icon Name="folder" Size="14" /> Browse</button>
             </div>
@@ -162,7 +162,7 @@
         _recent = runs.Select(r => r.Task.RepositoryPath).Distinct(StringComparer.OrdinalIgnoreCase).Take(5).ToList();
     }
 
-    private async Task OnPathInput(ChangeEventArgs e)
+    private async Task OnPathChanged(ChangeEventArgs e)
     {
         _path = e.Value?.ToString() ?? "";
         _probing = _path.Trim().Length > 0;
@@ -173,7 +173,6 @@
         var token = _probeDelay.Token;
         try
         {
-            await Task.Delay(300, token);
             await ProbeAsync(token);
         }
         catch (OperationCanceledException)

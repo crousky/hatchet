@@ -37,11 +37,11 @@ public sealed record RunSummary(int RunId, string Title, string Status, string P
 
 public sealed record SubtaskSummary(int Order, string Title, string Status, int FixAttempts);
 
-public sealed record RunDetails(RunSummary Run, string? Branch, string? BaseBranch, bool? FinalCheckPassed, int Tokens, string? WorkLeft, IReadOnlyList<SubtaskSummary> Subtasks, IReadOnlyList<string> RecentEvents, PauseBrief? NeedsFromYou = null);
+public sealed record RunDetails(RunSummary Run, string? Branch, string? BaseBranch, bool? FinalCheckPassed, int Tokens, string? WorkLeft, IReadOnlyList<SubtaskSummary> Subtasks, IReadOnlyList<string> RecentEvents, PauseBrief? NeedsFromYou = null, string Note = McpNotes.Data);
 
 public sealed record SubtaskDetails(
     int Order, string Title, string Status, string Description, int FixAttempts,
-    string? SummaryOfChanges, string? LastFailure, IReadOnlyList<string> FixHistory, string? ReviewVerdict, string? Commit, string? LatestDiff);
+    string? SummaryOfChanges, string? LastFailure, IReadOnlyList<string> FixHistory, string? ReviewVerdict, string? Commit, string? LatestDiff, string Note = McpNotes.Data);
 
 /// <summary>
 /// Lets an MCP client such as Claude Code drive Hatchet: plan a change in conversation, hand the plan over,
@@ -53,9 +53,10 @@ public sealed class HatchetTools(FactoryOrchestrator orchestrator, IRunStore sto
     private const int MaxDiffChars = 20_000;
 
     [McpServerTool(Name = "probe_repository", ReadOnly = true)]
-    [Description("Checks whether a folder can host a Hatchet run (a Git repository with a clean working tree) and how Hatchet would verify it. Call this before start_run. If openRunId is set, that run has the repository, and a new run waits in line for it however the tree looks now.")]
+    [Description("Checks whether a folder can host a Hatchet run (a Git repository with a clean working tree) and how Hatchet would verify it. Call this before start_run. If openRunId is set, that run has the repository, and a new run waits in line for it however the tree looks now. " + McpNotes.Data)]
     public async Task<object> ProbeRepository([Description("Absolute path of the repository folder.")] string path, CancellationToken ct)
     {
+        PathGuard.RejectNetworkPath(path);
         var probe = await GitWorkspace.ProbeAsync(path, ct);
         var openRun = probe.IsGitRepository ? await orchestrator.GetOpenRunAsync(path, ct) : null;
         return new
@@ -77,7 +78,7 @@ public sealed class HatchetTools(FactoryOrchestrator orchestrator, IRunStore sto
         Pass the plan you worked out with the user to skip Hatchet's own planner. Without a plan, Hatchet plans from the spec itself, which is slower.
         The working tree must be clean. The run continues in the background: follow it with get_run.
         If the user's limit of runs at once is reached, or another open run has the repository, the run waits in line and starts by itself; queue says why.
-        """)]
+        """ + " " + McpNotes.Data)]
     public async Task<RunDetails> StartRun(
         [Description("Absolute path of the repository.")] string repositoryPath,
         [Description("The architecture spec or feature description, in Markdown. Every subtask is built against it.")] string spec,
@@ -87,15 +88,16 @@ public sealed class HatchetTools(FactoryOrchestrator orchestrator, IRunStore sto
         [Description("True to stop after planning so the user can review or edit the plan in Hatchet's UI before building.")] bool reviewPlanInHatchet = false,
         CancellationToken ct = default)
     {
+        PathGuard.RejectNetworkPath(repositoryPath, nameof(repositoryPath));
         // A client may send null for a list or field it leaves empty.
         var edits = plan?.Select(step => new SubtaskEdit(null, step.Title ?? "", step.Description ?? "",
             step.FilesToModify ?? [], step.FilesToCreate ?? [], step.FilesToRead ?? [], step.VerificationCommand ?? "", step.Skills ?? [])).ToList();
-        var run = await Do(() => orchestrator.StartRunAsync(new NewRunRequest(repositoryPath, spec, title, verificationCommand, reviewPlanInHatchet), edits, ct));
+        var run = await Do(() => orchestrator.StartRunAsync(new NewRunRequest(repositoryPath, spec, title, verificationCommand, reviewPlanInHatchet, PlanReviewByUser: false), edits, ct));
         return await DescribeRunAsync(run.Id, ct);
     }
 
     [McpServerTool(Name = "list_runs", ReadOnly = true)]
-    [Description("Lists Hatchet runs, newest first, with their status, progress and project (the repository's folder name). For a run that needs a person, call get_run to see what it needs.")]
+    [Description("Lists Hatchet runs, newest first, with their status, progress and project (the repository's folder name). For a run that needs a person, call get_run to see what it needs. " + McpNotes.Data)]
     public async Task<IReadOnlyList<RunSummary>> ListRuns(
         [Description("True to include merged, closed, failed and cancelled runs.")] bool includeFinished = false,
         CancellationToken ct = default)
@@ -109,12 +111,12 @@ public sealed class HatchetTools(FactoryOrchestrator orchestrator, IRunStore sto
     }
 
     [McpServerTool(Name = "get_run", ReadOnly = true)]
-    [Description("Shows a run's status, its subtasks, recent events and, once a few subtasks are done, how much working time is likely left. If it is waiting for a person, needsFromYou explains what happened, what is blocking it, what to give the agents as guidance and what each resume_run action needs; use get_subtask for the full failure and diff.")]
+    [Description("Shows a run's status, its subtasks, recent events and, once a few subtasks are done, how much working time is likely left. If it is waiting for a person, needsFromYou explains what happened, what is blocking it, what to give the agents as guidance and what each resume_run action needs; use get_subtask for the full failure and diff. " + McpNotes.Data)]
     public Task<RunDetails> GetRun([Description("The run's id.")] int runId, CancellationToken ct = default) =>
         DescribeRunAsync(runId, ct);
 
     [McpServerTool(Name = "get_subtask", ReadOnly = true)]
-    [Description("Shows one subtask in full: what it should do, what changed, the last failure, earlier fix attempts, the review verdict and its latest diff. Use it to decide how to help a paused run.")]
+    [Description("Shows one subtask in full: what it should do, what changed, the last failure, earlier fix attempts, the review verdict and its latest diff. Use it to decide how to help a paused run. " + McpNotes.Data)]
     public async Task<SubtaskDetails> GetSubtask(
         [Description("The run's id.")] int runId,
         [Description("The subtask's position in the plan, starting at 1.")] int order,
@@ -135,7 +137,8 @@ public sealed class HatchetTools(FactoryOrchestrator orchestrator, IRunStore sto
         Approves the plan of a run waiting for plan review, as it stands, and starts building.
         Verification commands proposed by Hatchet's own planner are dropped, because only the user can approve those, in Hatchet's UI.
         Those subtasks are checked with the run's verification command instead. Commands in a plan you supplied with start_run are kept.
-        """)]
+        Only works for a run you started yourself with reviewPlanInHatchet. A plan the user asked to review, such as one for a reported defect, or one longer than Hatchet builds unattended, is approved by the user in Hatchet's UI, and this refuses it.
+        """ + " " + McpNotes.Data)]
     public async Task<RunDetails> ApprovePlan([Description("The run's id.")] int runId, CancellationToken ct = default)
     {
         await RequireRunAsync(runId, ct);
@@ -144,12 +147,12 @@ public sealed class HatchetTools(FactoryOrchestrator orchestrator, IRunStore sto
             .Select(s => new SubtaskEdit(s.Id, s.Title, s.Description, s.TargetFilesToModify, s.TargetFilesToCreate, s.ContextFilesToRead,
                 s.CommandApproved ? s.VerificationCommand : "", s.Skills))
             .ToList();
-        await Do(() => orchestrator.ApprovePlanAsync(runId, plan, ct));
+        await Do(() => orchestrator.ApprovePlanAsDrivingAgentAsync(runId, plan, ct));
         return await DescribeRunAsync(runId, ct);
     }
 
     [McpServerTool(Name = "pause_run")]
-    [Description("Pauses a working run. By default the current step finishes first, so nothing is lost. With immediately=true the current step stops now and runs again on resume.")]
+    [Description("Pauses a working run. By default the current step finishes first, so nothing is lost. With immediately=true the current step stops now and runs again on resume. " + McpNotes.Data)]
     public async Task<RunDetails> PauseRun(
         [Description("The run's id.")] int runId,
         [Description("Stop the current step now rather than after it finishes.")] bool immediately = false,
@@ -169,7 +172,8 @@ public sealed class HatchetTools(FactoryOrchestrator orchestrator, IRunStore sto
         - restart_subtask: discard the subtask's uncommitted changes and build it again.
         - skip_subtask: discard its changes and move on to the next subtask.
         Guidance goes to every agent that works on the subtask from then on: name the root cause or the approach to take, such as "keep the seed file to a few rows".
-        """)]
+        Two pauses can only be cleared by the user in Hatchet: a check command that changed after the model's edits, and a file too long for the reviewer to read in full. resume and reverify are refused there.
+        """ + " " + McpNotes.Data)]
     public async Task<RunDetails> ResumeRun(
         [Description("The run's id.")] int runId,
         [Description("resume, retry_fixer, reverify, restart_subtask or skip_subtask.")] string action = "resume",
@@ -186,7 +190,8 @@ public sealed class HatchetTools(FactoryOrchestrator orchestrator, IRunStore sto
             _ => throw new McpException($"Unknown action \"{action}\". Use resume, retry_fixer, reverify, restart_subtask or skip_subtask.")
         };
         await RequireRunAsync(runId, ct);
-        await Do(() => orchestrator.ResumeAsync(runId, decision, guidance, ct));
+        // Guidance sent here is the driving agent's, and carries less weight with Hatchet's agents than the user's. retry_fixer is capped.
+        await Do(() => orchestrator.ResumeAsDrivingAgentAsync(runId, decision, guidance, ct));
         return await DescribeRunAsync(runId, ct);
     }
 
@@ -195,7 +200,7 @@ public sealed class HatchetTools(FactoryOrchestrator orchestrator, IRunStore sto
         Stops the model call a working run is making and makes it again on another model. Use it when an agent is taking far too long,
         for example a local Bug Fixer thinking for an hour. The call starts over on the new model without using an attempt;
         later calls keep the model set in Hatchet's settings. get_run's currentStep and recentEvents show what is running.
-        """)]
+        """ + " " + McpNotes.Data)]
     public async Task<RunDetails> HandOverCall(
         [Description("The run's id.")] int runId,
         [Description("local for the local model, or a Claude model: opus, sonnet or haiku.")] string to,
@@ -207,7 +212,7 @@ public sealed class HatchetTools(FactoryOrchestrator orchestrator, IRunStore sto
     }
 
     [McpServerTool(Name = "cancel_run", Destructive = true)]
-    [Description("Cancels a run for good: discards uncommitted changes and returns the repository to its base branch. Commits stay on the run's branch. Prefer pause_run unless the user wants to abandon the run.")]
+    [Description("Cancels a run for good: discards uncommitted changes and returns the repository to its base branch. Commits stay on the run's branch. Prefer pause_run unless the user wants to abandon the run. " + McpNotes.Data)]
     public async Task<RunDetails> CancelRun([Description("The run's id.")] int runId, CancellationToken ct = default)
     {
         await RequireRunAsync(runId, ct);

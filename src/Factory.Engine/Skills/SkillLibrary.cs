@@ -4,7 +4,10 @@ using Factory.Contracts;
 
 namespace Factory.Engine.Skills;
 
-/// <summary>Where a skill was found. Earlier places win when two skills share a name.</summary>
+/// <summary>
+/// Where a skill was found. When two skills share a name, the user's wins, then <see cref="Project"/>, then <see cref="ClaudeProject"/>.
+/// The order they are declared in is not the order of precedence.
+/// </summary>
 public enum SkillSource
 {
     /// <summary>The repository's <c>.hatchet/skills</c> folder.</summary>
@@ -57,7 +60,7 @@ public sealed partial class SkillLibrary(string? userDirectory)
     public string? UserDirectory => userDirectory;
 
     /// <summary>
-    /// The skills a run in the repository can use, by name. A project skill hides a user skill of the same name, and
+    /// The skills a run in the repository can use, by name. A user skill hides a project skill of the same name, and
     /// one in <c>.hatchet/skills</c> hides one in <c>.claude/skills</c>.
     /// </summary>
     public IReadOnlyList<Skill> Load(string? repositoryPath)
@@ -76,13 +79,27 @@ public sealed partial class SkillLibrary(string? userDirectory)
 
     private IEnumerable<(string Directory, SkillSource Source)> Places(string? repositoryPath)
     {
+        // The user's own skills come first: a repository, which may be untrusted, can't replace one by reusing its name.
+        if (!string.IsNullOrWhiteSpace(userDirectory)) yield return (userDirectory, SkillSource.User);
         if (!string.IsNullOrWhiteSpace(repositoryPath))
         {
-            yield return (System.IO.Path.Combine(repositoryPath, ProjectFolder), SkillSource.Project);
-            yield return (System.IO.Path.Combine(repositoryPath, ClaudeProjectFolder), SkillSource.ClaudeProject);
+            // The repository may be untrusted, so its skills roots, and the .hatchet and .claude folders above them, may not be links
+            // out of it. The user's own folder may be a link: that is the user's choice.
+            if (!IsLinked(repositoryPath, ".hatchet") && !IsLinked(repositoryPath, ProjectFolder))
+                yield return (System.IO.Path.Combine(repositoryPath, ProjectFolder), SkillSource.Project);
+            if (!IsLinked(repositoryPath, ".claude") && !IsLinked(repositoryPath, ClaudeProjectFolder))
+                yield return (System.IO.Path.Combine(repositoryPath, ClaudeProjectFolder), SkillSource.ClaudeProject);
         }
-        if (!string.IsNullOrWhiteSpace(userDirectory)) yield return (userDirectory, SkillSource.User);
     }
+
+    private static bool IsLinked(string repositoryPath, string relative)
+    {
+        try { return new DirectoryInfo(System.IO.Path.Combine(repositoryPath, relative)).LinkTarget is not null; }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return true; }
+    }
+
+    /// <summary>The largest <c>SKILL.md</c> that is read. A bigger one is skipped.</summary>
+    internal const long MaxFileBytes = 64 * 1024;
 
     private static IEnumerable<Skill> LoadFolder(string directory, SkillSource source)
     {
@@ -104,7 +121,12 @@ public sealed partial class SkillLibrary(string? userDirectory)
             string text;
             try
             {
-                if (!File.Exists(file)) continue;
+                var info = new FileInfo(file);
+                if (!info.Exists) continue;
+                // In a repository, which may be untrusted, a link could lead out to any file, and a huge file would
+                // fill a prompt. The user's own skills are theirs to link, say from a dotfiles folder, and to size.
+                if (source != SkillSource.User
+                    && (new DirectoryInfo(folder).LinkTarget is not null || info.LinkTarget is not null || info.Length > MaxFileBytes)) continue;
                 text = File.ReadAllText(file);
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)

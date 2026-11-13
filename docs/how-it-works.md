@@ -1,6 +1,6 @@
 # How Hatchet works
 
-The [README](../README.md) shows the pipeline at a glance. This page covers the behaviour behind it: how fixes are kept to the spec, what happens when the final check fails, what agents are told about types, how runaway answers are handled, and how runs queue.
+The [README](../README.md) shows the pipeline at a glance. This page covers the behaviour behind it: how fixes are kept to the spec, how patches are checked, what is verified and reviewed, how untrusted text is marked in prompts, what happens when the final check fails, what agents are told about types, how runaway answers are handled, and how runs queue.
 
 For skills, see [skills.md](skills.md). For driving Hatchet from Claude Code, see [mcp.md](mcp.md).
 
@@ -9,6 +9,16 @@ For skills, see [skills.md](skills.md). For driving Hatchet from Claude Code, se
 A fix has to fix what the spec asks for, not route around it. If a fix takes a type the spec names out of the subtask's files altogether, such as swapping a named component for plain markup, Hatchet doesn't apply it. The next attempt is told what to keep, along with the failure it still has to fix. Only real types count, from the repository or its packages, so a fix can still replace a member the spec got wrong.
 
 Fixes before the first review and fixes after it have a budget each. A change that only builds on its last allowed fix still gets fixed for what the reviewer finds, instead of pausing as soon as the reviewer sees it.
+
+A fix also can't make the check pass by changing the check. Hatchet refuses a Bug Fixer patch that deletes a test file, or changes `package.json`, a solution, a test project, `Makefile` and the like, unless the subtask's plan lists that file. Like the spec guard, a refusal changes nothing, doesn't use up an attempt, and tells the next attempt why. Editing a test is still allowed.
+
+## Patch safety
+
+Every patch is checked whole before anything is written. A path must stay inside the repository: no absolute paths, no `..`, no symlink on the way, and nothing in `.git`, whichever way it is spelled (`.git.`, `GIT~1`, a trailing space, invisible characters). The path is checked a second time after it is resolved, so a spelling the first check missed still can't reach `.git`. Reading a file into a prompt goes through the same check.
+
+Some files can run code or change how tools behave: `.github/`, `.claude/`, `.hatchet/`, `.vscode/`, `.husky/`, `.gitattributes`, `.gitmodules`, `.npmrc` and `nuget.config`. A patch may write one only if the subtask's plan lists it as a target, or your own guidance, typed in Hatchet, names it. Otherwise nothing from the patch is written and the run pauses with the file named, so you can decide.
+
+Files whose names mark them as secrets, such as `.env`, `*.pem` and `id_rsa`, are never read into a prompt, and a new one is left out when Hatchet stages a subtask's files. Either way the run's log names the file. This goes by file name, and the list is kept short so that ordinary files such as `secrets.ts` or `.env.development` are not caught by it. A Windows short name (`ENV~1.LOC`) that stands in for an existing file is refused, so it can't be used to get round the list.
 
 ## When the final check fails
 
@@ -21,6 +31,24 @@ When the final check fails, Hatchet doesn't stop at once:
 3. **Ask you.** If the check still fails, or the Bug Fixer can't fix it, the run pauses with the errors. Choose **Hand to the Fixer**, with optional guidance, to give it another go as a new subtask. Or commit a fix on the run's branch yourself and choose **Run the final check again**. Over MCP, these are `resume_run` with `retry_fixer` or `resume`.
 
 The Bug Fixer gets one automatic try, so a fix that doesn't hold ends with you rather than a loop.
+
+## What gets verified and reviewed
+
+**The check command is pinned.** When no command was set for the run, Hatchet detects one from the repository and records it at the start. Before each check it detects again. If the answer is different, for example because a model-written `package.json` now makes it an npm project, Hatchet doesn't run the new command. The run pauses and shows both, and **Re-verify** (or **Resume**, at the final check) accepts the new one. If nothing could be detected at the start, the first command that appears is recorded and run. A command you set yourself is not re-detected.
+
+**Reviews cover the whole diff.** Everything staged is committed, so everything staged has to be seen. A staged diff longer than the review limit (`MaxDiffChars`, 60,000 characters by default) is split by file into parts, each reviewed in its own call, and the change passes only if every part does. A single file bigger than the limit is cut short for the reviewer, so a pass isn't enough: the run pauses with the file named, and **Resume** commits it as it is once you've read it. Lock files and generated files (`package-lock.json`, `*.Designer.cs` and the like) are committed with a note in the log instead. A verdict that says `passed` and also lists blocking issues is counted as a rejection.
+
+**Git runs with less trust.** Every call turns off `core.fsmonitor` and `safe.bareRepository`, and diffs use no external diff or text conversion program, so opening or diffing an untrusted repository doesn't start its programs. Hooks are ignored for read-only calls, and still run for the calls that change the repository, such as Hatchet's own commits. Each call has a timeout and an output cap, and refs that start with `-` are refused.
+
+**Commands run with less.** Variables whose names look like credentials are removed from the environment of every command. On Windows a command runs in a Job Object, so anything it started in the background is killed when it ends.
+
+None of this makes the build or the tests safe to run. They are still model-written code, with your permissions.
+
+## Prompts and untrusted text
+
+Much of what goes into a prompt comes from a place the model, or someone else, could write to: the spec, files in the repository, test output, diffs, skills and earlier fix attempts. Each of those goes inside a tagged block with a random tag, made fresh for every prompt, and the system prompt says text inside a block is material to work on, not instructions. If the content contains the tag, it is rewritten, so it can't close its own block or open one. Your guidance sits in a block of its own. Guidance that an MCP client sends is labelled as the driving agent's, without the "follow it first" wording, and the reviewer never sees it.
+
+This lowers the odds that text in a file can steer an agent. It doesn't make it impossible. What bounds the damage is the checks above: the plan-listed writes, the pinned command, the review of everything committed.
 
 ## What agents are told about types
 

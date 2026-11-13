@@ -172,17 +172,73 @@ public static class FilePatcher
         var segments = normalized.Split('/', StringSplitOptions.RemoveEmptyEntries);
         if (segments.Length == 0 || segments.Contains(".."))
             throw new PatchRejectedException($"'{relativePath}' escapes the repository.");
-        if (segments.Any(s => s.Equals(".git", StringComparison.OrdinalIgnoreCase)))
+        if (segments.Any(IsGitAlias))
             throw new PatchRejectedException($"'{relativePath}' targets the .git directory.");
+        if (segments.Any(s => s != "." && (s.EndsWith('.') || s.EndsWith(' '))))
+            throw new PatchRejectedException($"'{relativePath}' has a name ending in a dot or space.");
 
         var root = Path.GetFullPath(repositoryPath);
         var fullPath = Path.GetFullPath(Path.Combine(root, normalized));
+        var resolved = Path.GetRelativePath(root, fullPath).Split(['/', '\\'], StringSplitOptions.RemoveEmptyEntries);
+        if (resolved.Any(s => s.Equals(".git", StringComparison.OrdinalIgnoreCase)))
+            throw new PatchRejectedException($"'{relativePath}' targets the .git directory.");
         var prefix = root.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
         if (!fullPath.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
             throw new PatchRejectedException($"'{relativePath}' escapes the repository.");
 
+        // An NTFS 8.3 short name (PROGRA~1, ENV~1.LOC) is an alias for a file the name-based checks would not recognise.
+        // GetFullPath expands one that exists into the long name, so a segment that came back different was an alias.
+        // A name merely shaped like one (notes~1.txt) comes back as itself and is fine.
+        var given = segments.Where(s => s != ".").ToArray();
+        if (given.Length != resolved.Length || given.Where((s, i) => s.Contains('~') && !s.Equals(resolved[i], StringComparison.OrdinalIgnoreCase)).Any())
+            throw new PatchRejectedException($"'{relativePath}' uses a Windows short (8.3) name. Short names are not accepted; use the full name.");
+
         RejectLinkedAncestors(root, fullPath, relativePath);
         return fullPath;
+    }
+
+    /// <summary>.git, its NTFS 8.3 short name (GIT~1), or .git with invisible format characters (macOS HFS+ ignores them).</summary>
+    private static bool IsGitAlias(string segment)
+    {
+        if (System.Text.RegularExpressions.Regex.IsMatch(segment, @"^git~\d+$", System.Text.RegularExpressions.RegexOptions.IgnoreCase))
+            return true;
+        var visible = string.Concat(segment.Where(c => char.GetUnicodeCategory(c) != System.Globalization.UnicodeCategory.Format));
+        return visible.Equals(".git", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static readonly string[] SensitiveRoots =[".github", ".claude", ".hatchet", ".vscode", ".husky"];
+    private static readonly string[] SensitiveNames = [".gitattributes", ".gitmodules", ".npmrc", "nuget.config"];
+
+    /// <summary>True for CI, agent, editor and hook config, and package-source files: edits there can run code or redirect installs.</summary>
+    public static bool IsSensitivePath(string relativePath)
+    {
+        var segments = NormalizeSeparators(relativePath.Trim()).Split('/', StringSplitOptions.RemoveEmptyEntries);
+        if (segments.Length == 0) return false;
+        if (segments.Length > 1 && SensitiveRoots.Contains(segments[0], StringComparer.OrdinalIgnoreCase)) return true;
+        return SensitiveNames.Contains(segments[^1], StringComparer.OrdinalIgnoreCase);
+    }
+
+    private static readonly string[] SecretNames =
+        [".env", ".env.local", ".netrc", ".pgpass", "credentials", "credentials.json", "secrets.json", "secrets.yml", "secrets.yaml", "secrets.env"];
+
+    private static readonly string[] SecretExtensions = [".pem", ".pfx", ".p12", ".p8", ".jks", ".keystore", ".tfstate", ".tfstate.backup"];
+
+    /// <summary>
+    /// True when the file name is one that holds credentials or keys by convention. The list is kept narrow, because a
+    /// match hides the file from the model and keeps a new one out of the commit: names that are often ordinary source
+    /// or shared config (secrets.ts, .env.development, prod.tfvars, a .key file) are not on it.
+    /// </summary>
+    public static bool IsSecretPath(string relativePath)
+    {
+        var segments = NormalizeSeparators(relativePath.Trim()).Split('/', StringSplitOptions.RemoveEmptyEntries);
+        if (segments.Length == 0) return false;
+        var name = segments[^1].ToLowerInvariant();
+        // .npmrc is not here on purpose: it is a sensitive path (see IsSensitivePath) and is commonly committed.
+        return SecretNames.Contains(name)
+            || (name.StartsWith(".env.") && name.EndsWith(".local"))
+            || (name.StartsWith("service-account") && name.EndsWith(".json"))
+            || SecretExtensions.Any(name.EndsWith)
+            || name is "id_rsa" or "id_ed25519" or "id_ecdsa" or "id_dsa";
     }
 
     private static void RejectLinkedAncestors(string root, string fullPath, string relativePath)

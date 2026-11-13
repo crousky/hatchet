@@ -76,6 +76,20 @@ public class SchemaDeserializationTests
     public void Chatter_around_the_json_is_tolerated(string content, string expected) =>
         Assert.Equal(expected, StructuredOutputParser.ExtractJsonObject(content));
 
+    [Fact]
+    public void Think_text_inside_the_json_answer_is_kept_but_a_leading_think_block_is_removed()
+    {
+        var kept = StructuredOutputParser.Parse<FileContentProbe>("""<think>plan</think>{"fileContent":"a <think>b</think> c"}""");
+        Assert.Equal("a <think>b</think> c", kept.FileContent);
+
+        var unterminated = StructuredOutputParser.Parse<FileContentProbe>("""<think>one</think> <think>two</think> {"fileContent":"x <think>open"}""");
+        Assert.Equal("x <think>open", unterminated.FileContent);
+
+        Assert.Null(StructuredOutputParser.ExtractJsonObject("""<think>still thinking {"a":1}"""));
+    }
+
+    private sealed record FileContentProbe(string FileContent);
+
     public static TheoryData<Type, LlmSchema> SchemaPairs => new()
     {
         { typeof(TaskGraphResponse), LlmSchemas.TaskGraph },

@@ -225,6 +225,9 @@ namespace Factory.Web.Data.Migrations
                     b.Property<int?>("CurrentSubtaskId")
                         .HasColumnType("INTEGER");
 
+                    b.Property<string>("DetectedVerificationCommand")
+                        .HasColumnType("TEXT");
+
                     b.Property<bool?>("IntegrationPassed")
                         .HasColumnType("INTEGER");
 
@@ -239,6 +242,12 @@ namespace Factory.Web.Data.Migrations
 
                     b.Property<string>("PausedStage")
                         .HasColumnType("TEXT");
+
+                    b.Property<string>("PendingVerificationCommand")
+                        .HasColumnType("TEXT");
+
+                    b.Property<bool>("PlanHeldForUser")
+                        .HasColumnType("INTEGER");
 
                     b.Property<int>("PromptTokens")
                         .HasColumnType("INTEGER");
@@ -272,6 +281,9 @@ namespace Factory.Web.Data.Migrations
                         .ValueGeneratedOnAdd()
                         .HasColumnType("INTEGER");
 
+                    b.Property<int>("AgentFixerResets")
+                        .HasColumnType("INTEGER");
+
                     b.Property<bool>("CommandApproved")
                         .HasColumnType("INTEGER");
 
@@ -293,6 +305,9 @@ namespace Factory.Web.Data.Migrations
                         .IsRequired()
                         .HasColumnType("TEXT");
 
+                    b.Property<bool>("GuidanceFromAgent")
+                        .HasColumnType("INTEGER");
+
                     b.Property<string>("HumanGuidance")
                         .HasColumnType("TEXT");
 
@@ -309,6 +324,9 @@ namespace Factory.Web.Data.Migrations
                         .HasColumnType("TEXT");
 
                     b.Property<int>("ReviewFixAttempts")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<bool>("ReviewGapAccepted")
                         .HasColumnType("INTEGER");
 
                     b.Property<string>("ReviewJson")
@@ -366,6 +384,9 @@ namespace Factory.Web.Data.Migrations
 
                     b.Property<string>("ModelChoice")
                         .HasColumnType("TEXT");
+
+                    b.Property<bool>("PlanReviewByUser")
+                        .HasColumnType("INTEGER");
 
                     b.Property<string>("RepositoryPath")
                         .IsRequired()

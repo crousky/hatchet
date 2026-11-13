@@ -45,7 +45,8 @@ public sealed partial class FactoryOrchestrator(
     /// a restart, and nothing it asks for happens until the run's turn comes.
     /// </summary>
     /// <param name="Text">The plan feedback for <see cref="RequestKind.Regenerate"/>, or the guidance for <see cref="RequestKind.Resume"/>.</param>
-    private sealed record QueuedRequest(RequestKind Kind, HumanDecision Decision = HumanDecision.Resume, string? Text = null)
+    /// <param name="FromDrivingAgent">The resume came through MCP, so its guidance is the driving agent's and not the user's.</param>
+    private sealed record QueuedRequest(RequestKind Kind, HumanDecision Decision = HumanDecision.Resume, string? Text = null, bool FromDrivingAgent = false)
     {
         /// <summary>The status a run has while it waits with this request.</summary>
         public RunStatus WaitingStatus => Kind switch
@@ -258,6 +259,7 @@ public sealed partial class FactoryOrchestrator(
             ArchitectureSpec = request.ArchitectureSpec,
             VerificationCommand = command,
             RequirePlanApproval = request.RequirePlanApproval,
+            PlanReviewByUser = request.RequirePlanApproval && request.PlanReviewByUser,
             SuppliedPlanJson = plan is null ? null : JsonSerializer.Serialize(plan),
             ModelChoice = modelChoice
         };
@@ -304,6 +306,22 @@ public sealed partial class FactoryOrchestrator(
         Launch(runId, new QueuedRequest(RequestKind.Approve));
     }
 
+    /// <summary>
+    /// Approves a plan for an MCP client. A plan the user asked to review, in the UI or by filing a report, or one that came out
+    /// too long to build unattended, is the user's to approve, so the driving agent can't wave it through.
+    /// </summary>
+    public async Task ApprovePlanAsDrivingAgentAsync(int runId, IReadOnlyList<SubtaskEdit> plan, CancellationToken ct = default)
+    {
+        var run = await store.GetRunAsync(runId, ct);
+        RequireStatus(run, RunStatus.AwaitingPlanApproval);
+        if (run.Task.PlanReviewByUser)
+            throw new FactoryValidationException($"Run #{runId}'s plan was set up for the user to review, so it has to be approved in Hatchet's UI, where they can trim or reject it. "
+                + "Tell the user it is waiting for them.");
+        if (run.PlanHeldForUser)
+            throw new FactoryValidationException($"Run #{runId}'s plan is longer than Hatchet builds without the user's say-so, so it has to be approved in Hatchet's UI. Tell the user it is waiting for them.");
+        await ApprovePlanAsync(runId, plan, ct);
+    }
+
     public async Task RegeneratePlanAsync(int runId, string? feedback, CancellationToken ct = default)
     {
         var run = await store.GetRunAsync(runId, ct);
@@ -311,12 +329,60 @@ public sealed partial class FactoryOrchestrator(
         Launch(runId, new QueuedRequest(RequestKind.Regenerate, Text: feedback));
     }
 
-    public async Task ResumeAsync(int runId, HumanDecision decision, string? guidance, CancellationToken ct = default)
+    public Task ResumeAsync(int runId, HumanDecision decision, string? guidance, CancellationToken ct = default) =>
+        ResumeAsync(runId, decision, guidance, false, ct);
+
+    /// <summary>The most times a driving agent may reset one subtask's fix budgets. After that the user has to resume it in Hatchet.</summary>
+    public const int MaxAgentFixerResets = 3;
+
+    /// <summary>
+    /// Resumes a run for an MCP client. Its guidance is passed on as the driving agent's, not the user's, and it may hand a
+    /// subtask back to the Bug Fixer only <see cref="MaxAgentFixerResets"/> times.
+    /// </summary>
+    public Task ResumeAsDrivingAgentAsync(int runId, HumanDecision decision, string? guidance, CancellationToken ct = default) =>
+        ResumeAsync(runId, decision, guidance, true, ct);
+
+    private async Task ResumeAsync(int runId, HumanDecision decision, string? guidance, bool fromDrivingAgent, CancellationToken ct)
     {
         var run = await store.GetRunAsync(runId, ct);
         RequireStatus(run, RunStatus.NeedsHuman);
+        if (fromDrivingAgent && decision == HumanDecision.RetryFixer) await CountAgentFixerResetAsync(run, ct);
+        if (fromDrivingAgent && AcceptsGate(run, decision))
+            throw new FactoryValidationException("This pause asks a person to approve a changed check command or a file the reviewer could not read in full. "
+                + "Ask the user to resume it in Hatchet; through MCP the run can be handed back to the fixer, restarted or skipped.");
         // The decision is carried out when the run's turn comes, so leaving the line first undoes nothing.
-        Launch(runId, new QueuedRequest(RequestKind.Resume, decision, guidance));
+        Launch(runId, new QueuedRequest(RequestKind.Resume, decision, guidance, fromDrivingAgent));
+    }
+
+    /// <summary>True when carrying out the decision would approve the changed check command or accept an oversize file unreviewed. Only a person may.</summary>
+    private static bool AcceptsGate(FactoryRun run, HumanDecision decision) =>
+        (AcceptsVerification(run, decision) && run.PendingVerificationCommand is not null) || AcceptsReviewGap(run, decision);
+
+    private static bool AcceptsVerification(FactoryRun run, HumanDecision decision) =>
+        decision == HumanDecision.Reverify || (decision == HumanDecision.Resume && run.PausedStage == PipelineStage.Integrate);
+
+    private static bool AcceptsReviewGap(FactoryRun run, HumanDecision decision) =>
+        decision is HumanDecision.Resume or HumanDecision.Reverify && run.PauseReason?.Contains(OversizeReasonMarker, StringComparison.Ordinal) == true;
+
+    /// <summary>Each retry_fixer from an agent resets the fix budgets, so without a cap an agent could keep a run going for ever with nobody looking.</summary>
+    private async Task CountAgentFixerResetAsync(FactoryRun run, CancellationToken ct)
+    {
+        var subtasks = await store.GetSubtasksAsync(run.Id, ct);
+        var refusal = new FactoryValidationException($"The Bug Fixer's fix budget has already been reset {MaxAgentFixerResets} times through MCP. "
+            + "Ask the user to resume it in Hatchet, where resets aren't limited.");
+        // A failed final check starts a new subtask for every hand-over, so those are what is counted there.
+        if (run.PausedStage == PipelineStage.Integrate)
+        {
+            if (subtasks.Count(s => s.IsIntegrationFix) >= MaxAgentFixerResets) throw refusal;
+            return;
+        }
+
+        var paused = subtasks.FirstOrDefault(s => s.Status == SubtaskStatus.NeedsHuman);
+        if (paused is null) return;
+        if (paused.AgentFixerResets >= MaxAgentFixerResets) throw refusal;
+        // Saved before the pipeline starts, which reads the subtask and writes it back whole.
+        paused.AgentFixerResets++;
+        await store.UpdateSubtaskAsync(paused, ct);
     }
 
     /// <summary>
@@ -369,13 +435,18 @@ public sealed partial class FactoryOrchestrator(
         RequestKind.Start => RunFromIngestAsync(context, ct),
         RequestKind.Approve => ExecuteAsync(context, null, ct),
         RequestKind.Regenerate => DecomposeAndContinueAsync(context, request.Text, ct),
-        _ => ResumeFromPauseAsync(context, request.Decision, request.Text, ct)
+        _ => ResumeFromPauseAsync(context, request.Decision, request.Text, request.FromDrivingAgent, ct)
     };
 
-    private async Task ResumeFromPauseAsync(PipelineContext context, HumanDecision decision, string? guidance, CancellationToken ct)
+    private async Task ResumeFromPauseAsync(PipelineContext context, HumanDecision decision, string? guidance, bool fromDrivingAgent, CancellationToken ct)
     {
         var run = context.Run;
         RequireStatus(run, RunStatus.NeedsHuman);
+
+        // Carrying on after the check command changed is how the person approves the new one. Not retrying the fixer,
+        // restarting or skipping, and never a driving agent: its request is refused before it gets here.
+        if (!fromDrivingAgent && AcceptsVerification(run, decision))
+            await AcceptPendingVerificationAsync(run, ct);
 
         switch (run.PausedStage)
         {
@@ -388,7 +459,7 @@ public sealed partial class FactoryOrchestrator(
                 return;
             case PipelineStage.Integrate:
                 // "Hand to the Fixer" always hands it over, even after an earlier final-check fix.
-                await IntegrateAsync(context, ct, handOff: decision == HumanDecision.RetryFixer, guidance);
+                await IntegrateAsync(context, ct, handOff: decision == HumanDecision.RetryFixer, guidance, fromDrivingAgent);
                 return;
         }
 
@@ -400,7 +471,14 @@ public sealed partial class FactoryOrchestrator(
             return;
         }
 
-        paused.HumanGuidance = string.IsNullOrWhiteSpace(guidance) ? paused.HumanGuidance : guidance.Trim();
+        // Carrying on after a passing review of a file it couldn't see in full is how the person accepts the gap.
+        if (!fromDrivingAgent && AcceptsReviewGap(run, decision))
+            paused.ReviewGapAccepted = true;
+        if (!string.IsNullOrWhiteSpace(guidance))
+        {
+            paused.HumanGuidance = guidance.Trim();
+            paused.GuidanceFromAgent = fromDrivingAgent;
+        }
         var resumePoint = await ApplyDecisionAsync(run, paused, decision, ct);
         await store.UpdateSubtaskAsync(paused, ct);
         await ExecuteAsync(context, resumePoint, ct);
@@ -753,6 +831,9 @@ public sealed partial class FactoryOrchestrator(
         run.BaseCommit = await git.GetHeadShaAsync(ct);
         run.BranchName = await git.GetUnusedBranchNameAsync($"factory/run-{run.Id}", ct);
         run.RepoMap = RepositoryScanner.BuildRepoMap(task.RepositoryPath);
+        // What the repository detects before any model has touched it is what the user saw on the New Run page.
+        run.DetectedVerificationCommand = VerificationDetector.Detect(task.RepositoryPath)?.Command;
+        run.PendingVerificationCommand = null;
         await store.UpdateRunAsync(run, ct);
 
         var fileCount = run.RepoMap.Count(c => c == '\n') + 1;
@@ -799,7 +880,13 @@ public sealed partial class FactoryOrchestrator(
         bus.Publish(new PlanChanged(run.Id));
         await LogAsync(run.Id, null, AgentLogKind.Info, PipelineStage.Decompose, $"Planned {subtasks.Count} subtasks.", ct);
 
-        if (task.RequirePlanApproval)
+        // Hatchet's own planner is model output, so a plan this long isn't built without someone reading it first.
+        run.PlanHeldForUser = context.Settings.MaxPlannedSubtasks > 0 && subtasks.Count > context.Settings.MaxPlannedSubtasks;
+        if (run.PlanHeldForUser)
+            await LogAsync(run.Id, null, AgentLogKind.Warning, PipelineStage.Decompose,
+                $"The Task Planner planned {subtasks.Count} subtasks, more than the {context.Settings.MaxPlannedSubtasks} Hatchet builds without asking. "
+                + "Read the plan in Hatchet, cut it down or approve it as it is, and then it builds.", ct);
+        if (task.RequirePlanApproval || run.PlanHeldForUser)
         {
             await SetRunStatusAsync(run, RunStatus.AwaitingPlanApproval, ct);
             return;
@@ -923,9 +1010,9 @@ public sealed partial class FactoryOrchestrator(
                 needsFix = true;
             }
         }
-        catch (Exception ex) when (ex is LlmException or GitException or IOException or UnauthorizedAccessException)
+        catch (Exception ex) when (ex is LlmException or GitException or IOException or UnauthorizedAccessException or GatePauseException)
         {
-            await LogAsync(run.Id, subtask.Id, AgentLogKind.Error, run.CurrentStage, ex.Message, CancellationToken.None);
+            if (ex is not GatePauseException) await LogAsync(run.Id, subtask.Id, AgentLogKind.Error, run.CurrentStage, ex.Message, CancellationToken.None);
             await PauseForSubtaskAsync(run, subtask, ex.Message, CancellationToken.None);
             return false;
         }
@@ -941,10 +1028,15 @@ public sealed partial class FactoryOrchestrator(
 
         var planned = PlannedFiles(subtask).ToList();
         var files = RepositoryScanner.ReadFiles(context.Task.RepositoryPath, planned, settings.MaxFileChars, settings.MaxContextChars);
+        if (planned.Where(FilePatcher.IsSecretPath).ToList() is { Count: > 0 } withheld)
+        {
+            await LogAsync(run.Id, subtask.Id, AgentLogKind.Warning, PipelineStage.Refine,
+                $"Not shown to the agents because the name looks like a secrets file: {string.Join(", ", withheld)}. They are told the file exists but not what is in it.", ct);
+        }
         var definitions = await ReadDefinitionsAsync(context, subtask, AgentRole.ContextSpecifier, planned, files, ct, subtask.Title, subtask.Description, subtask.HumanGuidance);
         var fileContext = RepositoryScanner.Render(files);
         var prompt = await FitPromptAsync(context, subtask, AgentRole.ContextSpecifier, definitions,
-            (d, k) => PromptBuilder.Refine(subtask, context.Task.ArchitectureSpec, run.RepoMap, fileContext, d, subtask.HumanGuidance, k), ct);
+            (d, k) => PromptBuilder.Refine(subtask, context.Task.ArchitectureSpec, run.RepoMap, fileContext, d, subtask.HumanGuidance, k, GuidanceOf(subtask)), ct);
 
         var refined = await InvokeAgentAsync<RefinedSpecResponse>(context, AgentRole.ContextSpecifier, subtask.Id, prompt, null, ct);
         subtask.RefinedSpecJson = PromptBuilder.ToJson(refined);
@@ -980,8 +1072,8 @@ public sealed partial class FactoryOrchestrator(
                 subtask.Title, subtask.Description, subtask.RefinedSpecJson, subtask.HumanGuidance);
             var fileContext = RepositoryScanner.Render(files);
             var prompt = await FitPromptAsync(context, subtask, AgentRole.CodeGenerator, definitions, (d, k) => cutOff is null
-                ? PromptBuilder.Build(subtask, fileContext, d, subtask.HumanGuidance, k)
-                : PromptBuilder.BuildRest(subtask, fileContext, written, remaining, cutOff, d, subtask.HumanGuidance, k), ct);
+                ? PromptBuilder.Build(subtask, fileContext, d, subtask.HumanGuidance, k, GuidanceOf(subtask))
+                : PromptBuilder.BuildRest(subtask, fileContext, written, remaining, cutOff, d, subtask.HumanGuidance, k, GuidanceOf(subtask)), ct);
 
             var answer = await AskAgentAsync<FilePatchSetResponse>(
                 context, AgentRole.CodeGenerator, subtask.Id, prompt,
@@ -1011,6 +1103,9 @@ public sealed partial class FactoryOrchestrator(
 
     private static (FilePatchSetResponse Value, string? CutOffPath)? KeepWholeFiles(string content) =>
         StructuredOutputParser.SalvagePatch(content) is { } kept ? (kept.Patch, kept.CutOffPath) : null;
+
+    /// <summary>Whose words the subtask's guidance is, which decides how much weight the prompts give it.</summary>
+    private static GuidanceSource GuidanceOf(FactorySubtask subtask) => subtask.GuidanceFromAgent ? GuidanceSource.DrivingAgent : GuidanceSource.Human;
 
     private static string NormalizePath(string path)
     {
@@ -1077,6 +1172,7 @@ public sealed partial class FactoryOrchestrator(
     {
         var (run, settings, git) = (context.Run, context.Settings, context.Git);
         subtask.FixAttempts++;
+        subtask.ReviewGapAccepted = false; // The code is about to change, so what was accepted no longer holds.
         // Saved now, as the status may already be Fixing: a restart must not hand out extra attempts.
         await store.UpdateSubtaskAsync(subtask, ct);
         await SetSubtaskStatusAsync(subtask, SubtaskStatus.Fixing, ct);
@@ -1091,7 +1187,7 @@ public sealed partial class FactoryOrchestrator(
             subtask.LastFailure, subtask.HumanGuidance, subtask.Title, subtask.Description, subtask.RefinedSpecJson);
         var fileContext = RepositoryScanner.Render(files);
         var prompt = await FitPromptAsync(context, subtask, AgentRole.BugFixer, definitions,
-            (d, k) => PromptBuilder.Fix(subtask, subtask.LastFailure ?? "(no failure was recorded)", fileContext, subtask.HumanGuidance, d, k), ct);
+            (d, k) => PromptBuilder.Fix(subtask, subtask.LastFailure ?? "(no failure was recorded)", fileContext, subtask.HumanGuidance, d, k, GuidanceOf(subtask)), ct);
 
         Func<FilePatchSetResponse, string?> validate = p => p.Operations.Count == 0 ? "The operations list is empty, so nothing would change and the failure would repeat." : null;
         var claude = ClaudeCodeOptions.ModelLabel(AgentProfiles.Resolve(settings, AgentRole.BugFixer).ClaudeModel);
@@ -1141,6 +1237,15 @@ public sealed partial class FactoryOrchestrator(
             await RefuseFixAsync(context, subtask, patch, dropped, ct);
             return false;
         }
+        if (TamperedGateFiles(context.Task.RepositoryPath, subtask, patch) is { Count: > 0 } tampered)
+        {
+            var names = string.Join(", ", tampered.Select(p => $"`{p}`"));
+            await RefuseFixAsync(context, subtask, patch,
+                $"The last fix was not applied, because it deleted a test or changed the files that define the check: {names}. A fix may not delete tests or change the files that define the check. Fix the code so the tests pass.",
+                $"it deleted a test or changed the files that define the check ({names}).",
+                $"it deleted a test or changed the files that define the check ({names}). The next attempt is told to fix the code instead.", ct);
+            return false;
+        }
         return await ApplyPatchAsync(context, subtask, patch, PipelineStage.Fix, ct);
     }
 
@@ -1182,10 +1287,12 @@ public sealed partial class FactoryOrchestrator(
         if (named.Count == 0 || patch.Operations.Count == 0) return [];
 
         var root = Path.GetFullPath(repositoryPath);
+        // With the separator, a sibling folder that shares the root's name as a prefix isn't taken for part of it.
+        var inside = Path.TrimEndingDirectorySeparator(root) + Path.DirectorySeparatorChar;
         string? Read(string relative)
         {
             var full = Path.GetFullPath(Path.Combine(root, relative));
-            if (!full.StartsWith(root, StringComparison.OrdinalIgnoreCase) || !File.Exists(full)) return null;
+            if (!full.StartsWith(inside, StringComparison.OrdinalIgnoreCase) || !File.Exists(full)) return null;
             try { return File.ReadAllText(full); }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return null; }
         }
@@ -1219,18 +1326,79 @@ public sealed partial class FactoryOrchestrator(
     {
         var names = string.Join(", ", dropped.Select(n => $"`{n}`"));
         var (it, isIt) = dropped.Count == 1 ? ("it", "it is") : ("them", "they are");
+
+        await RefuseFixAsync(context, subtask, patch,
+            $"{RefusedFixLead}{names}, which the specification asks for. Keep {it} and fix how {isIt} used instead. "
+            + $"The definitions below show {(dropped.Count == 1 ? "its" : "their")} namespace and members, where Hatchet found them.",
+            $"it took out {names}, which the specification asks for.",
+            $"it took out {names}, which the specification asks for. The next attempt is told to keep {it}.", ct);
+    }
+
+    /// <summary>
+    /// Refuses a fix that tampers with the gate: deleting a test, or changing the files that define the check, makes it pass
+    /// without fixing anything. Planned targets are allowed, as the plan was approved. Returns what was touched, as paths.
+    /// </summary>
+    internal static IReadOnlyList<string> TamperedGateFiles(string repositoryPath, FactorySubtask subtask, FilePatchSetResponse patch)
+    {
+        var planned = PlannedTargets(repositoryPath, subtask);
+        var touched = new List<string>();
+        foreach (var op in patch.Operations)
+        {
+            if (ResolvedRelativePath(repositoryPath, op.RelativeFilePath) is not { } path || planned.Contains(path)) continue;
+            var deletes = string.Equals(op.Action?.Trim(), FileActions.Delete, StringComparison.OrdinalIgnoreCase);
+            if ((deletes && LooksLikeTestFile(path)) || DefinesCheck(path)) touched.Add(path);
+        }
+        return touched.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+    }
+
+    private static readonly string[] TestFolders = ["test", "tests", "__tests__", "spec", "specs"];
+    private static readonly string[] CheckFiles =
+    [
+        "package.json", "pytest.ini", "tox.ini", "makefile", "cargo.toml", "go.mod", "directory.build.props", "directory.build.targets",
+        "pyproject.toml", "conftest.py", "setup.cfg", "build.gradle", "build.gradle.kts", "pom.xml",
+    ];
+
+    /// <summary>
+    /// A test folder in the path, or a file named like a test: test_x, x_test.go, x.test.js, x.spec.ts, XTest.cs, XTests.cs.
+    /// Not a loose "test" in the name, which would take latest.txt and contest.cs.
+    /// </summary>
+    private static bool LooksLikeTestFile(string path)
+    {
+        var segments = path.Split('/', StringSplitOptions.RemoveEmptyEntries);
+        var name = segments[^1];
+        var stem = Path.GetFileNameWithoutExtension(name);
+        return segments[..^1].Any(s => TestFolders.Contains(s, StringComparer.OrdinalIgnoreCase))
+            || name.StartsWith("test_", StringComparison.OrdinalIgnoreCase)
+            || name.Contains("_test.", StringComparison.OrdinalIgnoreCase)
+            || name.Contains(".test.", StringComparison.OrdinalIgnoreCase) || name.Contains(".spec.", StringComparison.OrdinalIgnoreCase)
+            || stem.EndsWith("Test", StringComparison.Ordinal) || stem.EndsWith("Tests", StringComparison.Ordinal)
+            || stem.EndsWith("_test", StringComparison.OrdinalIgnoreCase) || stem.EndsWith("_tests", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool DefinesCheck(string path)
+    {
+        var name = path[(path.LastIndexOf('/') + 1)..];
+        return CheckFiles.Contains(name, StringComparer.OrdinalIgnoreCase)
+            || name.EndsWith(".targets", StringComparison.OrdinalIgnoreCase)
+            || name.StartsWith("jest.config.", StringComparison.OrdinalIgnoreCase) || name.StartsWith("vitest.config.", StringComparison.OrdinalIgnoreCase)
+            || name.EndsWith(".sln", StringComparison.OrdinalIgnoreCase) || name.EndsWith(".slnx", StringComparison.OrdinalIgnoreCase)
+            || ((name.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase) || name.EndsWith(".fsproj", StringComparison.OrdinalIgnoreCase))
+                && name.Contains("Test", StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>Counts a refused fix as no attempt, and tells the next one why. <paramref name="notice"/> starts the failure the fixer reads.</summary>
+    private async Task RefuseFixAsync(PipelineContext context, FactorySubtask subtask, FilePatchSetResponse patch, string notice, string historyNote, string logNote, CancellationToken ct)
+    {
         var failure = FailureBeingFixed(subtask.LastFailure);
 
-        subtask.LastFailure = $"{RefusedFixLead}{names}, which the specification asks for. Keep {it} and fix how {isIt} used instead. "
-            + $"The definitions below show {(dropped.Count == 1 ? "its" : "their")} namespace and members, where Hatchet found them.\n\n{FailureToFixLead}\n{failure}";
+        subtask.LastFailure = $"{notice}\n\n{FailureToFixLead}\n{failure}";
         // Nothing was written, so this wasn't an attempt at the failure. RefusedInARow ends the loop if the guard keeps saying no.
         subtask.FixAttempts--;
         if (subtask.ReviewJson is not null) subtask.ReviewFixAttempts--;
-        subtask.FixHistory.Add($"{RefusedFixLabel} {patch.SummaryOfChanges}\nNot applied: it took out {names}, which the specification asks for.");
+        subtask.FixHistory.Add($"{RefusedFixLabel} {patch.SummaryOfChanges}\nNot applied: {historyNote}");
         if (subtask.FixHistory.Count > MaxFixHistory) subtask.FixHistory.RemoveAt(0);
         await store.UpdateSubtaskAsync(subtask, ct);
-        await LogAsync(context.Run.Id, subtask.Id, AgentLogKind.Warning, PipelineStage.Fix,
-            $"Didn't apply the Bug Fixer's change: it took out {names}, which the specification asks for. The next attempt is told to keep {it}.", ct);
+        await LogAsync(context.Run.Id, subtask.Id, AgentLogKind.Warning, PipelineStage.Fix, $"Didn't apply the Bug Fixer's change: {logNote}", ct);
     }
 
     private static string DescribeDuration(TimeSpan span) =>
@@ -1346,6 +1514,7 @@ public sealed partial class FactoryOrchestrator(
         bool finished = true)
     {
         var run = context.Run;
+        await RequireNoUnplannedSensitiveWritesAsync(context, subtask, patch, stage, ct);
         PatchResult result;
         try
         {
@@ -1373,6 +1542,93 @@ public sealed partial class FactoryOrchestrator(
         return true;
     }
 
+    /// <summary>A gate stopped the pipeline for a person. The message is the pause reason.</summary>
+    private sealed class GatePauseException(string message) : Exception(message);
+
+    /// <summary>The path as the patcher will resolve it, relative to the repository, so "./" and ".." can't hide it. Null if it won't resolve.</summary>
+    private static string? ResolvedRelativePath(string repositoryPath, string path)
+    {
+        try { return NormalizePath(Path.GetRelativePath(Path.GetFullPath(repositoryPath), FilePatcher.ResolveSafePath(repositoryPath, path))); }
+        catch (PatchRejectedException) { return null; } // Applying it fails with a clearer message than this gate's.
+    }
+
+    /// <summary>The user's own guidance names the file, so they have approved writing it. Guidance from a driving agent doesn't count.</summary>
+    private static bool NamedByUser(FactorySubtask subtask, string path) =>
+        !subtask.GuidanceFromAgent && subtask.HumanGuidance is { } guidance && guidance.Replace('\\', '/').Contains(path, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>The subtask's planned targets, in the form <see cref="ResolvedRelativePath"/> gives.</summary>
+    private static HashSet<string> PlannedTargets(string repositoryPath, FactorySubtask subtask) =>
+        subtask.TargetFilesToModify.Concat(subtask.TargetFilesToCreate)
+            .Select(p => ResolvedRelativePath(repositoryPath, p) ?? NormalizePath(p))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// CI, agent, editor and hook config can run code or change how tools behave, so a patch may only touch them when
+    /// the subtask's plan, which a person approved or supplied, names them. Otherwise nothing is written and the run pauses.
+    /// </summary>
+    private async Task RequireNoUnplannedSensitiveWritesAsync(PipelineContext context, FactorySubtask subtask, FilePatchSetResponse patch, PipelineStage stage, CancellationToken ct)
+    {
+        var repository = context.Task.RepositoryPath;
+        var planned = PlannedTargets(repository, subtask);
+        var unplanned = patch.Operations
+            .Select(o => ResolvedRelativePath(repository, o.RelativeFilePath))
+            .Where(p => p is not null && FilePatcher.IsSensitivePath(p) && !planned.Contains(p) && !NamedByUser(subtask, p))
+            .Select(p => p!)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        if (unplanned.Count == 0) return;
+
+        var names = string.Join(", ", unplanned.Select(p => $"`{p}`"));
+        var reason = $"The change wants to write {names}, which can run code or change how tools behave and {(unplanned.Count == 1 ? "is" : "are")} not in this subtask's files. "
+            + "Nothing was written. If it is really needed, name the file in your guidance (typed in Hatchet, not sent by an agent) and retry, or make the change yourself and re-verify; otherwise skip the subtask.";
+        // Kept as the failure, so "Hand to the Fixer" has something to work from.
+        subtask.LastFailure = subtask.LastFailure is null ? reason : $"{reason}\n\n{FailureToFixLead}\n{FailureBeingFixed(subtask.LastFailure)}";
+        await store.UpdateSubtaskAsync(subtask, ct);
+        await LogAsync(context.Run.Id, subtask.Id, AgentLogKind.Warning, stage, reason, ct);
+        throw new GatePauseException(reason);
+    }
+
+    /// <summary>
+    /// Detects the check command, and holds it to the one this run has already seen. Files the model wrote, such as a new
+    /// package.json, can change what the detector returns, and that would change the shell command with nobody approving it.
+    /// The first command to appear is recorded and allowed, as a repository with nothing to build can gain a build.
+    /// <c>Changed</c> is the pause reason when a different command showed up, and then nothing may run.
+    /// </summary>
+    private async Task<(DetectedVerification? Detected, string? Changed)> DetectPinnedAsync(PipelineContext context, CancellationToken ct, string accept = "Re-verify (reverify)")
+    {
+        var run = context.Run;
+        var detected = VerificationDetector.Detect(context.Task.RepositoryPath);
+        var seen = run.DetectedVerificationCommand;
+        if (seen is null || detected?.Command == seen)
+        {
+            // A change that was undone, say by a fix that put the files back, leaves nothing for a person to approve.
+            if ((detected is not null && seen is null) || run.PendingVerificationCommand is not null)
+            {
+                run.DetectedVerificationCommand = detected?.Command ?? seen;
+                run.PendingVerificationCommand = null;
+                await store.UpdateRunAsync(run, ct);
+            }
+            return (detected, null);
+        }
+
+        run.PendingVerificationCommand = detected?.Command ?? "";
+        await store.UpdateRunAsync(run, ct);
+        var now = detected is null ? "nothing, because no build or test setup is detected any more" : $"`{detected.Command}`";
+        return (null, $"The check command detected from the repository changed from `{seen}` to {now} after the model's edits, so it was not run. "
+            + $"To approve the new command, choose {accept}. Otherwise fix the files, then {accept}.");
+    }
+
+    /// <summary>Records the command a person approved by choosing to carry on after a change in what the repository detects.</summary>
+    private async Task AcceptPendingVerificationAsync(FactoryRun run, CancellationToken ct)
+    {
+        if (run.PendingVerificationCommand is not { } pending) return;
+        run.DetectedVerificationCommand = pending.Length == 0 ? null : pending;
+        run.PendingVerificationCommand = null;
+        await store.UpdateRunAsync(run, ct);
+        await LogAsync(run.Id, run.CurrentSubtaskId, AgentLogKind.Info, null,
+            pending.Length == 0 ? "Accepted that no check command is detected any more." : $"Accepted the new check command `{pending}`.", ct);
+    }
+
     /// <summary>Returns null when there is nothing to run yet: no command was given and no build or tests can be detected.</summary>
     private async Task<CommandResult?> VerifyAsync(PipelineContext context, FactorySubtask subtask, CancellationToken ct)
     {
@@ -1384,7 +1640,14 @@ public sealed partial class FactoryOrchestrator(
         if (ConfiguredCommand(context.Task, subtask) is { } configured)
             return await RunCommandAsync(context, subtask.Id, PipelineStage.Verify, configured, ct);
 
-        if (VerificationDetector.Detect(context.Task.RepositoryPath) is { } detected)
+        var (detected, changed) = await DetectPinnedAsync(context, ct);
+        if (changed is not null)
+        {
+            await LogAsync(run.Id, subtask.Id, AgentLogKind.Warning, PipelineStage.Verify, changed, ct);
+            throw new GatePauseException(changed);
+        }
+
+        if (detected is not null)
         {
             await LogAsync(run.Id, subtask.Id, AgentLogKind.Info, PipelineStage.Verify, $"Detected {detected.Description}, so verifying with `{detected.Command}`.", ct);
             return await RunCommandAsync(context, subtask.Id, PipelineStage.Verify, detected.Command, ct);
@@ -1405,22 +1668,116 @@ public sealed partial class FactoryOrchestrator(
         var testSummary = verification is null
             ? "No build or test setup exists yet, so nothing was built or tested. Judge the change on the diff alone."
             : $"Command: {verification.Command}\nExit code: {verification.ExitCode}\nDuration: {verification.Duration.TotalSeconds:0.0}s\n\n{PromptBuilder.Tail(verification.Output, 4000)}";
-        var prompt = PromptBuilder.Review(subtask, PromptBuilder.Head(diff, settings.MaxDiffChars), testSummary, subtask.HumanGuidance);
 
-        var verdict = await InvokeAgentAsync<ReviewVerdictResponse>(context, AgentRole.StaticReviewer, subtask.Id, prompt, null, ct);
+        // Everything staged is committed, so everything staged has to be seen: a long diff is reviewed in parts.
+        var chunks = ReviewChunks(diff, settings.MaxDiffChars);
+        var verdicts = new List<ReviewVerdictResponse>();
+        for (var i = 0; i < chunks.Count; i++)
+        {
+            var shown = chunks.Count == 1 ? chunks[i].Diff : $"[Part {i + 1} of {chunks.Count} of this change]\n{chunks[i].Diff}";
+            var prompt = PromptBuilder.Review(subtask, shown, testSummary, subtask.HumanGuidance, GuidanceOf(subtask));
+            var part = await InvokeAgentAsync<ReviewVerdictResponse>(context, AgentRole.StaticReviewer, subtask.Id, prompt, null, ct);
+            // A pass that lists blocking issues contradicts itself, and the issues win.
+            verdicts.Add(part.Passed && part.BlockingIssues.Count > 0 ? part with { Passed = false } : part);
+        }
+
+        var verdict = verdicts.Count == 1 ? verdicts[0] : new ReviewVerdictResponse(
+            verdicts.All(v => v.Passed), verdicts.Min(v => v.ConfidenceScore),
+            [.. verdicts.SelectMany(v => v.BlockingIssues)], [.. verdicts.SelectMany(v => v.Suggestions)]);
         subtask.ReviewJson = PromptBuilder.ToJson(verdict);
         await store.UpdateSubtaskAsync(subtask, ct);
 
         var outcome = verdict.Passed ? "approved" : "rejected";
         await LogAsync(run.Id, subtask.Id, verdict.Passed ? AgentLogKind.Info : AgentLogKind.Warning, PipelineStage.Review,
-            $"Reviewer {outcome} with {verdict.ConfidenceScore}% confidence; {verdict.BlockingIssues.Count} blocking issues, {verdict.Suggestions.Count} suggestions.", ct);
+            $"Reviewer {outcome}{(chunks.Count > 1 ? $" in {chunks.Count} parts" : "")} with {verdict.ConfidenceScore}% confidence; {verdict.BlockingIssues.Count} blocking issues, {verdict.Suggestions.Count} suggestions.", ct);
+
+        if (verdict.Passed) await RequireReviewedInFullAsync(context, subtask, chunks.SelectMany(c => c.TooLarge).Distinct().ToList(), ct);
         return verdict;
     }
+
+    /// <summary>A part of a change that is reviewed in one call, and the files in it that were cut short to fit.</summary>
+    internal sealed record ReviewChunk(string Diff, IReadOnlyList<string> TooLarge);
+
+    // Package lock files only. Exempting by any other name (*.Designer.cs, *.min.js) would let a model pick that name to dodge the full review.
+    private static readonly string[] LockFileNames = ["packages.lock.json", "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "Cargo.lock", "poetry.lock", "go.sum"];
+
+    private static bool IsPackageLockFile(string path)
+    {
+        var name = path[(path.LastIndexOf('/') + 1)..];
+        return LockFileNames.Contains(name, StringComparer.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// Splits a diff that is over <paramref name="maxChars"/> into per-file diffs and packs whole files into parts no longer
+    /// than that. A single file over the limit gets a part of its own, cut short, and is named in <see cref="ReviewChunk.TooLarge"/>.
+    /// </summary>
+    internal static List<ReviewChunk> ReviewChunks(string diff, int maxChars)
+    {
+        if (diff.Length <= maxChars) return [new ReviewChunk(diff, [])];
+
+        var chunks = new List<ReviewChunk>();
+        var current = new StringBuilder();
+        void Flush()
+        {
+            if (current.Length > 0) chunks.Add(new ReviewChunk(current.ToString(), []));
+            current.Clear();
+        }
+
+        foreach (var file in Regex.Split(diff, @"(?m)^(?=diff --git )").Where(f => f.Length > 0))
+        {
+            if (file.Length > maxChars)
+            {
+                Flush();
+                var header = file.Split('\n', 2)[0];
+                var at = header.LastIndexOf(" b/", StringComparison.Ordinal);
+                chunks.Add(new ReviewChunk(PromptBuilder.Head(file, maxChars), [at >= 0 ? header[(at + 3)..].Trim() : header]));
+                continue;
+            }
+            if (current.Length + file.Length > maxChars) Flush();
+            current.Append(file);
+        }
+        Flush();
+        return chunks;
+    }
+
+    /// <summary>
+    /// A file too large for the reviewer to see in full can hide anything past what it saw, so a passing review isn't enough
+    /// to commit it: the run pauses, unless the file is a package lock file, or a person has already said to carry on.
+    /// </summary>
+    private async Task RequireReviewedInFullAsync(PipelineContext context, FactorySubtask subtask, IReadOnlyList<string> tooLarge, CancellationToken ct)
+    {
+        var (run, limit) = (context.Run, context.Settings.MaxDiffChars);
+        foreach (var path in tooLarge.Where(IsPackageLockFile))
+            await LogAsync(run.Id, subtask.Id, AgentLogKind.Info, PipelineStage.Review,
+                $"{path} is a package lock file too large for the reviewer to see in full, so it was committed without that.", ct);
+        var unseen = tooLarge.Where(p => !IsPackageLockFile(p)).ToList();
+        if (unseen.Count == 0) return;
+
+        var names = string.Join(", ", unseen.Select(p => $"`{p}`"));
+        if (subtask.ReviewGapAccepted)
+        {
+            await LogAsync(run.Id, subtask.Id, AgentLogKind.Warning, PipelineStage.Review, $"Committed {names}, which the reviewer saw only the start of, as you chose to carry on.", ct);
+            return;
+        }
+
+        var reason = $"The reviewer approved, but {names} {(unseen.Count == 1 ? "is" : "are")} longer than the {limit}-character review limit, so it saw only the start. "
+            + $"{OversizeReasonMarker} Read the file yourself, then choose Resume to commit it as it is; or retry the fixer, restart or skip the subtask.";
+        await LogAsync(run.Id, subtask.Id, AgentLogKind.Warning, PipelineStage.Review, reason, ct);
+        throw new GatePauseException(reason);
+    }
+
+    private const string OversizeReasonMarker = "Nothing was committed.";
 
     private async Task CommitAsync(PipelineContext context, FactorySubtask subtask, CancellationToken ct)
     {
         var (run, git) = (context.Run, context.Git);
         await git.StageAllAsync(ct);
+        if (git.WithheldSecrets.Count > 0)
+        {
+            await LogAsync(run.Id, subtask.Id, AgentLogKind.Warning, PipelineStage.Review,
+                $"Left out of the commit because the name looks like a secrets file: {string.Join(", ", git.WithheldSecrets)}. "
+                + "The file is still in the working tree, and the checks ran with it. Commit it yourself if it belongs in the repository.", ct);
+        }
         var diff = await git.GetStagedDiffAsync(ct);
         if (diff.Length == 0)
         {
@@ -1454,7 +1811,7 @@ public sealed partial class FactoryOrchestrator(
     /// A person chose to hand the failure to the Bug Fixer. Without it, a failure goes to the Bug Fixer only the first
     /// time, so a fix that doesn't hold ends with a person rather than a loop.
     /// </param>
-    private async Task IntegrateAsync(PipelineContext context, CancellationToken ct, bool handOff = false, string? guidance = null)
+    private async Task IntegrateAsync(PipelineContext context, CancellationToken ct, bool handOff = false, string? guidance = null, bool guidanceFromAgent = false)
     {
         var (run, task, git) = (context.Run, context.Task, context.Git);
         PauseIfRequested(run.Id);
@@ -1462,10 +1819,19 @@ public sealed partial class FactoryOrchestrator(
         await SetStageAsync(run, PipelineStage.Integrate, null, ct);
 
         var subtasks = await store.GetSubtasksAsync(run.Id, ct);
-        var command = task.VerificationCommand.Length > 0
-            ? task.VerificationCommand
-            : VerificationDetector.Detect(task.RepositoryPath)?.Command
-              ?? subtasks.Where(s => s.CommandApproved && s.VerificationCommand.Length > 0).OrderBy(s => s.Order).LastOrDefault()?.VerificationCommand;
+        string? command = task.VerificationCommand;
+        if (command.Length == 0)
+        {
+            var (detected, changed) = await DetectPinnedAsync(context, ct, accept: "Resume");
+            if (changed is not null)
+            {
+                await LogAsync(run.Id, null, AgentLogKind.Warning, PipelineStage.Integrate, changed, ct);
+                await PauseRunAsync(run, changed, ct);
+                return;
+            }
+            command = detected?.Command
+                      ?? subtasks.Where(s => s.CommandApproved && s.VerificationCommand.Length > 0).OrderBy(s => s.Order).LastOrDefault()?.VerificationCommand;
+        }
 
         if (command is null)
         {
@@ -1485,7 +1851,7 @@ public sealed partial class FactoryOrchestrator(
 
                 // Each subtask passed on its own, so what breaks is where they meet. The Bug Fixer takes it on as one
                 // more subtask: the same fix budget, escalation, guard, review and commit as the rest of the run.
-                var fix = await AddIntegrationFixAsync(context, subtasks, command, result, guidance, ct);
+                var fix = await AddIntegrationFixAsync(context, subtasks, command, result, guidance, guidanceFromAgent, ct);
                 await SetRunStatusAsync(run, RunStatus.Executing, ct);
                 run.CurrentSubtaskId = fix.Id;
                 if (!await ProcessSubtaskAsync(context, fix, SubtaskEntry.Fix, ct)) return;
@@ -1504,7 +1870,7 @@ public sealed partial class FactoryOrchestrator(
 
     /// <summary>The subtask that hands a failed final check to the Bug Fixer, saved after the run's other subtasks.</summary>
     private async Task<FactorySubtask> AddIntegrationFixAsync(PipelineContext context, IReadOnlyList<FactorySubtask> subtasks, string command,
-        CommandResult result, string? guidance, CancellationToken ct)
+        CommandResult result, string? guidance, bool guidanceFromAgent, CancellationToken ct)
     {
         var run = context.Run;
         var errors = FailureDigest.Errors(result.Output);
@@ -1523,6 +1889,7 @@ public sealed partial class FactoryOrchestrator(
             IsIntegrationFix = true,
             LastFailure = DescribeFailure(result, context.Settings),
             HumanGuidance = string.IsNullOrWhiteSpace(guidance) ? null : guidance.Trim(),
+            GuidanceFromAgent = guidanceFromAgent,
             // It starts from a failure, never from Refine and Build, and counts as built for the pause options.
             SummaryOfChanges = "Nothing yet: the Bug Fixer starts from the final check's failure."
         }, ct);
@@ -1959,6 +2326,7 @@ public sealed partial class FactoryOrchestrator(
             case HumanDecision.RestartSubtask when subtask.IsIntegrationFix:
                 await RollbackAsync(run, ct);
                 subtask.ReviewJson = null;
+                subtask.ReviewGapAccepted = false;
                 subtask.FixAttempts = 0;
                 subtask.ReviewFixAttempts = 0;
                 subtask.FixHistory.Clear();
@@ -1970,6 +2338,7 @@ public sealed partial class FactoryOrchestrator(
                 subtask.SummaryOfChanges = null;
                 subtask.LastFailure = null;
                 subtask.ReviewJson = null;
+                subtask.ReviewGapAccepted = false;
                 subtask.FixAttempts = 0;
                 subtask.ReviewFixAttempts = 0;
                 subtask.FixHistory.Clear();

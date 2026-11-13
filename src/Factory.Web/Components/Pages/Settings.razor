@@ -4,6 +4,7 @@
 @inject FactoryOrchestrator Orchestrator
 @inject ModelHealthService Health
 @inject IConfiguration Configuration
+@inject McpToken Token
 @inject IJSRuntime JS
 
 <DocumentTitle Value="Settings · Hatchet" />
@@ -267,7 +268,8 @@
                 <div class="hint">
                     Hatchet is also an MCP server, so Claude Code can drive it. Plan a change with Claude in conversation, have it hand the plan to Hatchet with <code>start_run</code>,
                     and let Hatchet build, verify, fix and review on your local model. Claude can follow the run with <code>get_run</code> and help when it pauses with <code>resume_run</code>.
-                    Run this once in a terminal to add Hatchet to Claude Code in every project:
+                    Run this once in a terminal to add Hatchet to Claude Code in every project. It includes this install's secret token, which the MCP endpoint requires.
+                    If you added Hatchet before, remove it first with <code>claude mcp remove hatchet</code>:
                 </div>
                 <div class="copy-block">
                     <pre class="code-block">@McpCommand</pre>
@@ -297,6 +299,11 @@
                         <label for="retries">Fix attempts per subtask</label>
                         <input autocomplete="off" data-1p-ignore data-lpignore="true" id="retries" type="number" min="0" max="20" @bind="_settings.MaxFixRetries" />
                         <div class="hint">Build failures and review rejections share this budget. Then the run pauses for you.</div>
+                    </div>
+                    <div class="field">
+                        <label for="max-subtasks">Subtasks Hatchet's planner may plan unattended</label>
+                        <input autocomplete="off" data-1p-ignore data-lpignore="true" id="max-subtasks" type="number" min="1" max="500" @bind="_settings.MaxPlannedSubtasks" />
+                        <div class="hint">If the Task Planner plans more than this, the plan waits for your approval, even when plan review is off. Plans you supply are not limited.</div>
                     </div>
                     <div class="field">
                         <label for="escalate">Hand stubborn fixes to Claude after</label>
@@ -384,7 +391,7 @@
 
     public void Dispose() => Health.Changed -= OnHealthChanged;
 
-    private string McpCommand => $"claude mcp add --transport http --scope user hatchet {Program.BaseUrl(Configuration)}{Program.McpPath}";
+    private string McpCommand => $"claude mcp add --transport http --scope user hatchet {Program.BaseUrl(Configuration)}{Program.McpPath} --header \"Authorization: Bearer {Token.Value}\"";
 
     private readonly HashSet<AgentRole> _openPrompts = [];
 

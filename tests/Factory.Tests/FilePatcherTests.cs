@@ -77,6 +77,103 @@ public class FilePatcherTests : IDisposable
     public void Unsafe_paths_are_rejected(string path) =>
         Assert.Throws<PatchRejectedException>(() => FilePatcher.Apply(_repo.Path, [Op(path, FileActions.Create, "x")]));
 
+    [Theory]
+    [InlineData(".git./hooks/pre-commit")]
+    [InlineData(".GIT./config")]
+    [InlineData("GIT~1/hooks/x")]
+    [InlineData("git~1/x")]
+    [InlineData(".git /x")]
+    [InlineData("a/.git.")]
+    [InlineData(".g‌it/config")]
+    public void Git_directory_aliases_are_rejected(string path) =>
+        Assert.Throws<PatchRejectedException>(() => FilePatcher.ResolveSafePath(_repo.Path, path));
+
+    [Theory]
+    [InlineData(".gitignore")]
+    [InlineData(".editorconfig")]
+    [InlineData("src/.config/x.json")]
+    [InlineData("git~notes.txt")]
+    [InlineData("notes~draft.md")]
+    [InlineData("a~b/c.txt")]
+    [InlineData("v1~2.md")]
+    [InlineData("notes~1.txt")]
+    [InlineData("PROGRA~1/x")]
+    public void Ordinary_dotfiles_are_accepted(string path) =>
+        Assert.StartsWith(Path.GetFullPath(_repo.Path), FilePatcher.ResolveSafePath(_repo.Path, path));
+
+    [Fact]
+    public void Windows_short_names_of_existing_files_are_rejected()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        _repo.Write(".env.local", "KEY=1");
+        _repo.Write(".github/x.yml", "on: push");
+        _repo.Write("package.json", "{}");
+        if (!File.Exists(_repo.File("ENV~1.LOC"))) return; // Short names are switched off on this volume.
+
+        foreach (var alias in new[] { "ENV~1.LOC", "GITHUB~1/x.yml", "PACKAG~1.JSO" })
+        {
+            var error = Assert.Throws<PatchRejectedException>(() => FilePatcher.ResolveSafePath(_repo.Path, alias));
+            Assert.Contains("8.3", error.Message);
+        }
+    }
+
+    [Theory]
+    [InlineData(".github/workflows/ci.yml", true)]
+    [InlineData(".GitHub/x.yml", true)]
+    [InlineData(".claude\\settings.json", true)]
+    [InlineData(".hatchet/a", true)]
+    [InlineData(".vscode/tasks.json", true)]
+    [InlineData(".husky/pre-commit", true)]
+    [InlineData(".gitattributes", true)]
+    [InlineData("sub/.gitmodules", true)]
+    [InlineData("src/.npmrc", true)]
+    [InlineData("src/NuGet.Config", true)]
+    [InlineData("src/.github/x", false)]
+    [InlineData(".gitignore", false)]
+    [InlineData("src/app.cs", false)]
+    public void IsSensitivePath_flags_config_that_can_run_code(string path, bool expected) =>
+        Assert.Equal(expected, FilePatcher.IsSensitivePath(path));
+
+    [Theory]
+    [InlineData(".env", true)]
+    [InlineData("app/.env.local", true)]
+    [InlineData(".ENV.production", false)]
+    [InlineData(".env.development", false)]
+    [InlineData(".env.production.local", true)]
+    [InlineData("src/secrets.ts", false)]
+    [InlineData(".env.example", false)]
+    [InlineData(".env.sample", false)]
+    [InlineData(".env.template", false)]
+    [InlineData("a/cert.pem", true)]
+    [InlineData("a.pfx", true)]
+    [InlineData("a.P12", true)]
+    [InlineData("tls.key", false)]
+    [InlineData("home/id_rsa", true)]
+    [InlineData("id_rsa.pub", false)]
+    [InlineData("id_ed25519", true)]
+    [InlineData("id_ecdsa", true)]
+    [InlineData("config/secrets.json", true)]
+    [InlineData("infra/prod.tfvars", false)]
+    [InlineData(".aws/credentials", true)]
+    [InlineData("home/.netrc", true)]
+    [InlineData(".pgpass", true)]
+    [InlineData("AuthKey_ABC.p8", true)]
+    [InlineData("app/release.jks", true)]
+    [InlineData("debug.keystore", true)]
+    [InlineData("infra/terraform.tfstate", true)]
+    [InlineData("infra/terraform.tfstate.backup", true)]
+    [InlineData("config/credentials.json", true)]
+    [InlineData("service-account.json", true)]
+    [InlineData("service-account-prod.json", true)]
+    [InlineData("prod.env", false)]
+    [InlineData("src/.npmrc", false)]
+    [InlineData("appsettings.Production.json", false)]
+    [InlineData("service-accounts.cs", false)]
+    [InlineData("credentials.cs", false)]
+    [InlineData("src/environment.cs", false)]
+    public void IsSecretPath_flags_credential_files(string path, bool expected) =>
+        Assert.Equal(expected, FilePatcher.IsSecretPath(path));
+
     [Fact]
     public void A_set_with_one_bad_operation_writes_nothing()
     {

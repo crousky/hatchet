@@ -119,4 +119,38 @@ public class VerificationDetectorTests : IDisposable
 
         Assert.Equal(command, VerificationDetector.Detect(_repo.Path)!.Command);
     }
+
+    [Fact]
+    public void A_solution_with_shell_characters_in_its_name_is_ignored()
+    {
+        _repo.Write("a&b.sln", "");
+
+        Assert.Null(VerificationDetector.Detect(_repo.Path));
+    }
+
+    [Fact]
+    public void An_unsafe_solution_name_falls_through_to_the_next_safe_candidate()
+    {
+        _repo.Write("a&b.sln", "");
+        _repo.Write("src/Good.sln", "");
+
+        Assert.Equal("dotnet build src/Good.sln --no-incremental && dotnet test src/Good.sln --no-build", VerificationDetector.Detect(_repo.Path)!.Command);
+    }
+
+    [Fact]
+    public void A_project_with_shell_characters_in_its_name_is_ignored_by_both_detectors()
+    {
+        _repo.Write("a&b.csproj", """<Project Sdk="Microsoft.NET.Sdk.Web"></Project>""");
+
+        Assert.Null(VerificationDetector.Detect(_repo.Path));
+        Assert.Null(RunCommandDetector.Detect(_repo.Path));
+    }
+
+    [Fact]
+    public void A_solution_name_with_a_space_is_still_quoted()
+    {
+        _repo.Write("my app.sln", "");
+
+        Assert.Equal("dotnet build \"my app.sln\" --no-incremental && dotnet test \"my app.sln\" --no-build", VerificationDetector.Detect(_repo.Path)!.Command);
+    }
 }
