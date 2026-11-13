@@ -66,7 +66,7 @@ public sealed class ClaudeCodeAsker(string workingDirectory) : IClaudeAsker
             using var stallKill = stall.Token.Register(() => ClaudeCodeLlmClient.Kill(process));
 
             var stderr = process.StandardError.ReadToEndAsync(CancellationToken.None);
-            var write = ClaudeCodeLlmClient.WritePromptToAsync(process, $"{context}\n\n---\n\nQuestion: {question}\n");
+            var write = ClaudeCodeLlmClient.WritePromptToAsync(process, Orchestration.PromptBuilder.Ask(context, question));
 
             var streamed = new StringBuilder();
             var parser = new ClaudeStreamParser(delta =>
