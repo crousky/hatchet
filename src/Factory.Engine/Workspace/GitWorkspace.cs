@@ -109,6 +109,7 @@ public sealed class GitWorkspace(string repositoryPath)
     /// <summary>Newly added files that look like secrets are unstaged (and left on disk) so they are never committed.</summary>
     private async Task UnstageSecretsAsync(CancellationToken ct)
     {
+        // Only ADDED files (--diff-filter=A): a tracked secret file the model modified stays staged, deliberately, because the user chose to track it.
         var added = await GitAsync(ct, "diff", "--cached", "--name-only", "--diff-filter=A", "-z", "--no-ext-diff", "--no-textconv");
         var secrets = added.Split('\0', StringSplitOptions.RemoveEmptyEntries).Where(FilePatcher.IsSecretPath).ToList();
         if (secrets.Count == 0) return;
