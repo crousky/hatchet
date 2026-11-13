@@ -1268,10 +1268,12 @@ public sealed partial class FactoryOrchestrator(
         if (named.Count == 0 || patch.Operations.Count == 0) return [];
 
         var root = Path.GetFullPath(repositoryPath);
+        // With the separator, a sibling folder that shares the root's name as a prefix isn't taken for part of it.
+        var inside = Path.TrimEndingDirectorySeparator(root) + Path.DirectorySeparatorChar;
         string? Read(string relative)
         {
             var full = Path.GetFullPath(Path.Combine(root, relative));
-            if (!full.StartsWith(root, StringComparison.OrdinalIgnoreCase) || !File.Exists(full)) return null;
+            if (!full.StartsWith(inside, StringComparison.OrdinalIgnoreCase) || !File.Exists(full)) return null;
             try { return File.ReadAllText(full); }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return null; }
         }

@@ -110,22 +110,9 @@ public sealed class GitWorkspace(string repositoryPath)
     private async Task UnstageSecretsAsync(CancellationToken ct)
     {
         var added = await GitAsync(ct, "diff", "--cached", "--name-only", "--diff-filter=A", "-z", "--no-ext-diff", "--no-textconv");
-        var secrets = added.Split('\0', StringSplitOptions.RemoveEmptyEntries).Where(IsSecretPath).ToList();
+        var secrets = added.Split('\0', StringSplitOptions.RemoveEmptyEntries).Where(FilePatcher.IsSecretPath).ToList();
         if (secrets.Count == 0) return;
         await GitAsync(ct, ["reset", "-q", "--", .. secrets.Select(p => ":(literal)" + p)]);
-    }
-
-    // Same list as FilePatcher.IsSecretPath; unify when both are merged.
-    private static bool IsSecretPath(string path)
-    {
-        var name = path[(path.LastIndexOfAny(['/', '\\']) + 1)..].ToLowerInvariant();
-        if (name == ".env" || name.StartsWith(".env."))
-            return name is not (".env.example" or ".env.sample" or ".env.template");
-        return name == "credentials"
-            || name.EndsWith(".pem") || name.EndsWith(".pfx") || name.EndsWith(".p12") || name.EndsWith(".key")
-            || name.EndsWith(".tfvars")
-            || name.StartsWith("id_rsa") || name.StartsWith("id_ed25519") || name.StartsWith("id_ecdsa")
-            || name.StartsWith("secrets.");
     }
 
     /// <summary>Refuses a name that git would read as an option or that holds whitespace or control characters.</summary>

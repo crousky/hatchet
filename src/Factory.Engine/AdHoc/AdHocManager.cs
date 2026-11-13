@@ -571,7 +571,9 @@ public sealed class AdHocManager(
     private static void DeleteDirectory(string directory)
     {
         // Git marks object files read-only, which blocks a recursive delete on Windows.
-        foreach (var file in Directory.EnumerateFiles(directory, "*", SearchOption.AllDirectories))
+        // Linked folders are skipped, so a junction or symlink can't lead this out of the worktree.
+        var options = new EnumerationOptions { RecurseSubdirectories = true, AttributesToSkip = FileAttributes.ReparsePoint };
+        foreach (var file in Directory.EnumerateFiles(directory, "*", options))
             File.SetAttributes(file, FileAttributes.Normal);
         Directory.Delete(directory, recursive: true);
     }
