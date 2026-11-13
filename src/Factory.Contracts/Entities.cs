@@ -13,6 +13,12 @@ public sealed class FactoryTask
 
     public bool RequirePlanApproval { get; set; } = true;
 
+    /// <summary>
+    /// Plan review was asked for by the user, in the UI or by filing a report, rather than by an MCP client that started the run.
+    /// Only the user may approve such a plan, so MCP's approve_plan refuses it.
+    /// </summary>
+    public bool PlanReviewByUser { get; set; }
+
     /// <summary>The plan handed over with the task, as JSON <see cref="SubtaskEdit"/>s. Null when Hatchet's planner makes the plan.</summary>
     public string? SuppliedPlanJson { get; set; }
 
@@ -39,6 +45,15 @@ public sealed class FactoryRun
 
     /// <summary>The user paused the run, as opposed to it stopping on a problem.</summary>
     public bool PausedByUser { get; set; }
+
+    /// <summary>The check command detected from the repository that this run has seen and run. A different detection later needs the user's approval.</summary>
+    public string? DetectedVerificationCommand { get; set; }
+
+    /// <summary>The changed command Hatchet paused on, awaiting approval. Empty means nothing is detected any more. Null when none is waiting.</summary>
+    public string? PendingVerificationCommand { get; set; }
+
+    /// <summary>The plan came out too big for Hatchet's planner to run unattended, so only the user may approve it.</summary>
+    public bool PlanHeldForUser { get; set; }
 
     /// <summary>
     /// What the run does when its turn in line for a worker comes, such as a resume with the user's decision. Kept so
@@ -102,6 +117,12 @@ public sealed class FactorySubtask
     /// <summary>What each fix attempt changed and what failed next, so later attempts don't repeat it.</summary>
     public List<string> FixHistory { get; set; } = [];
     public string? HumanGuidance { get; set; }
+
+    /// <summary>The guidance came through MCP from the driving agent, not from the user, so agents treat it as a suggestion.</summary>
+    public bool GuidanceFromAgent { get; set; }
+
+    /// <summary>How many times an MCP client has reset this subtask's fix budgets with retry_fixer. Capped, so an agent can't loop without the user.</summary>
+    public int AgentFixerResets { get; set; }
 
     public string? RefinedSpecJson { get; set; }
     public string? SummaryOfChanges { get; set; }

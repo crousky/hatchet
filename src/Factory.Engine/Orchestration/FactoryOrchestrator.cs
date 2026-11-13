@@ -377,6 +377,10 @@ public sealed partial class FactoryOrchestrator(
         var run = context.Run;
         RequireStatus(run, RunStatus.NeedsHuman);
 
+        // Carrying on after the check command changed is how the person approves the new one. Not retrying the fixer, restarting or skipping.
+        if (decision == HumanDecision.Reverify || (decision == HumanDecision.Resume && run.PausedStage == PipelineStage.Integrate))
+            await AcceptPendingVerificationAsync(run, ct);
+
         switch (run.PausedStage)
         {
             // No stage means it was paused while waiting in line, before it started.
@@ -753,6 +757,9 @@ public sealed partial class FactoryOrchestrator(
         run.BaseCommit = await git.GetHeadShaAsync(ct);
         run.BranchName = await git.GetUnusedBranchNameAsync($"factory/run-{run.Id}", ct);
         run.RepoMap = RepositoryScanner.BuildRepoMap(task.RepositoryPath);
+        // What the repository detects before any model has touched it is what the user saw on the New Run page.
+        run.DetectedVerificationCommand = VerificationDetector.Detect(task.RepositoryPath)?.Command;
+        run.PendingVerificationCommand = null;
         await store.UpdateRunAsync(run, ct);
 
         var fileCount = run.RepoMap.Count(c => c == '\n') + 1;
@@ -1416,6 +1423,45 @@ public sealed partial class FactoryOrchestrator(
         throw new GatePauseException(reason);
     }
 
+    /// <summary>
+    /// Detects the check command, and holds it to the one this run has already seen. Files the model wrote, such as a new
+    /// package.json, can change what the detector returns, and that would change the shell command with nobody approving it.
+    /// The first command to appear is recorded and allowed, as a repository with nothing to build can gain a build.
+    /// <c>Changed</c> is the pause reason when a different command showed up, and then nothing may run.
+    /// </summary>
+    private async Task<(DetectedVerification? Detected, string? Changed)> DetectPinnedAsync(PipelineContext context, CancellationToken ct, string accept = "Re-verify (reverify)")
+    {
+        var run = context.Run;
+        var detected = VerificationDetector.Detect(context.Task.RepositoryPath);
+        var seen = run.DetectedVerificationCommand;
+        if (seen is null || detected?.Command == seen)
+        {
+            if (detected is not null && seen is null)
+            {
+                run.DetectedVerificationCommand = detected.Command;
+                await store.UpdateRunAsync(run, ct);
+            }
+            return (detected, null);
+        }
+
+        run.PendingVerificationCommand = detected?.Command ?? "";
+        await store.UpdateRunAsync(run, ct);
+        var now = detected is null ? "nothing, because no build or test setup is detected any more" : $"`{detected.Command}`";
+        return (null, $"The check command detected from the repository changed from `{seen}` to {now} after the model's edits, so it was not run. "
+            + $"To approve the new command, choose {accept}. Otherwise fix the files, then {accept}.");
+    }
+
+    /// <summary>Records the command a person approved by choosing to carry on after a change in what the repository detects.</summary>
+    private async Task AcceptPendingVerificationAsync(FactoryRun run, CancellationToken ct)
+    {
+        if (run.PendingVerificationCommand is not { } pending) return;
+        run.DetectedVerificationCommand = pending.Length == 0 ? null : pending;
+        run.PendingVerificationCommand = null;
+        await store.UpdateRunAsync(run, ct);
+        await LogAsync(run.Id, run.CurrentSubtaskId, AgentLogKind.Info, null,
+            pending.Length == 0 ? "Accepted that no check command is detected any more." : $"Accepted the new check command `{pending}`.", ct);
+    }
+
     /// <summary>Returns null when there is nothing to run yet: no command was given and no build or tests can be detected.</summary>
     private async Task<CommandResult?> VerifyAsync(PipelineContext context, FactorySubtask subtask, CancellationToken ct)
     {
@@ -1427,7 +1473,14 @@ public sealed partial class FactoryOrchestrator(
         if (ConfiguredCommand(context.Task, subtask) is { } configured)
             return await RunCommandAsync(context, subtask.Id, PipelineStage.Verify, configured, ct);
 
-        if (VerificationDetector.Detect(context.Task.RepositoryPath) is { } detected)
+        var (detected, changed) = await DetectPinnedAsync(context, ct);
+        if (changed is not null)
+        {
+            await LogAsync(run.Id, subtask.Id, AgentLogKind.Warning, PipelineStage.Verify, changed, ct);
+            throw new GatePauseException(changed);
+        }
+
+        if (detected is not null)
         {
             await LogAsync(run.Id, subtask.Id, AgentLogKind.Info, PipelineStage.Verify, $"Detected {detected.Description}, so verifying with `{detected.Command}`.", ct);
             return await RunCommandAsync(context, subtask.Id, PipelineStage.Verify, detected.Command, ct);
@@ -1505,10 +1558,19 @@ public sealed partial class FactoryOrchestrator(
         await SetStageAsync(run, PipelineStage.Integrate, null, ct);
 
         var subtasks = await store.GetSubtasksAsync(run.Id, ct);
-        var command = task.VerificationCommand.Length > 0
-            ? task.VerificationCommand
-            : VerificationDetector.Detect(task.RepositoryPath)?.Command
-              ?? subtasks.Where(s => s.CommandApproved && s.VerificationCommand.Length > 0).OrderBy(s => s.Order).LastOrDefault()?.VerificationCommand;
+        string? command = task.VerificationCommand;
+        if (command.Length == 0)
+        {
+            var (detected, changed) = await DetectPinnedAsync(context, ct, accept: "Resume");
+            if (changed is not null)
+            {
+                await LogAsync(run.Id, null, AgentLogKind.Warning, PipelineStage.Integrate, changed, ct);
+                await PauseRunAsync(run, changed, ct);
+                return;
+            }
+            command = detected?.Command
+                      ?? subtasks.Where(s => s.CommandApproved && s.VerificationCommand.Length > 0).OrderBy(s => s.Order).LastOrDefault()?.VerificationCommand;
+        }
 
         if (command is null)
         {

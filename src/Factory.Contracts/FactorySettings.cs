@@ -12,6 +12,9 @@ public sealed class FactorySettings
     /// <summary>Fixer loops per subtask before the run pauses for a human.</summary>
     public int MaxFixRetries { get; set; } = 3;
 
+    /// <summary>The most subtasks Hatchet's own planner may plan before the plan waits for the user's approval.</summary>
+    public int MaxPlannedSubtasks { get; set; } = 40;
+
     /// <summary>
     /// Failed fix attempts on the local model before the Bug Fixer hands the subtask to Claude through Claude Code.
     /// Local models often guess library APIs; Claude usually knows them. 0 keeps fixes local.

@@ -44,7 +44,8 @@ public sealed record NewRunRequest(
     string? Title,
     string? VerificationCommand,
     bool RequirePlanApproval,
-    string? ModelChoice = null);
+    string? ModelChoice = null,
+    bool PlanReviewByUser = true);
 
 public sealed record SubtaskEdit(
     int? Id,
