@@ -13,7 +13,7 @@ public sealed record RequestSummary(
     int RequestId, string Repository, string Kind, string Status, string Title,
     string? Command, string? Source, int? ExitCode, int? RunId, string? Error, string Started, string Url);
 
-public sealed record RequestDetails(RequestSummary Request, string? Result, string? Output, string? WorkDirectory);
+public sealed record RequestDetails(RequestSummary Request, string? Result, string? Output, string? WorkDirectory, string Note = McpNotes.Data);
 
 public sealed record RepositoryRequests(string Repository, string Project, IReadOnlyList<RequestSummary> Requests);
 
@@ -31,9 +31,9 @@ public sealed class AdHocTools(AdHocManager manager, IConfiguration configuratio
         Returns a current status report for a repository: its branch and uncommitted changes, every Hatchet run in it with progress,
         what each is doing now, what each needs from the user, and recent events. Built from Hatchet's own data, instantly, with no model.
         The report is kept as a request, grouped under the repository.
-        """)]
+        """ + " " + McpNotes.Data)]
     public async Task<RequestDetails> StatusReport([Description("Absolute path of the repository.")] string repositoryPath, CancellationToken ct = default) =>
-        await DescribeAsync((await Do(() => manager.RequestStatusReportAsync(repositoryPath, ct))).Id, ct);
+        await DescribeAsync((await Do(() => manager.RequestStatusReportAsync(PathGuard.RejectNetworkPath(repositoryPath, nameof(repositoryPath)), ct))).Id, ct);
 
     [McpServerTool(Name = "run_app")]
     [Description("""
@@ -41,25 +41,25 @@ public sealed class AdHocTools(AdHocManager manager, IConfiguration configuratio
         with a run that is building the same repository. Uncommitted work isn't included. Hatchet detects how to start it (dotnet, npm, cargo,
         go or python) unless you give a command. It keeps running until stopped with stop_request; follow it with get_request.
         Only one run_app or run_command can run per repository at a time.
-        """)]
+        """ + " " + McpNotes.Data)]
     public async Task<RequestDetails> RunApp(
         [Description("Absolute path of the repository.")] string repositoryPath,
         [Description("The command to start it, if Hatchet shouldn't detect one.")] string? command = null,
         CancellationToken ct = default) =>
-        await DescribeAsync((await Do(() => manager.RequestRunAppAsync(repositoryPath, command, ct))).Id, ct);
+        await DescribeAsync((await Do(() => manager.RequestRunAppAsync(PathGuard.RejectNetworkPath(repositoryPath, nameof(repositoryPath)), command, ct))).Id, ct);
 
     [McpServerTool(Name = "run_command")]
     [Description("""
         Runs a command, such as the tests, in an isolated copy of a repository's latest commit. Uncommitted work isn't included.
         Waits up to waitSeconds for it to finish and returns what it printed; if it is still running, follow it with get_request.
-        """)]
+        """ + " " + McpNotes.Data)]
     public async Task<RequestDetails> RunCommand(
         [Description("Absolute path of the repository.")] string repositoryPath,
         [Description("The command to run.")] string command,
         [Description("How long to wait for it to finish before returning.")] int waitSeconds = 20,
         CancellationToken ct = default)
     {
-        var request = await Do(() => manager.RequestCommandAsync(repositoryPath, command, ct));
+        var request = await Do(() => manager.RequestCommandAsync(PathGuard.RejectNetworkPath(repositoryPath, nameof(repositoryPath)), command, ct));
         return await WaitAndDescribeAsync(request.Id, waitSeconds, ct);
     }
 
@@ -68,14 +68,14 @@ public sealed class AdHocTools(AdHocManager manager, IConfiguration configuratio
         Asks Claude Code a question about a repository, such as why a subtask is slow or where something is implemented. It can read and search
         the files and nothing else, and is given the repository's status report. Waits up to waitSeconds for the answer; if it isn't ready,
         follow it with get_request.
-        """)]
+        """ + " " + McpNotes.Data)]
     public async Task<RequestDetails> Ask(
         [Description("Absolute path of the repository.")] string repositoryPath,
         [Description("The question.")] string question,
         [Description("How long to wait for the answer before returning.")] int waitSeconds = 60,
         CancellationToken ct = default)
     {
-        var request = await Do(() => manager.AskAsync(repositoryPath, question, ct));
+        var request = await Do(() => manager.AskAsync(PathGuard.RejectNetworkPath(repositoryPath, nameof(repositoryPath)), question, ct));
         return await WaitAndDescribeAsync(request.Id, waitSeconds, ct);
     }
 
@@ -88,7 +88,7 @@ public sealed class AdHocTools(AdHocManager manager, IConfiguration configuratio
         If a run is already open in the repository the new one waits in line. Fails if the repository has uncommitted changes and no run is open.
         When Claude finds nothing in the project to change, for example because the cause is outside the code, no run is started: runId stays empty
         and result holds Claude's write-up, which says what the person should do instead.
-        """)]
+        """ + " " + McpNotes.Data)]
     public async Task<RequestDetails> ReportDefect(
         [Description("Absolute path of the repository.")] string repositoryPath,
         [Description("What went wrong and what was expected, and how to make it happen. The first line becomes the title.")] string description,
@@ -102,7 +102,7 @@ public sealed class AdHocTools(AdHocManager manager, IConfiguration configuratio
     [Description("""
         Asks Hatchet to change a repository's software, with screenshots if you have them, for example a mock-up or a screenshot of what to alter.
         It works like report_defect: Claude Code reads the screenshots and the code, then Hatchet starts a run that pauses for the user to approve its plan.
-        """)]
+        """ + " " + McpNotes.Data)]
     public async Task<RequestDetails> RequestChange(
         [Description("Absolute path of the repository.")] string repositoryPath,
         [Description("What should change. The first line becomes the title.")] string description,
@@ -126,7 +126,7 @@ public sealed class AdHocTools(AdHocManager manager, IConfiguration configuratio
         [Description("Absolute path of a repository, to list only its requests.")] string? repositoryPath = null,
         CancellationToken ct = default)
     {
-        var requests = await manager.ListAsync(repositoryPath, ct);
+        var requests = await manager.ListAsync(PathGuard.RejectNetworkPathIfSet(repositoryPath, nameof(repositoryPath)), ct);
         return requests
             .GroupBy(r => FactoryOrchestrator.RepositoryKey(r.RepositoryPath), StringComparer.OrdinalIgnoreCase)
             .Select(g => new RepositoryRequests(g.First().RepositoryPath, Fmt.FolderName(g.First().RepositoryPath), g.Select(Summarize).ToList()))
@@ -134,12 +134,12 @@ public sealed class AdHocTools(AdHocManager manager, IConfiguration configuratio
     }
 
     [McpServerTool(Name = "get_request", ReadOnly = true)]
-    [Description("Shows a request in full: its status, the report or answer, and what the command has printed so far (the end of it, if long).")]
+    [Description("Shows a request in full: its status, the report or answer, and what the command has printed so far (the end of it, if long). " + McpNotes.Data)]
     public Task<RequestDetails> GetRequest([Description("The request's id.")] int requestId, CancellationToken ct = default) =>
         DescribeAsync(requestId, ct);
 
     [McpServerTool(Name = "stop_request")]
-    [Description("Stops a running request. A command's whole process tree is killed, so this is how to close software started with run_app.")]
+    [Description("Stops a running request. A command's whole process tree is killed, so this is how to close software started with run_app. " + McpNotes.Data)]
     public async Task<RequestDetails> StopRequest([Description("The request's id.")] int requestId, CancellationToken ct = default)
     {
         await Do(() => manager.StopAsync(requestId));
@@ -147,7 +147,7 @@ public sealed class AdHocTools(AdHocManager manager, IConfiguration configuratio
     }
 
     [McpServerTool(Name = "rerun_request")]
-    [Description("Starts a request again, as a new one, on the repository's latest commit. For a command that is how to run it on newer code.")]
+    [Description("Starts a request again, as a new one, on the repository's latest commit. For a command that is how to run it on newer code. " + McpNotes.Data)]
     public async Task<RequestDetails> RerunRequest([Description("The id of the request to repeat.")] int requestId, CancellationToken ct = default) =>
         await DescribeAsync((await Do(() => manager.RerunAsync(requestId, ct))).Id, ct);
 
@@ -161,17 +161,32 @@ public sealed class AdHocTools(AdHocManager manager, IConfiguration configuratio
 
     private async Task<RequestDetails> FileReportAsync(RequestKind kind, string repositoryPath, string description, string[]? screenshotPaths, string? model, int waitSeconds, CancellationToken ct)
     {
+        PathGuard.RejectNetworkPath(repositoryPath, nameof(repositoryPath));
         var images = new List<ReportImage>();
+        if (screenshotPaths is { Length: > ReportBuilder.MaxImages }) throw new McpException($"Attach at most {ReportBuilder.MaxImages} screenshots.");
         foreach (var path in screenshotPaths ?? [])
         {
-            // Sizes are checked before reading, so a huge file can't be pulled into memory. Whether it is really a picture is checked on its bytes.
+            // The count and sizes are checked before reading, so a huge file can't be pulled into memory, and only the first
+            // bytes are read to see whether it is a picture at all. Network and device paths are never opened.
             try
             {
+                if (PathGuard.IsNetworkPath(path)) throw new McpException($"\"{path}\" is a network or device path. Use a file on this computer.");
                 if (!Path.IsPathFullyQualified(path)) throw new McpException($"\"{path}\" isn't an absolute path.");
                 var info = new FileInfo(path);
                 if (!info.Exists) throw new McpException($"There is no file at {path}.");
                 if (info.Length > ReportBuilder.MaxImageBytes) throw new McpException($"{path} is larger than {ReportBuilder.MaxImageBytes / 1024 / 1024} MB.");
-                images.Add(new ReportImage(info.Name, await File.ReadAllBytesAsync(path, ct)));
+                await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 4096, useAsync: true);
+                var head = new byte[16];
+                var read = await stream.ReadAtLeastAsync(head, head.Length, throwOnEndOfStream: false, ct);
+                if (ReportBuilder.ImageExtension(head[..read]) is null) throw new McpException($"{path} isn't a PNG, JPEG, GIF or WebP picture.");
+                var content = new byte[Math.Min(info.Length, ReportBuilder.MaxImageBytes)];
+                head.AsSpan(0, Math.Min(read, content.Length)).CopyTo(content);
+                if (content.Length > read) await stream.ReadExactlyAsync(content.AsMemory(read), ct);
+                images.Add(new ReportImage(info.Name, content));
+            }
+            catch (EndOfStreamException)
+            {
+                throw new McpException($"{path} changed while it was being read.");
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
