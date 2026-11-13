@@ -70,10 +70,27 @@
                         <span>Skills</span>
                         <input autocomplete="off" data-1p-ignore data-lpignore="true" class="mono" spellcheck="false" placeholder="comma separated" @bind="item.Skills" />
                     </label>
+                </div>
+                <div class="plan-command">
                     <label>
                         <span>Verify with</span>
-                        <input autocomplete="off" data-1p-ignore data-lpignore="true" class="mono" spellcheck="false" placeholder="@(string.IsNullOrEmpty(DefaultCommand) ? "Detect from the repository" : DefaultCommand)" @bind="item.Command" />
+                        @if (item.Proposed)
+                        {
+                            <span class="plan-command-proposed">proposed by the model</span>
+                        }
+                        <textarea autocomplete="off" data-1p-ignore data-lpignore="true" class="plan-command-input" rows="3" spellcheck="false" wrap="soft" placeholder="@(string.IsNullOrEmpty(DefaultCommand) ? "Detect from the repository" : DefaultCommand)" value="@item.Command" @oninput="@(e => OnCommandInput(item, e.Value?.ToString() ?? ""))"></textarea>
                     </label>
+                    @if (item.Proposed)
+                    {
+                        <label class="plan-command-run">
+                            <input type="checkbox" @bind="item.RunProposed" />
+                            <span>Run this command</span>
+                        </label>
+                    }
+                    @if (HasHiddenSpacing(item.Command))
+                    {
+                        <div class="plan-command-warning">This command contains hidden or unusual spacing — read all of it before approving.</div>
+                    }
                 </div>
             }
             else
@@ -138,6 +155,33 @@
         public string Context { get; set; } = "";
         public string Skills { get; set; } = "";
         public string Command { get; set; } = "";
+
+        /// <summary>The command as loaded from the plan.</summary>
+        public string OriginalCommand { get; set; } = "";
+
+        /// <summary>The model proposed this command and the user has not approved it before.</summary>
+        public bool Proposed { get; set; }
+
+        /// <summary>The user ticked "Run this command" (or edited the text, making it their own).</summary>
+        public bool RunProposed { get; set; }
+    }
+
+    private static void OnCommandInput(PlanItem item, string text)
+    {
+        item.Command = text;
+        if (item.Proposed && text != item.OriginalCommand) item.RunProposed = true;
+    }
+
+    private static bool HasHiddenSpacing(string command)
+    {
+        var run = 0;
+        foreach (var c in command)
+        {
+            if (char.IsControl(c)) return true;
+            run = char.IsWhiteSpace(c) ? run + 1 : 0;
+            if (run >= 8) return true;
+        }
+        return false;
     }
 
     private List<PlanItem> _items = [];
@@ -158,7 +202,9 @@
             Create = string.Join(", ", s.TargetFilesToCreate),
             Context = string.Join(", ", s.ContextFilesToRead),
             Skills = string.Join(", ", s.Skills),
-            Command = s.VerificationCommand
+            Command = s.VerificationCommand,
+            OriginalCommand = s.VerificationCommand,
+            Proposed = !string.IsNullOrEmpty(s.VerificationCommand) && !s.CommandApproved
         }).ToList();
     }
 
@@ -175,6 +221,6 @@
         files.Split([',', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
 
     private Task ApproveAsync() => OnApprove.InvokeAsync(_items
-        .Select(i => new SubtaskEdit(null, i.Title, i.Description, Split(i.Modify), Split(i.Create), Split(i.Context), i.Command, Split(i.Skills)))
+        .Select(i => new SubtaskEdit(null, i.Title, i.Description, Split(i.Modify), Split(i.Create), Split(i.Context), i.Proposed && !i.RunProposed ? "" : i.Command, Split(i.Skills)))
         .ToList());
 }
