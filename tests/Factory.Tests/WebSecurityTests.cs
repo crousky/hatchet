@@ -102,6 +102,17 @@ public sealed class WebSecurityTests : IDisposable
         Assert.Equal(expected, Program.IsLoopback(IPAddress.Parse(address)));
 
     [Theory]
+    [InlineData("localhost", true)]
+    [InlineData("LOCALHOST", true)]
+    [InlineData("127.0.0.1", true)]
+    [InlineData("[::1]", true)]
+    [InlineData("evil.example", false)]
+    [InlineData("localhost.evil.example", false)]
+    [InlineData("", false)]
+    public void Only_this_machines_names_are_accepted_as_the_host(string host, bool expected) =>
+        Assert.Equal(expected, Program.IsLocalHost(host));
+
+    [Theory]
     [InlineData(@"\\server\share", true)]
     [InlineData("//server/share", true)]
     [InlineData(@"C:\projects\x", false)]

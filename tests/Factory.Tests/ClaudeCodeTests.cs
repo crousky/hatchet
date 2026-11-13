@@ -159,14 +159,16 @@ public class ClaudeCodeTests
     [Theory]
     [InlineData("CLAUDECODE", true)]
     [InlineData("CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD", true)]
-    [InlineData("claude_code_simple", true)]
+    [InlineData("claude_code_additional_directories_claude_md", true)]
+    [InlineData("CLAUDE_CODE_GIT_BASH_PATH", false)]
+    [InlineData("CLAUDE_CODE_SIMPLE", false)]
     [InlineData("CLAUDE_CODE_OAUTH_TOKEN", false)]
     [InlineData("CLAUDE_CODE_USE_BEDROCK", false)]
     [InlineData("CLAUDE_CODE_API_KEY_HELPER_TTL_MS", false)]
     [InlineData("ANTHROPIC_API_KEY", false)]
     [InlineData("CLAUDE_CONFIG_DIR", false)]
     [InlineData("PATH", false)]
-    public void Only_claude_code_settings_are_dropped_from_the_environment(string name, bool dropped) =>
+    public void Only_the_variables_that_change_what_claude_code_trusts_are_dropped(string name, bool dropped) =>
         Assert.Equal(dropped, ClaudeCodeSafety.IsDroppedVariable(name));
 
     [Fact]

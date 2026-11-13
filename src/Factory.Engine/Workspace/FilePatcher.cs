@@ -174,9 +174,7 @@ public static class FilePatcher
             throw new PatchRejectedException($"'{relativePath}' escapes the repository.");
         if (segments.Any(IsGitAlias))
             throw new PatchRejectedException($"'{relativePath}' targets the .git directory.");
-        if (segments.Any(IsShortName))
-            throw new PatchRejectedException($"'{relativePath}' uses a Windows short (8.3) name. Short names are not accepted; use the full name.");
-        if (segments.Any(s => s != "."&& (s.EndsWith('.') || s.EndsWith(' '))))
+        if (segments.Any(s => s != "." && (s.EndsWith('.') || s.EndsWith(' '))))
             throw new PatchRejectedException($"'{relativePath}' has a name ending in a dot or space.");
 
         var root = Path.GetFullPath(repositoryPath);
@@ -187,6 +185,13 @@ public static class FilePatcher
         var prefix = root.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
         if (!fullPath.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
             throw new PatchRejectedException($"'{relativePath}' escapes the repository.");
+
+        // An NTFS 8.3 short name (PROGRA~1, ENV~1.LOC) is an alias for a file the name-based checks would not recognise.
+        // GetFullPath expands one that exists into the long name, so a segment that came back different was an alias.
+        // A name merely shaped like one (notes~1.txt) comes back as itself and is fine.
+        var given = segments.Where(s => s != ".").ToArray();
+        if (given.Length != resolved.Length || given.Where((s, i) => s.Contains('~') && !s.Equals(resolved[i], StringComparison.OrdinalIgnoreCase)).Any())
+            throw new PatchRejectedException($"'{relativePath}' uses a Windows short (8.3) name. Short names are not accepted; use the full name.");
 
         RejectLinkedAncestors(root, fullPath, relativePath);
         return fullPath;
@@ -201,11 +206,6 @@ public static class FilePatcher
         return visible.Equals(".git", StringComparison.OrdinalIgnoreCase);
     }
 
-    /// <summary>NTFS 8.3 short names (PROGRA~1, ENV~1.LOC). They name a file the name-based checks would not recognise. A leading dot is never part of one.</summary>
-    private static bool IsShortName(string segment) =>
-        !segment.StartsWith('.')
-        && System.Text.RegularExpressions.Regex.IsMatch(segment, @"^[^~]{1,8}~\d+(\.[^.]{0,3})?$", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-
     private static readonly string[] SensitiveRoots =[".github", ".claude", ".hatchet", ".vscode", ".husky"];
     private static readonly string[] SensitiveNames = [".gitattributes", ".gitmodules", ".npmrc", "nuget.config"];
 
@@ -218,24 +218,27 @@ public static class FilePatcher
         return SensitiveNames.Contains(segments[^1], StringComparer.OrdinalIgnoreCase);
     }
 
-    private static readonly string[] SecretTemplates = [".env.example", ".env.sample", ".env.template"];
+    private static readonly string[] SecretNames =
+        [".env", ".env.local", ".netrc", ".pgpass", "credentials", "credentials.json", "secrets.json", "secrets.yml", "secrets.yaml", "secrets.env"];
 
-    /// <summary>True when the file name looks like it holds credentials or keys.</summary>
+    private static readonly string[] SecretExtensions = [".pem", ".pfx", ".p12", ".p8", ".jks", ".keystore", ".tfstate", ".tfstate.backup"];
+
+    /// <summary>
+    /// True when the file name is one that holds credentials or keys by convention. The list is kept narrow, because a
+    /// match hides the file from the model and keeps a new one out of the commit: names that are often ordinary source
+    /// or shared config (secrets.ts, .env.development, prod.tfvars, a .key file) are not on it.
+    /// </summary>
     public static bool IsSecretPath(string relativePath)
     {
         var segments = NormalizeSeparators(relativePath.Trim()).Split('/', StringSplitOptions.RemoveEmptyEntries);
         if (segments.Length == 0) return false;
         var name = segments[^1].ToLowerInvariant();
-        if (SecretTemplates.Contains(name)) return false;
-        if (name.EndsWith(".example.env") || name.EndsWith(".sample.env")) return false;
         // .npmrc is not here on purpose: it is a sensitive path (see IsSensitivePath) and is commonly committed.
-        return name == ".env" || name.StartsWith(".env.") || name.EndsWith(".env") || name == "credentials"
-            || name == ".netrc" || name == ".pgpass" || name == "credentials.json"
+        return SecretNames.Contains(name)
+            || (name.StartsWith(".env.") && name.EndsWith(".local"))
             || (name.StartsWith("service-account") && name.EndsWith(".json"))
-            || name.EndsWith(".pem") || name.EndsWith(".pfx") || name.EndsWith(".p12") || name.EndsWith(".p8") || name.EndsWith(".key") || name.EndsWith(".tfvars")
-            || name.EndsWith(".jks") || name.EndsWith(".keystore") || name.EndsWith(".tfstate") || name.EndsWith(".tfstate.backup")
-            || name.StartsWith("id_rsa") || name.StartsWith("id_ed25519") || name.StartsWith("id_ecdsa")
-            || name.StartsWith("secrets.");
+            || SecretExtensions.Any(name.EndsWith)
+            || name is "id_rsa" or "id_ed25519" or "id_ecdsa" or "id_dsa";
     }
 
     private static void RejectLinkedAncestors(string root, string fullPath, string relativePath)

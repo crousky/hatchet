@@ -95,18 +95,26 @@ public class FilePatcherTests : IDisposable
     [InlineData("git~notes.txt")]
     [InlineData("notes~draft.md")]
     [InlineData("a~b/c.txt")]
+    [InlineData("v1~2.md")]
+    [InlineData("notes~1.txt")]
+    [InlineData("PROGRA~1/x")]
     public void Ordinary_dotfiles_are_accepted(string path) =>
         Assert.StartsWith(Path.GetFullPath(_repo.Path), FilePatcher.ResolveSafePath(_repo.Path, path));
 
-    [Theory]
-    [InlineData("ENV~1.LOC")]
-    [InlineData("GITHUB~1/x.yml")]
-    [InlineData("PACKAG~1.JSO")]
-    [InlineData("PROGRA~1/x")]
-    public void Windows_short_names_are_rejected(string path)
+    [Fact]
+    public void Windows_short_names_of_existing_files_are_rejected()
     {
-        var error = Assert.Throws<PatchRejectedException>(() => FilePatcher.ResolveSafePath(_repo.Path, path));
-        Assert.Contains("8.3", error.Message);
+        if (!OperatingSystem.IsWindows()) return;
+        _repo.Write(".env.local", "KEY=1");
+        _repo.Write(".github/x.yml", "on: push");
+        _repo.Write("package.json", "{}");
+        if (!File.Exists(_repo.File("ENV~1.LOC"))) return; // Short names are switched off on this volume.
+
+        foreach (var alias in new[] { "ENV~1.LOC", "GITHUB~1/x.yml", "PACKAG~1.JSO" })
+        {
+            var error = Assert.Throws<PatchRejectedException>(() => FilePatcher.ResolveSafePath(_repo.Path, alias));
+            Assert.Contains("8.3", error.Message);
+        }
     }
 
     [Theory]
@@ -129,20 +137,23 @@ public class FilePatcherTests : IDisposable
     [Theory]
     [InlineData(".env", true)]
     [InlineData("app/.env.local", true)]
-    [InlineData(".ENV.production", true)]
+    [InlineData(".ENV.production", false)]
+    [InlineData(".env.development", false)]
+    [InlineData(".env.production.local", true)]
+    [InlineData("src/secrets.ts", false)]
     [InlineData(".env.example", false)]
     [InlineData(".env.sample", false)]
     [InlineData(".env.template", false)]
     [InlineData("a/cert.pem", true)]
     [InlineData("a.pfx", true)]
     [InlineData("a.P12", true)]
-    [InlineData("tls.key", true)]
+    [InlineData("tls.key", false)]
     [InlineData("home/id_rsa", true)]
-    [InlineData("id_rsa.pub", true)]
+    [InlineData("id_rsa.pub", false)]
     [InlineData("id_ed25519", true)]
     [InlineData("id_ecdsa", true)]
     [InlineData("config/secrets.json", true)]
-    [InlineData("infra/prod.tfvars", true)]
+    [InlineData("infra/prod.tfvars", false)]
     [InlineData(".aws/credentials", true)]
     [InlineData("home/.netrc", true)]
     [InlineData(".pgpass", true)]
@@ -154,9 +165,7 @@ public class FilePatcherTests : IDisposable
     [InlineData("config/credentials.json", true)]
     [InlineData("service-account.json", true)]
     [InlineData("service-account-prod.json", true)]
-    [InlineData("prod.env", true)]
-    [InlineData("prod.example.env", false)]
-    [InlineData("prod.sample.env", false)]
+    [InlineData("prod.env", false)]
     [InlineData("src/.npmrc", false)]
     [InlineData("appsettings.Production.json", false)]
     [InlineData("service-accounts.cs", false)]

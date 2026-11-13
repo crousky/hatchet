@@ -67,9 +67,11 @@ builder.Services.AddHostedService<OrchestratorLifetime>();
 var app = builder.Build();
 
 // Hatchet is for this machine only. A null address is the in-memory test server. This runs before anything else.
+// The Host name is checked here as well as by AllowedHosts, so a page whose domain was rebound to 127.0.0.1 is
+// refused even if that setting is changed: its Origin and Host would match each other, and it arrives from loopback.
 app.Use(async (context, next) =>
 {
-    if (context.Connection.RemoteIpAddress is { } address && !Program.IsLoopback(address))
+    if ((context.Connection.RemoteIpAddress is { } address && !Program.IsLoopback(address)) || !Program.IsLocalHost(context.Request.Host.Host))
     {
         context.Response.StatusCode = StatusCodes.Status403Forbidden;
         return;
@@ -156,6 +158,10 @@ public partial class Program
     /// <summary>Loopback, including an IPv4 address carried inside an IPv6 one.</summary>
     public static bool IsLoopback(System.Net.IPAddress address) =>
         System.Net.IPAddress.IsLoopback(address.IsIPv4MappedToIPv6 ? address.MapToIPv4() : address);
+
+    /// <summary>The names this machine answers to: localhost, 127.0.0.1 and [::1].</summary>
+    public static bool IsLocalHost(string host) =>
+        host.Equals("localhost", StringComparison.OrdinalIgnoreCase) || host is "127.0.0.1" or "[::1]" or "::1";
 
     /// <summary>The first address Hatchet listens on, for links and setup commands.</summary>
     public static string BaseUrl(IConfiguration configuration) =>

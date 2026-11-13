@@ -112,9 +112,13 @@ public sealed class GitWorkspace(string repositoryPath)
         // Only ADDED files (--diff-filter=A): a tracked secret file the model modified stays staged, deliberately, because the user chose to track it.
         var added = await GitAsync(ct, "diff", "--cached", "--name-only", "--diff-filter=A", "-z", "--no-ext-diff", "--no-textconv");
         var secrets = added.Split('\0', StringSplitOptions.RemoveEmptyEntries).Where(FilePatcher.IsSecretPath).ToList();
+        WithheldSecrets = secrets;
         if (secrets.Count == 0) return;
         await GitAsync(ct, ["reset", "-q", "--", .. secrets.Select(p => ":(literal)" + p)]);
     }
+
+    /// <summary>The new files the last <see cref="StageAllAsync"/> left unstaged because they look like secrets, so the caller can say so.</summary>
+    public IReadOnlyList<string> WithheldSecrets { get; private set; } = [];
 
     /// <summary>Refuses a name that git would read as an option or that holds whitespace or control characters.</summary>
     private static string ValidateRefName(string name)

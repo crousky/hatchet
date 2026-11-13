@@ -347,9 +347,22 @@ public sealed partial class FactoryOrchestrator(
         var run = await store.GetRunAsync(runId, ct);
         RequireStatus(run, RunStatus.NeedsHuman);
         if (fromDrivingAgent && decision == HumanDecision.RetryFixer) await CountAgentFixerResetAsync(run, ct);
+        if (fromDrivingAgent && AcceptsGate(run, decision))
+            throw new FactoryValidationException("This pause asks a person to approve a changed check command or a file the reviewer could not read in full. "
+                + "Ask the user to resume it in Hatchet; through MCP the run can be handed back to the fixer, restarted or skipped.");
         // The decision is carried out when the run's turn comes, so leaving the line first undoes nothing.
         Launch(runId, new QueuedRequest(RequestKind.Resume, decision, guidance, fromDrivingAgent));
     }
+
+    /// <summary>True when carrying out the decision would approve the changed check command or accept an oversize file unreviewed. Only a person may.</summary>
+    private static bool AcceptsGate(FactoryRun run, HumanDecision decision) =>
+        (AcceptsVerification(run, decision) && run.PendingVerificationCommand is not null) || AcceptsReviewGap(run, decision);
+
+    private static bool AcceptsVerification(FactoryRun run, HumanDecision decision) =>
+        decision == HumanDecision.Reverify || (decision == HumanDecision.Resume && run.PausedStage == PipelineStage.Integrate);
+
+    private static bool AcceptsReviewGap(FactoryRun run, HumanDecision decision) =>
+        decision is HumanDecision.Resume or HumanDecision.Reverify && run.PauseReason?.Contains(OversizeReasonMarker, StringComparison.Ordinal) == true;
 
     /// <summary>Each retry_fixer from an agent resets the fix budgets, so without a cap an agent could keep a run going for ever with nobody looking.</summary>
     private async Task CountAgentFixerResetAsync(FactoryRun run, CancellationToken ct)
@@ -430,8 +443,9 @@ public sealed partial class FactoryOrchestrator(
         var run = context.Run;
         RequireStatus(run, RunStatus.NeedsHuman);
 
-        // Carrying on after the check command changed is how the person approves the new one. Not retrying the fixer, restarting or skipping.
-        if (decision == HumanDecision.Reverify || (decision == HumanDecision.Resume && run.PausedStage == PipelineStage.Integrate))
+        // Carrying on after the check command changed is how the person approves the new one. Not retrying the fixer,
+        // restarting or skipping, and never a driving agent: its request is refused before it gets here.
+        if (!fromDrivingAgent && AcceptsVerification(run, decision))
             await AcceptPendingVerificationAsync(run, ct);
 
         switch (run.PausedStage)
@@ -458,7 +472,7 @@ public sealed partial class FactoryOrchestrator(
         }
 
         // Carrying on after a passing review of a file it couldn't see in full is how the person accepts the gap.
-        if (decision is HumanDecision.Resume or HumanDecision.Reverify && run.PauseReason?.Contains(OversizeReasonMarker, StringComparison.Ordinal) == true)
+        if (!fromDrivingAgent && AcceptsReviewGap(run, decision))
             paused.ReviewGapAccepted = true;
         if (!string.IsNullOrWhiteSpace(guidance))
         {
@@ -1014,6 +1028,11 @@ public sealed partial class FactoryOrchestrator(
 
         var planned = PlannedFiles(subtask).ToList();
         var files = RepositoryScanner.ReadFiles(context.Task.RepositoryPath, planned, settings.MaxFileChars, settings.MaxContextChars);
+        if (planned.Where(FilePatcher.IsSecretPath).ToList() is { Count: > 0 } withheld)
+        {
+            await LogAsync(run.Id, subtask.Id, AgentLogKind.Warning, PipelineStage.Refine,
+                $"Not shown to the agents because the name looks like a secrets file: {string.Join(", ", withheld)}. They are told the file exists but not what is in it.", ct);
+        }
         var definitions = await ReadDefinitionsAsync(context, subtask, AgentRole.ContextSpecifier, planned, files, ct, subtask.Title, subtask.Description, subtask.HumanGuidance);
         var fileContext = RepositoryScanner.Render(files);
         var prompt = await FitPromptAsync(context, subtask, AgentRole.ContextSpecifier, definitions,
@@ -1582,9 +1601,11 @@ public sealed partial class FactoryOrchestrator(
         var seen = run.DetectedVerificationCommand;
         if (seen is null || detected?.Command == seen)
         {
-            if (detected is not null && seen is null)
+            // A change that was undone, say by a fix that put the files back, leaves nothing for a person to approve.
+            if ((detected is not null && seen is null) || run.PendingVerificationCommand is not null)
             {
-                run.DetectedVerificationCommand = detected.Command;
+                run.DetectedVerificationCommand = detected?.Command ?? seen;
+                run.PendingVerificationCommand = null;
                 await store.UpdateRunAsync(run, ct);
             }
             return (detected, null);
@@ -1751,6 +1772,12 @@ public sealed partial class FactoryOrchestrator(
     {
         var (run, git) = (context.Run, context.Git);
         await git.StageAllAsync(ct);
+        if (git.WithheldSecrets.Count > 0)
+        {
+            await LogAsync(run.Id, subtask.Id, AgentLogKind.Warning, PipelineStage.Review,
+                $"Left out of the commit because the name looks like a secrets file: {string.Join(", ", git.WithheldSecrets)}. "
+                + "The file is still in the working tree, and the checks ran with it. Commit it yourself if it belongs in the repository.", ct);
+        }
         var diff = await git.GetStagedDiffAsync(ct);
         if (diff.Length == 0)
         {

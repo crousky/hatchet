@@ -70,9 +70,9 @@ public static partial class RunCommandDetector
         if (script is null) return null;
 
         var (manager, install) =
-            File.Exists(Path.Combine(root.FullName, "pnpm-lock.yaml")) ? ("pnpm", "pnpm install --ignore-scripts") :
-            File.Exists(Path.Combine(root.FullName, "yarn.lock")) ? ("yarn", "yarn install --ignore-scripts") :
-            ("npm", File.Exists(Path.Combine(root.FullName, "package-lock.json")) ? "npm ci --ignore-scripts" : "npm install --ignore-scripts");
+            File.Exists(Path.Combine(root.FullName, "pnpm-lock.yaml")) ? ("pnpm", "pnpm install") :
+            File.Exists(Path.Combine(root.FullName, "yarn.lock")) ? ("yarn", "yarn install") :
+            ("npm", File.Exists(Path.Combine(root.FullName, "package-lock.json")) ? "npm ci" : "npm install");
 
         var run = script == "start" ? $"{manager} start" : $"{manager} run {script}";
         // A fresh copy of the commit has no installed packages.

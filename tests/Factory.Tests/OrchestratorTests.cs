@@ -710,6 +710,11 @@ public class OrchestratorTests : IAsyncLifetime
         Assert.Contains("npm", run.PauseReason);
         Assert.Contains("Re-verify", run.PauseReason);
 
+        // Approving a new command is for a person. An MCP client is refused, and nothing starts.
+        var refusal = await Assert.ThrowsAsync<FactoryValidationException>(() => _orchestrator.ResumeAsDrivingAgentAsync(run.Id, HumanDecision.Reverify, null));
+        Assert.Contains("resume it in Hatchet", refusal.Message);
+        Assert.Empty(_commands.Commands);
+
         await _orchestrator.ResumeAsync(run.Id, HumanDecision.Reverify, null);
         run = await WaitForAsync(run.Id, RunStatus.ReadyToMerge);
 
@@ -1075,7 +1080,7 @@ public class OrchestratorTests : IAsyncLifetime
 
         var run = await WaitForAsync((await StartAsync(command: "")).Id, RunStatus.ReadyToMerge);
 
-        Assert.Equal(["npm install --ignore-scripts && npm test", "npm install --ignore-scripts && npm test"], _commands.Commands);
+        Assert.Equal(["npm install && npm test", "npm install && npm test"], _commands.Commands);
         Assert.True(run.IntegrationPassed);
         Assert.Contains("detected Node (npm)", _llm.Calls.Single(c => c.Role == AgentRole.TaskPlanner).Prompt);
     }
@@ -1094,7 +1099,7 @@ public class OrchestratorTests : IAsyncLifetime
 
         await WaitForAsync((await StartAsync(command: "")).Id, RunStatus.ReadyToMerge);
 
-        Assert.All(_commands.Commands, c => Assert.Equal("npm install --ignore-scripts && npm test", c));
+        Assert.All(_commands.Commands, c => Assert.Equal("npm install && npm test", c));
     }
 
     [Fact]
@@ -1123,7 +1128,7 @@ public class OrchestratorTests : IAsyncLifetime
 
         await WaitForAsync((await StartAsync(command: "")).Id, RunStatus.ReadyToMerge);
 
-        Assert.Equal(["npm install --ignore-scripts && npm test", "npm install --ignore-scripts && npm test", "npm install --ignore-scripts && npm test"], _commands.Commands);
+        Assert.Equal(["npm install && npm test", "npm install && npm test", "npm install && npm test"], _commands.Commands);
     }
 
     [Fact]

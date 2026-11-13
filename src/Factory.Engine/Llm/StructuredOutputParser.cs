@@ -24,16 +24,15 @@ public static partial class StructuredOutputParser
 
     public static string? ExtractJsonObject(string content)
     {
-        var text = content;
         var start = JsonStart(content);
         if (start < 0) return null;
 
         var depth = 0;
         var inString = false;
         var escaped = false;
-        for (var i = start; i < text.Length; i++)
+        for (var i = start; i < content.Length; i++)
         {
-            var c = text[i];
+            var c = content[i];
             if (inString)
             {
                 if (escaped) escaped = false;
@@ -47,7 +46,7 @@ public static partial class StructuredOutputParser
                 case '"': inString = true; break;
                 case '{': depth++; break;
                 case '}':
-                    if (--depth == 0) return text[start..(i + 1)];
+                    if (--depth == 0) return content[start..(i + 1)];
                     break;
             }
         }
@@ -62,7 +61,6 @@ public static partial class StructuredOutputParser
     /// <returns>Null if the output holds no complete operation.</returns>
     public static SalvagedPatch? SalvagePatch(string content)
     {
-        var text = content;
         var start = JsonStart(content);
         if (start < 0) return null;
 
@@ -77,9 +75,9 @@ public static partial class StructuredOutputParser
         var inOperations = false;
         var operationStart = -1;
 
-        for (var i = start; i < text.Length; i++)
+        for (var i = start; i < content.Length; i++)
         {
-            var c = text[i];
+            var c = content[i];
             if (inString)
             {
                 if (escaped) escaped = false;
@@ -90,8 +88,8 @@ public static partial class StructuredOutputParser
                     // A string at the top level is a key or a value; keep the summary's value.
                     if (depth == 1)
                     {
-                        var token = Unescape(text[stringStart..(i + 1)]);
-                        if (lastKey == "summaryOfChanges" && IsValue(text, stringStart)) summary = token;
+                        var token = Unescape(content[stringStart..(i + 1)]);
+                        if (lastKey == "summaryOfChanges" && IsValue(content, stringStart)) summary = token;
                         lastKey = token;
                     }
                 }
@@ -121,7 +119,7 @@ public static partial class StructuredOutputParser
                     {
                         try
                         {
-                            if (JsonSerializer.Deserialize<FileOperationDto>(text[operationStart..(i + 1)], LlmSchemas.SerializerOptions) is { } operation)
+                            if (JsonSerializer.Deserialize<FileOperationDto>(content[operationStart..(i + 1)], LlmSchemas.SerializerOptions) is { } operation)
                                 operations.Add(operation);
                         }
                         catch (JsonException)
@@ -135,7 +133,7 @@ public static partial class StructuredOutputParser
             }
         }
 
-        if (operationStart >= 0) cutOffPath = PathIn(text[operationStart..]);
+        if (operationStart >= 0) cutOffPath = PathIn(content[operationStart..]);
         return operations.Count == 0 ? null : new SalvagedPatch(new FilePatchSetResponse(summary ?? "", operations), cutOffPath);
     }
 

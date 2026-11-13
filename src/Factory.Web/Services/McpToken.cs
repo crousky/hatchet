@@ -23,11 +23,34 @@ public sealed class McpToken
         if (existing.Length < 32)
         {
             existing = Base64Url(RandomNumberGenerator.GetBytes(32));
-            File.WriteAllText(path, existing);
-            if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+            Write(path, existing);
         }
         Value = existing;
         _bytes = Encoding.UTF8.GetBytes(Value);
+    }
+
+    /// <summary>Writes the token so that only this user can read it, from the moment the file exists.</summary>
+    private static void Write(string path, string token)
+    {
+        File.Delete(path);
+        var options = new FileStreamOptions { Mode = FileMode.CreateNew, Access = FileAccess.Write, Share = FileShare.None };
+        if (!OperatingSystem.IsWindows()) options.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
+        using var stream = new FileStream(path, options);
+        // Windows has no create mode, so the empty file is closed to everyone else before the token goes in.
+        if (OperatingSystem.IsWindows()) RestrictToCurrentUser(path);
+        stream.Write(Encoding.UTF8.GetBytes(token));
+    }
+
+    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
+    private static void RestrictToCurrentUser(string path)
+    {
+        var security = new System.Security.AccessControl.FileSecurity();
+        security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
+        security.AddAccessRule(new System.Security.AccessControl.FileSystemAccessRule(
+            System.Security.Principal.WindowsIdentity.GetCurrent().User!,
+            System.Security.AccessControl.FileSystemRights.FullControl,
+            System.Security.AccessControl.AccessControlType.Allow));
+        new FileInfo(path).SetAccessControl(security);
     }
 
     /// <summary>True when the Authorization header is "Bearer" followed by this token.</summary>

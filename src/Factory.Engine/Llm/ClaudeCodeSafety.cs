@@ -19,9 +19,10 @@ internal static class ClaudeCodeSafety
     private const string UnsafeShimCharacters = "&|<>^%\"!()\r\n";
 
     /// <summary>
-    /// Removes the variables that would change how the child behaves: <c>CLAUDECODE</c> (Hatchet may itself run inside a
-    /// Claude Code session) and every <c>CLAUDE_CODE_*</c> setting, such as the one that loads CLAUDE.md files from added
-    /// folders. Login and provider choices (anything with OAUTH, TOKEN, USE_ or API in its name) stay.
+    /// Removes the variables that would make the child trust the repository or think it is nested: <c>CLAUDECODE</c>
+    /// (Hatchet may itself run inside a Claude Code session) and the one that loads CLAUDE.md files from added folders.
+    /// Everything else stays, because Claude Code needs some of it to start at all, such as
+    /// <c>CLAUDE_CODE_GIT_BASH_PATH</c> on Windows, and its login and provider settings.
     /// </summary>
     internal static void ScrubEnvironment(ProcessStartInfo start)
     {
@@ -29,13 +30,9 @@ internal static class ClaudeCodeSafety
         foreach (var name in doomed) start.Environment.Remove(name);
     }
 
-    internal static bool IsDroppedVariable(string name)
-    {
-        if (name.Equals("CLAUDECODE", StringComparison.OrdinalIgnoreCase)) return true;
-        if (!name.StartsWith("CLAUDE_CODE_", StringComparison.OrdinalIgnoreCase)) return false;
-        return !(name.Contains("OAUTH", StringComparison.OrdinalIgnoreCase) || name.Contains("TOKEN", StringComparison.OrdinalIgnoreCase)
-                 || name.Contains("USE_", StringComparison.OrdinalIgnoreCase) || name.Contains("API", StringComparison.OrdinalIgnoreCase));
-    }
+    private static readonly string[] DroppedVariables = ["CLAUDECODE", "CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD"];
+
+    internal static bool IsDroppedVariable(string name) => DroppedVariables.Contains(name, StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
     /// Windows runs a <c>.cmd</c> or <c>.bat</c> through cmd.exe, which reads characters such as <c>&amp;</c> in the

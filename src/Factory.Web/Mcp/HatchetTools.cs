@@ -172,6 +172,7 @@ public sealed class HatchetTools(FactoryOrchestrator orchestrator, IRunStore sto
         - restart_subtask: discard the subtask's uncommitted changes and build it again.
         - skip_subtask: discard its changes and move on to the next subtask.
         Guidance goes to every agent that works on the subtask from then on: name the root cause or the approach to take, such as "keep the seed file to a few rows".
+        Two pauses can only be cleared by the user in Hatchet: a check command that changed after the model's edits, and a file too long for the reviewer to read in full. resume and reverify are refused there.
         """ + " " + McpNotes.Data)]
     public async Task<RunDetails> ResumeRun(
         [Description("The run's id.")] int runId,

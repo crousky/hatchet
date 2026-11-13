@@ -78,10 +78,10 @@ public static class VerificationDetector
         }
 
         var (manager, install) =
-            Has(root, "pnpm-lock.yaml") ? ("pnpm", "pnpm install --ignore-scripts") :
-            Has(root, "yarn.lock") ? ("yarn", "yarn install --ignore-scripts") :
-            Has(root, "bun.lockb") || Has(root, "bun.lock") ? ("bun", "bun install --ignore-scripts") :
-            ("npm", Has(root, "package-lock.json") ? "npm ci --ignore-scripts" : "npm install --ignore-scripts");
+            Has(root, "pnpm-lock.yaml") ? ("pnpm", "pnpm install") :
+            Has(root, "yarn.lock") ? ("yarn", "yarn install") :
+            Has(root, "bun.lockb") || Has(root, "bun.lock") ? ("bun", "bun install") :
+            ("npm", Has(root, "package-lock.json") ? "npm ci" : "npm install");
 
         var steps = new List<string>();
         if (Script(scripts, "build") is not null) steps.Add($"{manager} run build");

@@ -121,10 +121,12 @@ public sealed partial class SkillLibrary(string? userDirectory)
             string text;
             try
             {
-                // A link could lead out of the repository to any file, and a huge file would fill a prompt.
-                if (new DirectoryInfo(folder).LinkTarget is not null) continue;
                 var info = new FileInfo(file);
-                if (!info.Exists || info.LinkTarget is not null || info.Length > MaxFileBytes) continue;
+                if (!info.Exists) continue;
+                // In a repository, which may be untrusted, a link could lead out to any file, and a huge file would
+                // fill a prompt. The user's own skills are theirs to link, say from a dotfiles folder, and to size.
+                if (source != SkillSource.User
+                    && (new DirectoryInfo(folder).LinkTarget is not null || info.LinkTarget is not null || info.Length > MaxFileBytes)) continue;
                 text = File.ReadAllText(file);
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)

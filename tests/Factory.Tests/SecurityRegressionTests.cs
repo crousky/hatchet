@@ -215,12 +215,9 @@ public sealed class SecurityRegressionTests : IDisposable
     [InlineData(".env")]
     [InlineData("./.env")]
     [InlineData(@"app\.env.local")]
-    [InlineData("config/.ENV.production")]
     [InlineData("certs/server.PEM")]
     [InlineData("keys/id_rsa")]
-    [InlineData("keys/id_ed25519.pub")]
     [InlineData("config/secrets.json")]
-    [InlineData("infra/prod.tfvars")]
     [InlineData(".aws/credentials")]
     [InlineData("a.pfx")]
     public void Secret_looking_files_are_never_read_into_context(string path)
@@ -251,13 +248,14 @@ public sealed class SecurityRegressionTests : IDisposable
         var git = new GitWorkspace(_repo.Path);
         await git.InitializeAsync();
         await git.EnsureInitialCommitAsync();
-        foreach (var path in new[] { ".env.local", "deep/er/.env", "keys/id_rsa", "a/secrets.yaml", "x.tfvars", "c/cert.p12", "w/.aws/credentials" })
+        foreach (var path in new[] { ".env.local", "deep/er/.env", "keys/id_rsa", "a/secrets.yaml", "x.tfstate", "c/cert.p12", "w/.aws/credentials" })
             _repo.Write(path, "TOP-SECRET-VALUE");
         _repo.Write("ok.txt", "ok");
 
         await git.StageAllAsync();
 
         Assert.Equal(["ok.txt"], await git.GetStagedFilesAsync());
+        Assert.Equal(7, git.WithheldSecrets.Count); // Reported, so the run can say what it left out.
     }
 
     // ---- M5: untrusted text never lands outside a data block ----

@@ -123,6 +123,25 @@ public class SkillTests : IDisposable
     }
 
     [Fact]
+    public void The_users_own_skills_may_be_links_and_any_size()
+    {
+        using var dotfiles = new TempDirectory();
+        dotfiles.Write("mine/SKILL.md", "---\nname: mine\ndescription: d\n---\n" + new string('x', 70 * 1024));
+        try
+        {
+            Directory.CreateSymbolicLink(System.IO.Path.Combine(_user.Path, "mine"), dotfiles.File("mine"));
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or PlatformNotSupportedException)
+        {
+            return; // Creating links needs a privilege this machine hasn't granted.
+        }
+
+        var skills = new SkillLibrary(_user.Path).LoadUser();
+
+        Assert.Equal(["mine"], skills.Select(s => s.Name));
+    }
+
+    [Fact]
     public void A_symlinked_skill_file_or_folder_is_skipped()
     {
         var secret = System.IO.Path.Combine(_user.Path, "secret.md");

@@ -541,7 +541,7 @@ public class AdHocTests : IAsyncLifetime
     {
         using var node = new TempDirectory();
         node.Write("package.json", "{\"scripts\":{\"dev\":\"vite\",\"test\":\"vitest\"}}");
-        Assert.Equal("npm install --ignore-scripts && npm run dev", RunCommandDetector.Detect(node.Path)!.Command); // A fresh copy has no packages yet.
+        Assert.Equal("npm install && npm run dev", RunCommandDetector.Detect(node.Path)!.Command); // A fresh copy has no packages yet.
         node.Write("package.json", "{\"scripts\":{\"start\":\"node .\"}}");
         node.Write("node_modules/x/index.js", "");
         Assert.Equal("npm start", RunCommandDetector.Detect(node.Path)!.Command);

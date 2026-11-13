@@ -184,7 +184,7 @@ Written after the regression check (2026-11-13). Each High and Medium exploit wa
 - **L8** Branch names read from the repo go through `ValidateRefName`: no leading `-`, no whitespace or control characters. It is not `git check-ref-format`.
 - **L9** Claude Code runs with pinned settings sources, `dontAsk`, no permission prompts, `--restricted` and added directories for Ask. `CLAUDE_CODE_*` is dropped from its environment. A `.cmd` shim is allowed only with arguments `cmd.exe` can't misread, rather than refused.
 - **L10** Windows commands run in a Job Object. Git has timeouts and an output cap. On other platforms there is no process group; leftovers are killed best-effort after the command exits.
-- **L11** Credential-looking variables are removed from command environments. Detected Node installs use `--ignore-scripts`.
+- **L11** Credential-looking variables are removed from command environments. `--ignore-scripts` on detected Node installs was taken out in review: it broke projects whose packages need install scripts, and the detected command is already pinned and shown for approval.
 - **L12** `<think>` blocks are stripped only outside the JSON answer.
 - **L13** A planner result over `MaxPlannedSubtasks` (40) waits for approval. MCP `retry_fixer` is capped.
 - **L14** The prefix check has a separator. `DeleteDirectory` skips reparse points.
@@ -201,7 +201,7 @@ From the regression check. None of these were fixed there, because that step rep
 1. **The secret list is by name.** `appsettings.*.json` is deliberately not on it (too many false positives). A tracked secret file that a fix modifies stays staged on purpose, since the user chose to track it, and its diff goes to the reviewer and the database.
 2. **Untrusted text that reaches a model outside a data block (M5).** The triage write-up that Claude produces from screenshots and repository files is pasted into a run's spec (`ReportBuilder.BuildSpec`), where it is delimited as the spec but has the spec's authority; the run's plan always waits for the user. Parse errors and runaway notes appended by `PromptBuilder.Repair` and `AfterRunaway` quote the model's own earlier output outside a block.
 3. **Gate tampering is narrow (M2).** A fix can still add an MSBuild `Exec` target to the main project. This is the known limit again: verification runs model-written code.
-4. **A driving agent can clear two gates.** With the token, MCP `reverify` accepts a changed check command and MCP `resume` carries on past an unreviewed oversize file. That follows Decision 3, but it means the pause for the user only holds against a client that behaves.
+4. **Closed in review.** A driving agent could clear two gates over MCP (`reverify` accepted a changed check command, `resume` carried on past an unreviewed oversize file). Both are now refused over MCP and can only be accepted in Hatchet.
 5. **Tool result fields keep their names (M8).** The fields were not renamed `untrustedOutput` as unit B planned; the data note carries the warning instead.
 6. **Job Object race (L10).** The command is assigned to the job just after it starts, so a child it starts in that instant isn't in it. On Unix there is no process group at all.
 

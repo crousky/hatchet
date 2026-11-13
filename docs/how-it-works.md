@@ -18,7 +18,7 @@ Every patch is checked whole before anything is written. A path must stay inside
 
 Some files can run code or change how tools behave: `.github/`, `.claude/`, `.hatchet/`, `.vscode/`, `.husky/`, `.gitattributes`, `.gitmodules`, `.npmrc` and `nuget.config`. A patch may write one only if the subtask's plan lists it as a target, or your own guidance, typed in Hatchet, names it. Otherwise nothing from the patch is written and the run pauses with the file named, so you can decide.
 
-Files that look like secrets, such as `.env`, `*.pem` and `id_rsa`, are never read into a prompt, and a new one is left out when Hatchet stages a subtask's files. This goes by file name.
+Files whose names mark them as secrets, such as `.env`, `*.pem` and `id_rsa`, are never read into a prompt, and a new one is left out when Hatchet stages a subtask's files. Either way the run's log names the file. This goes by file name, and the list is kept short so that ordinary files such as `secrets.ts` or `.env.development` are not caught by it. A Windows short name (`ENV~1.LOC`) that stands in for an existing file is refused, so it can't be used to get round the list.
 
 ## When the final check fails
 
@@ -40,7 +40,7 @@ The Bug Fixer gets one automatic try, so a fix that doesn't hold ends with you r
 
 **Git runs with less trust.** Every call turns off `core.fsmonitor` and `safe.bareRepository`, and diffs use no external diff or text conversion program, so opening or diffing an untrusted repository doesn't start its programs. Hooks are ignored for read-only calls, and still run for the calls that change the repository, such as Hatchet's own commits. Each call has a timeout and an output cap, and refs that start with `-` are refused.
 
-**Commands run with less.** Detected Node installs add `--ignore-scripts`. Variables whose names look like credentials are removed from the environment of every command. On Windows a command runs in a Job Object, so anything it started in the background is killed when it ends.
+**Commands run with less.** Variables whose names look like credentials are removed from the environment of every command. On Windows a command runs in a Job Object, so anything it started in the background is killed when it ends.
 
 None of this makes the build or the tests safe to run. They are still model-written code, with your permissions.
 
