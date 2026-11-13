@@ -77,6 +77,65 @@ public class FilePatcherTests : IDisposable
     public void Unsafe_paths_are_rejected(string path) =>
         Assert.Throws<PatchRejectedException>(() => FilePatcher.Apply(_repo.Path, [Op(path, FileActions.Create, "x")]));
 
+    [Theory]
+    [InlineData(".git./hooks/pre-commit")]
+    [InlineData(".GIT./config")]
+    [InlineData("GIT~1/hooks/x")]
+    [InlineData("git~1/x")]
+    [InlineData(".git /x")]
+    [InlineData("a/.git.")]
+    [InlineData(".g‌it/config")]
+    public void Git_directory_aliases_are_rejected(string path) =>
+        Assert.Throws<PatchRejectedException>(() => FilePatcher.ResolveSafePath(_repo.Path, path));
+
+    [Theory]
+    [InlineData(".gitignore")]
+    [InlineData(".editorconfig")]
+    [InlineData("src/.config/x.json")]
+    [InlineData("git~notes.txt")]
+    public void Ordinary_dotfiles_are_accepted(string path) =>
+        Assert.StartsWith(Path.GetFullPath(_repo.Path), FilePatcher.ResolveSafePath(_repo.Path, path));
+
+    [Theory]
+    [InlineData(".github/workflows/ci.yml", true)]
+    [InlineData(".GitHub/x.yml", true)]
+    [InlineData(".claude\\settings.json", true)]
+    [InlineData(".hatchet/a", true)]
+    [InlineData(".vscode/tasks.json", true)]
+    [InlineData(".husky/pre-commit", true)]
+    [InlineData(".gitattributes", true)]
+    [InlineData("sub/.gitmodules", true)]
+    [InlineData("src/.npmrc", true)]
+    [InlineData("src/NuGet.Config", true)]
+    [InlineData("src/.github/x", false)]
+    [InlineData(".gitignore", false)]
+    [InlineData("src/app.cs", false)]
+    public void IsSensitivePath_flags_config_that_can_run_code(string path, bool expected) =>
+        Assert.Equal(expected, FilePatcher.IsSensitivePath(path));
+
+    [Theory]
+    [InlineData(".env", true)]
+    [InlineData("app/.env.local", true)]
+    [InlineData(".ENV.production", true)]
+    [InlineData(".env.example", false)]
+    [InlineData(".env.sample", false)]
+    [InlineData(".env.template", false)]
+    [InlineData("a/cert.pem", true)]
+    [InlineData("a.pfx", true)]
+    [InlineData("a.P12", true)]
+    [InlineData("tls.key", true)]
+    [InlineData("home/id_rsa", true)]
+    [InlineData("id_rsa.pub", true)]
+    [InlineData("id_ed25519", true)]
+    [InlineData("id_ecdsa", true)]
+    [InlineData("config/secrets.json", true)]
+    [InlineData("infra/prod.tfvars", true)]
+    [InlineData(".aws/credentials", true)]
+    [InlineData("credentials.cs", false)]
+    [InlineData("src/environment.cs", false)]
+    public void IsSecretPath_flags_credential_files(string path, bool expected) =>
+        Assert.Equal(expected, FilePatcher.IsSecretPath(path));
+
     [Fact]
     public void A_set_with_one_bad_operation_writes_nothing()
     {

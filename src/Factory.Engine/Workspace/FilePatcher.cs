@@ -172,17 +172,58 @@ public static class FilePatcher
         var segments = normalized.Split('/', StringSplitOptions.RemoveEmptyEntries);
         if (segments.Length == 0 || segments.Contains(".."))
             throw new PatchRejectedException($"'{relativePath}' escapes the repository.");
-        if (segments.Any(s => s.Equals(".git", StringComparison.OrdinalIgnoreCase)))
+        if (segments.Any(IsGitAlias))
             throw new PatchRejectedException($"'{relativePath}' targets the .git directory.");
+        if (segments.Any(s => s != "." && (s.EndsWith('.') || s.EndsWith(' '))))
+            throw new PatchRejectedException($"'{relativePath}' has a name ending in a dot or space.");
 
         var root = Path.GetFullPath(repositoryPath);
         var fullPath = Path.GetFullPath(Path.Combine(root, normalized));
+        var resolved = Path.GetRelativePath(root, fullPath).Split(['/', '\\'], StringSplitOptions.RemoveEmptyEntries);
+        if (resolved.Any(s => s.Equals(".git", StringComparison.OrdinalIgnoreCase)))
+            throw new PatchRejectedException($"'{relativePath}' targets the .git directory.");
         var prefix = root.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
         if (!fullPath.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
             throw new PatchRejectedException($"'{relativePath}' escapes the repository.");
 
         RejectLinkedAncestors(root, fullPath, relativePath);
         return fullPath;
+    }
+
+    /// <summary>.git, its NTFS 8.3 short name (GIT~1), or .git with invisible format characters (macOS HFS+ ignores them).</summary>
+    private static bool IsGitAlias(string segment)
+    {
+        if (System.Text.RegularExpressions.Regex.IsMatch(segment, @"^git~\d+$", System.Text.RegularExpressions.RegexOptions.IgnoreCase))
+            return true;
+        var visible = string.Concat(segment.Where(c => char.GetUnicodeCategory(c) != System.Globalization.UnicodeCategory.Format));
+        return visible.Equals(".git", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static readonly string[] SensitiveRoots = [".github", ".claude", ".hatchet", ".vscode", ".husky"];
+    private static readonly string[] SensitiveNames = [".gitattributes", ".gitmodules", ".npmrc", "nuget.config"];
+
+    /// <summary>True for CI, agent, editor and hook config, and package-source files: edits there can run code or redirect installs.</summary>
+    public static bool IsSensitivePath(string relativePath)
+    {
+        var segments = NormalizeSeparators(relativePath.Trim()).Split('/', StringSplitOptions.RemoveEmptyEntries);
+        if (segments.Length == 0) return false;
+        if (segments.Length > 1 && SensitiveRoots.Contains(segments[0], StringComparer.OrdinalIgnoreCase)) return true;
+        return SensitiveNames.Contains(segments[^1], StringComparer.OrdinalIgnoreCase);
+    }
+
+    private static readonly string[] SecretTemplates = [".env.example", ".env.sample", ".env.template"];
+
+    /// <summary>True when the file name looks like it holds credentials or keys.</summary>
+    public static bool IsSecretPath(string relativePath)
+    {
+        var segments = NormalizeSeparators(relativePath.Trim()).Split('/', StringSplitOptions.RemoveEmptyEntries);
+        if (segments.Length == 0) return false;
+        var name = segments[^1].ToLowerInvariant();
+        if (SecretTemplates.Contains(name)) return false;
+        return name == ".env" || name.StartsWith(".env.") || name == "credentials"
+            || name.EndsWith(".pem") || name.EndsWith(".pfx") || name.EndsWith(".p12") || name.EndsWith(".key") || name.EndsWith(".tfvars")
+            || name.StartsWith("id_rsa") || name.StartsWith("id_ed25519") || name.StartsWith("id_ecdsa")
+            || name.StartsWith("secrets.");
     }
 
     private static void RejectLinkedAncestors(string root, string fullPath, string relativePath)

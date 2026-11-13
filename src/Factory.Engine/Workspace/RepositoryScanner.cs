@@ -66,6 +66,12 @@ public static class RepositoryScanner
                 continue;
             }
 
+            if (FilePatcher.IsSecretPath(relative))
+            {
+                files.Add(new ContextFile(relative, "[not read: looks like a secrets file]", false));
+                continue;
+            }
+
             var content = File.ReadAllText(fullPath);
             var budget = Math.Min(maxFileChars, remaining);
             var truncated = content.Length > budget;
