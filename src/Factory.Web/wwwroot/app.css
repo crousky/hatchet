@@ -721,3 +721,9 @@ button.agent-card-head:hover { background: var(--bg-3); }
 .report-shots { display: flex; flex-wrap: wrap; gap: 10px; }
 .report-shots a { display: block; border: 1px solid var(--line-strong); border-radius: 8px; overflow: hidden; background: var(--bg-3); }
 .report-shots img { display: block; max-height: 240px; max-width: 100%; }
+.plan-command { display: flex; flex-direction: column; gap: 6px; }
+.plan-command > label { display: flex; flex-direction: column; gap: 3px; font-size: 11.5px; color: var(--muted); }
+.plan-command-input { width: 100%; font-family: var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; resize: vertical; }
+.plan-command-proposed { align-self: flex-start; font-size: 11px; padding: 1px 6px; border-radius: 4px; color: var(--warn); background: var(--warn-soft); }
+.plan-command-run { flex-direction: row !important; align-items: center; gap: 6px !important; font-size: 12px !important; color: var(--text) !important; }
+.plan-command-warning { font-size: 12px; padding: 5px 8px; border-radius: 6px; color: var(--bad); background: var(--bad-soft); }
