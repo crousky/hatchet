@@ -25,6 +25,7 @@ public static partial class RunCommandDetector
     private static DetectedRunCommand? DetectDotnet(DirectoryInfo root)
     {
         var candidates = VerificationDetector.Find(root, "*.csproj").Concat(VerificationDetector.Find(root, "*.fsproj"))
+            .Where(file => VerificationDetector.IsSafePath(Relative(root, file)))
             .Select(file => (File: file, Text: File.ReadAllText(file.FullName)))
             .Where(p => !p.Text.Contains("Microsoft.NET.Test.Sdk", StringComparison.OrdinalIgnoreCase)
                         && !p.Text.Contains("<IsTestProject>true", StringComparison.OrdinalIgnoreCase))
@@ -69,9 +70,9 @@ public static partial class RunCommandDetector
         if (script is null) return null;
 
         var (manager, install) =
-            File.Exists(Path.Combine(root.FullName, "pnpm-lock.yaml")) ? ("pnpm", "pnpm install") :
-            File.Exists(Path.Combine(root.FullName, "yarn.lock")) ? ("yarn", "yarn install") :
-            ("npm", File.Exists(Path.Combine(root.FullName, "package-lock.json")) ? "npm ci" : "npm install");
+            File.Exists(Path.Combine(root.FullName, "pnpm-lock.yaml")) ? ("pnpm", "pnpm install --ignore-scripts") :
+            File.Exists(Path.Combine(root.FullName, "yarn.lock")) ? ("yarn", "yarn install --ignore-scripts") :
+            ("npm", File.Exists(Path.Combine(root.FullName, "package-lock.json")) ? "npm ci --ignore-scripts" : "npm install --ignore-scripts");
 
         var run = script == "start" ? $"{manager} start" : $"{manager} run {script}";
         // A fresh copy of the commit has no installed packages.
