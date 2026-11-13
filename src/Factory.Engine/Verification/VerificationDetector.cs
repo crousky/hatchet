@@ -38,6 +38,7 @@ public static class VerificationDetector
     private static (string, string)? DetectDotnet(DirectoryInfo root)
     {
         var solutions = Find(root, "*.sln").Concat(Find(root, "*.slnx"))
+            .Where(f => IsSafePath(Relative(root, f)))
             .OrderBy(f => Depth(root, f)).ThenBy(f => f.Name, StringComparer.OrdinalIgnoreCase)
             .ToList();
         if (solutions.Count > 0)
@@ -46,7 +47,7 @@ public static class VerificationDetector
             return ($"dotnet build {solution} --no-incremental && dotnet test {solution} --no-build", $".NET solution {solutions[0].Name}");
         }
 
-        var projects = Find(root, "*.csproj").Concat(Find(root, "*.fsproj")).OrderBy(f => Relative(root, f), StringComparer.OrdinalIgnoreCase).ToList();
+        var projects = Find(root, "*.csproj").Concat(Find(root, "*.fsproj")).Where(f => IsSafePath(Relative(root, f))).OrderBy(f => Relative(root, f), StringComparer.OrdinalIgnoreCase).ToList();
         if (projects.Count == 0) return null;
 
         var commands = projects.Select(p => $"dotnet build {Quote(Relative(root, p))} --no-incremental").ToList();
@@ -77,10 +78,10 @@ public static class VerificationDetector
         }
 
         var (manager, install) =
-            Has(root, "pnpm-lock.yaml") ? ("pnpm", "pnpm install") :
-            Has(root, "yarn.lock") ? ("yarn", "yarn install") :
-            Has(root, "bun.lockb") || Has(root, "bun.lock") ? ("bun", "bun install") :
-            ("npm", Has(root, "package-lock.json") ? "npm ci" : "npm install");
+            Has(root, "pnpm-lock.yaml") ? ("pnpm", "pnpm install --ignore-scripts") :
+            Has(root, "yarn.lock") ? ("yarn", "yarn install --ignore-scripts") :
+            Has(root, "bun.lockb") || Has(root, "bun.lock") ? ("bun", "bun install --ignore-scripts") :
+            ("npm", Has(root, "package-lock.json") ? "npm ci --ignore-scripts" : "npm install --ignore-scripts");
 
         var steps = new List<string>();
         if (Script(scripts, "build") is not null) steps.Add($"{manager} run build");
@@ -146,6 +147,10 @@ public static class VerificationDetector
 
     private static string Relative(DirectoryInfo root, FileInfo file) =>
         Path.GetRelativePath(root.FullName, file.FullName).Replace('\\', '/');
+
+    /// <summary>File names are untrusted and end up in a shell command, so only plainly safe characters are accepted.</summary>
+    internal static bool IsSafePath(string relativePath) =>
+        relativePath.Length > 0 && relativePath.All(c => c is (>= 'A' and <= 'Z') or (>= 'a' and <= 'z') or (>= '0' and <= '9') or ' ' or '_' or '.' or '-' or '/' or '\\' or '+' or '@');
 
     private static string Quote(string path) => path.Contains(' ') ? $"\"{path}\"" : path;
 }
