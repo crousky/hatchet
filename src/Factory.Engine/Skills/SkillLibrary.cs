@@ -83,9 +83,19 @@ public sealed partial class SkillLibrary(string? userDirectory)
         if (!string.IsNullOrWhiteSpace(userDirectory)) yield return (userDirectory, SkillSource.User);
         if (!string.IsNullOrWhiteSpace(repositoryPath))
         {
-            yield return (System.IO.Path.Combine(repositoryPath, ProjectFolder), SkillSource.Project);
-            yield return (System.IO.Path.Combine(repositoryPath, ClaudeProjectFolder), SkillSource.ClaudeProject);
+            // The repository may be untrusted, so its skills roots, and the .hatchet and .claude folders above them, may not be links
+            // out of it. The user's own folder may be a link: that is the user's choice.
+            if (!IsLinked(repositoryPath, ".hatchet") && !IsLinked(repositoryPath, ProjectFolder))
+                yield return (System.IO.Path.Combine(repositoryPath, ProjectFolder), SkillSource.Project);
+            if (!IsLinked(repositoryPath, ".claude") && !IsLinked(repositoryPath, ClaudeProjectFolder))
+                yield return (System.IO.Path.Combine(repositoryPath, ClaudeProjectFolder), SkillSource.ClaudeProject);
         }
+    }
+
+    private static bool IsLinked(string repositoryPath, string relative)
+    {
+        try { return new DirectoryInfo(System.IO.Path.Combine(repositoryPath, relative)).LinkTarget is not null; }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return true; }
     }
 
     /// <summary>The largest <c>SKILL.md</c> that is read. A bigger one is skipped.</summary>

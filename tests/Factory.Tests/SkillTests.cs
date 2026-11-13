@@ -146,6 +146,35 @@ public class SkillTests : IDisposable
     }
 
     [Theory]
+    [InlineData(".hatchet/skills")]
+    [InlineData(".hatchet")]
+    [InlineData(".claude/skills")]
+    [InlineData(".claude")]
+    public void A_repository_skills_root_that_is_a_link_is_skipped_but_a_linked_user_folder_is_read(string linked)
+    {
+        // Outside the repository: a folder "elsewhere" holding skills/evil/SKILL.md. The link points at skills, or at elsewhere for a link on .hatchet or .claude.
+        var elsewhere = System.IO.Path.Combine(_user.Path, "elsewhere");
+        var skillsTarget = System.IO.Path.Combine(elsewhere, "skills");
+        Directory.CreateDirectory(System.IO.Path.Combine(skillsTarget, "evil"));
+        File.WriteAllText(System.IO.Path.Combine(skillsTarget, "evil", "SKILL.md"), "---\nname: evil\ndescription: d\n---\nbody");
+        var link = System.IO.Path.Combine(_repo.Path, linked);
+        Directory.CreateDirectory(System.IO.Path.GetDirectoryName(link)!);
+        var userLink = System.IO.Path.Combine(_repo.Path, "user-skills");
+        try
+        {
+            Directory.CreateSymbolicLink(link, linked.EndsWith("skills") ? skillsTarget : elsewhere);
+            Directory.CreateSymbolicLink(userLink, skillsTarget);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or PlatformNotSupportedException)
+        {
+            return; // Creating links needs a privilege this machine hasn't granted.
+        }
+
+        Assert.Empty(new SkillLibrary(null).Load(_repo.Path));
+        Assert.Equal(["evil"], new SkillLibrary(userLink).LoadUser().Select(s => s.Name)); // The user's own folder may be a link.
+    }
+
+    [Theory]
     [InlineData("Use Alpha Files", "use-alpha-files")]
     [InlineData("  --Fluent UI / Blazor!  ", "fluent-ui-blazor")]
     [InlineData("!!!", "")]
