@@ -50,7 +50,7 @@ public class VerificationDetectorTests : IDisposable
         _repo.Write("package.json", """{ "scripts": { "build": "tsc", "test": "vitest run" } }""");
         _repo.Write("package-lock.json", "{}");
 
-        Assert.Equal("npm ci && npm run build && npm test", VerificationDetector.Detect(_repo.Path)!.Command);
+        Assert.Equal("npm ci --ignore-scripts && npm run build && npm test", VerificationDetector.Detect(_repo.Path)!.Command);
 
         Directory.CreateDirectory(_repo.File("node_modules"));
         Assert.Equal("npm run build && npm test", VerificationDetector.Detect(_repo.Path)!.Command);
@@ -64,7 +64,7 @@ public class VerificationDetectorTests : IDisposable
         Assert.Null(VerificationDetector.Detect(_repo.Path));
 
         _repo.Write("tsconfig.json", "{}");
-        Assert.Equal("npm install && npx tsc --noEmit", VerificationDetector.Detect(_repo.Path)!.Command);
+        Assert.Equal("npm install --ignore-scripts && npx tsc --noEmit", VerificationDetector.Detect(_repo.Path)!.Command);
     }
 
     [Fact]
@@ -73,7 +73,7 @@ public class VerificationDetectorTests : IDisposable
         _repo.Write("package.json", """{ "scripts": { "test": "jest" } }""");
         _repo.Write("pnpm-lock.yaml", "");
 
-        Assert.Equal("pnpm install && pnpm test", VerificationDetector.Detect(_repo.Path)!.Command);
+        Assert.Equal("pnpm install --ignore-scripts && pnpm test", VerificationDetector.Detect(_repo.Path)!.Command);
     }
 
     [Fact]
@@ -118,5 +118,39 @@ public class VerificationDetectorTests : IDisposable
         _repo.Write(marker, "");
 
         Assert.Equal(command, VerificationDetector.Detect(_repo.Path)!.Command);
+    }
+
+    [Fact]
+    public void A_solution_with_shell_characters_in_its_name_is_ignored()
+    {
+        _repo.Write("a&b.sln", "");
+
+        Assert.Null(VerificationDetector.Detect(_repo.Path));
+    }
+
+    [Fact]
+    public void An_unsafe_solution_name_falls_through_to_the_next_safe_candidate()
+    {
+        _repo.Write("a&b.sln", "");
+        _repo.Write("src/Good.sln", "");
+
+        Assert.Equal("dotnet build src/Good.sln --no-incremental && dotnet test src/Good.sln --no-build", VerificationDetector.Detect(_repo.Path)!.Command);
+    }
+
+    [Fact]
+    public void A_project_with_shell_characters_in_its_name_is_ignored_by_both_detectors()
+    {
+        _repo.Write("a&b.csproj", """<Project Sdk="Microsoft.NET.Sdk.Web"></Project>""");
+
+        Assert.Null(VerificationDetector.Detect(_repo.Path));
+        Assert.Null(RunCommandDetector.Detect(_repo.Path));
+    }
+
+    [Fact]
+    public void A_solution_name_with_a_space_is_still_quoted()
+    {
+        _repo.Write("my app.sln", "");
+
+        Assert.Equal("dotnet build \"my app.sln\" --no-incremental && dotnet test \"my app.sln\" --no-build", VerificationDetector.Detect(_repo.Path)!.Command);
     }
 }
