@@ -1148,6 +1148,15 @@ public sealed partial class FactoryOrchestrator(
             await RefuseFixAsync(context, subtask, patch, dropped, ct);
             return false;
         }
+        if (TamperedGateFiles(context.Task.RepositoryPath, subtask, patch) is { Count: > 0 } tampered)
+        {
+            var names = string.Join(", ", tampered.Select(p => $"`{p}`"));
+            await RefuseFixAsync(context, subtask, patch,
+                $"The last fix was not applied, because it deleted a test or changed the files that define the check: {names}. A fix may not delete tests or change the files that define the check. Fix the code so the tests pass.",
+                $"it deleted a test or changed the files that define the check ({names}).",
+                $"it deleted a test or changed the files that define the check ({names}). The next attempt is told to fix the code instead.", ct);
+            return false;
+        }
         return await ApplyPatchAsync(context, subtask, patch, PipelineStage.Fix, ct);
     }
 
@@ -1226,18 +1235,66 @@ public sealed partial class FactoryOrchestrator(
     {
         var names = string.Join(", ", dropped.Select(n => $"`{n}`"));
         var (it, isIt) = dropped.Count == 1 ? ("it", "it is") : ("them", "they are");
+
+        await RefuseFixAsync(context, subtask, patch,
+            $"{RefusedFixLead}{names}, which the specification asks for. Keep {it} and fix how {isIt} used instead. "
+            + $"The definitions below show {(dropped.Count == 1 ? "its" : "their")} namespace and members, where Hatchet found them.",
+            $"it took out {names}, which the specification asks for.",
+            $"it took out {names}, which the specification asks for. The next attempt is told to keep {it}.", ct);
+    }
+
+    /// <summary>
+    /// Refuses a fix that tampers with the gate: deleting a test, or changing the files that define the check, makes it pass
+    /// without fixing anything. Planned targets are allowed, as the plan was approved. Returns what was touched, as paths.
+    /// </summary>
+    internal static IReadOnlyList<string> TamperedGateFiles(string repositoryPath, FactorySubtask subtask, FilePatchSetResponse patch)
+    {
+        var planned = PlannedTargets(repositoryPath, subtask);
+        var touched = new List<string>();
+        foreach (var op in patch.Operations)
+        {
+            if (ResolvedRelativePath(repositoryPath, op.RelativeFilePath) is not { } path || planned.Contains(path)) continue;
+            var deletes = string.Equals(op.Action?.Trim(), FileActions.Delete, StringComparison.OrdinalIgnoreCase);
+            if ((deletes && LooksLikeTestFile(path)) || DefinesCheck(path)) touched.Add(path);
+        }
+        return touched.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+    }
+
+    private static readonly string[] TestFolders = ["test", "tests", "__tests__", "spec"];
+    private static readonly string[] CheckFiles = ["package.json", "pytest.ini", "tox.ini", "makefile", "cargo.toml", "go.mod"];
+
+    private static bool LooksLikeTestFile(string path)
+    {
+        var segments = path.Split('/', StringSplitOptions.RemoveEmptyEntries);
+        var name = segments[^1];
+        return segments[..^1].Any(s => TestFolders.Contains(s, StringComparer.OrdinalIgnoreCase))
+            || name.Contains("Test", StringComparison.Ordinal)
+            || name.Contains(".test.", StringComparison.OrdinalIgnoreCase) || name.Contains(".spec.", StringComparison.OrdinalIgnoreCase)
+            || name.Contains("_test.", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool DefinesCheck(string path)
+    {
+        var name = path[(path.LastIndexOf('/') + 1)..];
+        return CheckFiles.Contains(name, StringComparer.OrdinalIgnoreCase)
+            || name.EndsWith(".sln", StringComparison.OrdinalIgnoreCase) || name.EndsWith(".slnx", StringComparison.OrdinalIgnoreCase)
+            || ((name.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase) || name.EndsWith(".fsproj", StringComparison.OrdinalIgnoreCase))
+                && name.Contains("Test", StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>Counts a refused fix as no attempt, and tells the next one why. <paramref name="notice"/> starts the failure the fixer reads.</summary>
+    private async Task RefuseFixAsync(PipelineContext context, FactorySubtask subtask, FilePatchSetResponse patch, string notice, string historyNote, string logNote, CancellationToken ct)
+    {
         var failure = FailureBeingFixed(subtask.LastFailure);
 
-        subtask.LastFailure = $"{RefusedFixLead}{names}, which the specification asks for. Keep {it} and fix how {isIt} used instead. "
-            + $"The definitions below show {(dropped.Count == 1 ? "its" : "their")} namespace and members, where Hatchet found them.\n\n{FailureToFixLead}\n{failure}";
+        subtask.LastFailure = $"{notice}\n\n{FailureToFixLead}\n{failure}";
         // Nothing was written, so this wasn't an attempt at the failure. RefusedInARow ends the loop if the guard keeps saying no.
         subtask.FixAttempts--;
         if (subtask.ReviewJson is not null) subtask.ReviewFixAttempts--;
-        subtask.FixHistory.Add($"{RefusedFixLabel} {patch.SummaryOfChanges}\nNot applied: it took out {names}, which the specification asks for.");
+        subtask.FixHistory.Add($"{RefusedFixLabel} {patch.SummaryOfChanges}\nNot applied: {historyNote}");
         if (subtask.FixHistory.Count > MaxFixHistory) subtask.FixHistory.RemoveAt(0);
         await store.UpdateSubtaskAsync(subtask, ct);
-        await LogAsync(context.Run.Id, subtask.Id, AgentLogKind.Warning, PipelineStage.Fix,
-            $"Didn't apply the Bug Fixer's change: it took out {names}, which the specification asks for. The next attempt is told to keep {it}.", ct);
+        await LogAsync(context.Run.Id, subtask.Id, AgentLogKind.Warning, PipelineStage.Fix, $"Didn't apply the Bug Fixer's change: {logNote}", ct);
     }
 
     private static string DescribeDuration(TimeSpan span) =>

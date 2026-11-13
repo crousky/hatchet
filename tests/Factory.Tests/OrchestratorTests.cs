@@ -635,6 +635,48 @@ public class OrchestratorTests : IAsyncLifetime
         Assert.True(File.Exists(_repo.File(".github/workflows/x.yml")));
     }
 
+    [Fact]
+    public async Task A_fix_that_deletes_a_test_is_refused_and_reported_back_but_editing_it_is_allowed()
+    {
+        _repo.Write("tests/AlphaTests.cs", "class AlphaTests { }\n");
+        await _git.StageAllAsync();
+        await _git.CommitStagedAsync("Add a test");
+        _llm.Enqueue(AgentRole.TaskPlanner, Plan("alpha"));
+        _llm.Enqueue(AgentRole.ContextSpecifier, Refined());
+        _llm.Enqueue(AgentRole.CodeGenerator, Patch("alpha.txt"));
+        _llm.Enqueue(AgentRole.BugFixer,
+            Patch(("tests/AlphaTests.cs", FileActions.Delete, "")),
+            Patch(("tests/AlphaTests.cs", FileActions.Overwrite, "class AlphaTests { /* fixed */ }\n")));
+        _llm.Enqueue(AgentRole.StaticReviewer, Verdict(true));
+        _commands.Results.Enqueue((1, "AlphaTests failed"));
+
+        var run = await WaitForAsync((await StartAsync()).Id, RunStatus.ReadyToMerge);
+
+        var fixes = _llm.Calls.Where(c => c.Role == AgentRole.BugFixer).ToList();
+        Assert.Equal(2, fixes.Count);
+        Assert.Contains("A fix may not delete tests or change the files that define the check", fixes[1].Prompt);
+        Assert.Contains(await _store.GetLogsAsync(run.Id), l => l.Message.StartsWith("Didn't apply the Bug Fixer's change: it deleted a test"));
+        Assert.Equal("class AlphaTests { /* fixed */ }\n", File.ReadAllText(_repo.File("tests/AlphaTests.cs")));
+        Assert.Equal(1, (await _store.GetSubtasksAsync(run.Id)).Single().FixAttempts); // The refusal was no attempt.
+    }
+
+    [Fact]
+    public void Gate_tampering_covers_tests_and_the_files_that_define_the_check_unless_planned()
+    {
+        var subtask = new FactorySubtask { TargetFilesToModify = ["Makefile"] };
+        FilePatchSetResponse Patch(params (string File, string Action)[] ops) => new("x", ops.Select(o => new FileOperationDto(o.File, o.Action, "")).ToList());
+        string[] Tampered(params (string File, string Action)[] ops) => [.. FactoryOrchestrator.TamperedGateFiles(_repo.Path, subtask, Patch(ops))];
+
+        Assert.Equal(["src/FooTests.cs"], Tampered(("src/FooTests.cs", "DELETE")));
+        Assert.Equal(["web/a.spec.ts"], Tampered(("web/a.spec.ts", "DELETE")));
+        Assert.Equal(["pkg/__tests__/x.js"], Tampered(("pkg/__tests__/x.js", "DELETE")));
+        Assert.Empty(Tampered(("src/FooTests.cs", "OVERWRITE"), ("src/FooTests.cs", "EDIT")));
+        Assert.Equal(["package.json"], Tampered(("./package.json", "EDIT")));
+        Assert.Equal(["App.sln", "tests/Foo.Tests.csproj", "go.mod"], Tampered(("App.sln", "EDIT"), ("tests/Foo.Tests.csproj", "OVERWRITE"), ("go.mod", "DELETE")));
+        Assert.Empty(Tampered(("src/Foo.csproj", "EDIT"), ("src/Latest.cs", "DELETE")));
+        Assert.Empty(Tampered(("Makefile", "EDIT"))); // A planned target.
+    }
+
     private async Task CommitSolutionAsync()
     {
         _repo.Write("App.sln", "Microsoft Visual Studio Solution File\n");
