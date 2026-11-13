@@ -3,10 +3,7 @@
     "Hatchet": {
       "commandName": "Project",
       "launchBrowser": false,
-      "applicationUrl": "http://localhost:5199",
-      "environmentVariables": {
-        "ASPNETCORE_ENVIRONMENT": "Development"
-      }
+      "applicationUrl": "http://localhost:5199"
     }
   }
 }

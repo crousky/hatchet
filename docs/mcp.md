@@ -3,8 +3,12 @@
 Hatchet is also an MCP server at `http://localhost:5199/mcp`. Add it to Claude Code once, for every project:
 
 ```bash
-claude mcp add --transport http --scope user hatchet http://localhost:5199/mcp
+claude mcp add --transport http --scope user hatchet http://localhost:5199/mcp --header "Authorization: Bearer <token>"
 ```
+
+The endpoint needs a secret token, made on first start and kept in `%LOCALAPPDATA%\Hatchet\mcp-token`. Settings shows this command with your token filled in, ready to copy.
+
+If you added Hatchet before tokens existed, run `claude mcp remove hatchet` and add it again once with the header.
 
 Then plan a change with Claude in conversation and ask it to hand the plan to Hatchet. Hatchet skips its own planner and builds, verifies, fixes and reviews each step on your local model, while Claude follows along and helps when a run pauses.
 

@@ -4,6 +4,7 @@
 @inject FactoryOrchestrator Orchestrator
 @inject ModelHealthService Health
 @inject IConfiguration Configuration
+@inject McpToken Token
 @inject IJSRuntime JS
 
 <DocumentTitle Value="Settings · Hatchet" />
@@ -267,7 +268,8 @@
                 <div class="hint">
                     Hatchet is also an MCP server, so Claude Code can drive it. Plan a change with Claude in conversation, have it hand the plan to Hatchet with <code>start_run</code>,
                     and let Hatchet build, verify, fix and review on your local model. Claude can follow the run with <code>get_run</code> and help when it pauses with <code>resume_run</code>.
-                    Run this once in a terminal to add Hatchet to Claude Code in every project:
+                    Run this once in a terminal to add Hatchet to Claude Code in every project. It includes this install's secret token, which the MCP endpoint requires.
+                    If you added Hatchet before, remove it first with <code>claude mcp remove hatchet</code>:
                 </div>
                 <div class="copy-block">
                     <pre class="code-block">@McpCommand</pre>
@@ -384,7 +386,7 @@
 
     public void Dispose() => Health.Changed -= OnHealthChanged;
 
-    private string McpCommand => $"claude mcp add --transport http --scope user hatchet {Program.BaseUrl(Configuration)}{Program.McpPath}";
+    private string McpCommand => $"claude mcp add --transport http --scope user hatchet {Program.BaseUrl(Configuration)}{Program.McpPath} --header \"Authorization: Bearer {Token.Value}\"";
 
     private readonly HashSet<AgentRole> _openPrompts = [];
 

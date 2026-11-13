@@ -25,6 +25,11 @@
         else root.setAttribute(name, value);
     }
 
+    // Reload buttons (<button data-reload>) are delegated, because the content security policy allows no inline handlers.
+    document.addEventListener("click", (event) => {
+        if (event.target.closest?.("[data-reload]")) location.reload();
+    });
+
     // Pane resizing: <div data-resize="--left-w" data-axis="x" data-sign="1" data-min="180" data-max="600">
     document.addEventListener("pointerdown", (event) => {
         const handle = event.target.closest?.("[data-resize]");
