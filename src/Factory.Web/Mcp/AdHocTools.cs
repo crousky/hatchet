@@ -121,7 +121,7 @@ public sealed class AdHocTools(AdHocManager manager, IConfiguration configuratio
     }
 
     [McpServerTool(Name = "list_requests", ReadOnly = true)]
-    [Description("Lists ad hoc requests, grouped by repository, newest first. Pass a repository to list only its requests.")]
+    [Description("Lists ad hoc requests, grouped by repository, newest first. Pass a repository to list only its requests. " + McpNotes.Data)]
     public async Task<IReadOnlyList<RepositoryRequests>> ListRequests(
         [Description("Absolute path of a repository, to list only its requests.")] string? repositoryPath = null,
         CancellationToken ct = default)

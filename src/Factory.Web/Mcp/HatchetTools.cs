@@ -53,7 +53,7 @@ public sealed class HatchetTools(FactoryOrchestrator orchestrator, IRunStore sto
     private const int MaxDiffChars = 20_000;
 
     [McpServerTool(Name = "probe_repository", ReadOnly = true)]
-    [Description("Checks whether a folder can host a Hatchet run (a Git repository with a clean working tree) and how Hatchet would verify it. Call this before start_run. If openRunId is set, that run has the repository, and a new run waits in line for it however the tree looks now.")]
+    [Description("Checks whether a folder can host a Hatchet run (a Git repository with a clean working tree) and how Hatchet would verify it. Call this before start_run. If openRunId is set, that run has the repository, and a new run waits in line for it however the tree looks now. " + McpNotes.Data)]
     public async Task<object> ProbeRepository([Description("Absolute path of the repository folder.")] string path, CancellationToken ct)
     {
         PathGuard.RejectNetworkPath(path);
@@ -97,7 +97,7 @@ public sealed class HatchetTools(FactoryOrchestrator orchestrator, IRunStore sto
     }
 
     [McpServerTool(Name = "list_runs", ReadOnly = true)]
-    [Description("Lists Hatchet runs, newest first, with their status, progress and project (the repository's folder name). For a run that needs a person, call get_run to see what it needs.")]
+    [Description("Lists Hatchet runs, newest first, with their status, progress and project (the repository's folder name). For a run that needs a person, call get_run to see what it needs. " + McpNotes.Data)]
     public async Task<IReadOnlyList<RunSummary>> ListRuns(
         [Description("True to include merged, closed, failed and cancelled runs.")] bool includeFinished = false,
         CancellationToken ct = default)

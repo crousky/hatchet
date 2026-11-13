@@ -304,7 +304,8 @@ public sealed class SecurityRegressionTests : IDisposable
 
         // Anything with free text from a build, a diff, a reviewer or Claude: the result type carries a note, and so does the description.
         var carrying = new[] { "start_run", "get_run", "get_subtask", "approve_plan", "pause_run", "resume_run", "hand_over_call", "cancel_run",
-            "status_report", "run_app", "run_command", "ask", "report_defect", "request_change", "get_request", "stop_request", "rerun_request" };
+            "status_report", "run_app", "run_command", "ask", "report_defect", "request_change", "get_request", "stop_request", "rerun_request",
+            "list_runs", "list_requests", "probe_repository" };
         foreach (var name in carrying)
         {
             var tool = tools.Single(m => m.GetCustomAttribute<McpServerToolAttribute>()!.Name == name);
