@@ -11,6 +11,10 @@ using Microsoft.EntityFrameworkCore;
 
 var builder = WebApplication.CreateBuilder(args);
 
+// Hatchet is run from source with `dotnet run`, outside Development, where the fingerprinted CSS and scripts are
+// otherwise not served. This is a no-op for a published build.
+builder.WebHost.UseStaticWebAssets();
+
 // Hatchet's data folder: the database, the MCP token and ad hoc work. Hatchet:DataDirectory moves all of it, for tests.
 var hatchetData = builder.Configuration["Hatchet:DataDirectory"]
     ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Hatchet");
