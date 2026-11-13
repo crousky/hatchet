@@ -93,8 +93,21 @@ public class FilePatcherTests : IDisposable
     [InlineData(".editorconfig")]
     [InlineData("src/.config/x.json")]
     [InlineData("git~notes.txt")]
+    [InlineData("notes~draft.md")]
+    [InlineData("a~b/c.txt")]
     public void Ordinary_dotfiles_are_accepted(string path) =>
         Assert.StartsWith(Path.GetFullPath(_repo.Path), FilePatcher.ResolveSafePath(_repo.Path, path));
+
+    [Theory]
+    [InlineData("ENV~1.LOC")]
+    [InlineData("GITHUB~1/x.yml")]
+    [InlineData("PACKAG~1.JSO")]
+    [InlineData("PROGRA~1/x")]
+    public void Windows_short_names_are_rejected(string path)
+    {
+        var error = Assert.Throws<PatchRejectedException>(() => FilePatcher.ResolveSafePath(_repo.Path, path));
+        Assert.Contains("8.3", error.Message);
+    }
 
     [Theory]
     [InlineData(".github/workflows/ci.yml", true)]

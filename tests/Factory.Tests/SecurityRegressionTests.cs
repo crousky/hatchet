@@ -71,35 +71,28 @@ public sealed class SecurityRegressionTests : IDisposable
     public void Names_that_only_look_like_git_are_still_allowed(string path) =>
         Assert.StartsWith(Path.GetFullPath(_repo.Path), FilePatcher.ResolveSafePath(_repo.Path, path));
 
-    // On Windows a file can also be named by its 8.3 short name. Path.GetFullPath expands those, so the checks that run on the
-    // resolved path (writes, the sensitive-path and gate-tampering gates) see the long name. Where 8.3 names are off, nothing is checked.
+    // On Windows a file can also be named by its 8.3 short name, which the name-based checks (secret, sensitive, gate-tampering)
+    // would not recognise. ResolveSafePath refuses any short-name segment, so none of those checks is ever given one.
     [Fact]
-    public void Windows_short_names_are_expanded_before_the_write_gates_look_at_them()
+    public void Windows_short_names_are_refused_at_the_resolver()
     {
         if (!OperatingSystem.IsWindows()) return;
         _repo.Write(".github/workflows/ci.yml", "on: push");
         _repo.Write(".npmrc", "//registry/:_authToken=abc");
         _repo.Write("package.json", "{}");
 
-        foreach (var (alias, real) in new[] { ("GITHUB~1/workflows/ci.yml", ".github/workflows/ci.yml"), ("NPMRC~1", ".npmrc"), ("PACKAG~1.JSO", "package.json") })
-        {
-            if (!File.Exists(_repo.File(alias))) continue; // This volume doesn't make short names.
-            Assert.Equal(real, Resolved(alias));
-        }
+        foreach (var alias in new[] { "GITHUB~1/workflows/ci.yml", "NPMRC~1", "PACKAG~1.JSO" })
+            Assert.Throws<PatchRejectedException>(() => FilePatcher.ResolveSafePath(_repo.Path, alias));
     }
 
-    // OPEN: RepositoryScanner.ReadFiles tests IsSecretPath on the name it is given, not the resolved one, so on Windows a short
-    // name such as ENV~1.LOC reads .env.local into the prompt. Remove Skip once ReadFiles checks the resolved path.
-    [Fact(Skip = "OPEN: ReadFiles checks IsSecretPath on the caller's spelling, so the 8.3 name ENV~1.LOC reads .env.local on Windows.")]
+    [Fact]
     public void A_short_name_does_not_read_a_secret_file_into_context()
     {
-        if (!OperatingSystem.IsWindows()) return;
         _repo.Write(".env.local", "KEY=1");
-        if (!File.Exists(_repo.File("ENV~1.LOC"))) return;
 
         var file = RepositoryScanner.ReadFiles(_repo.Path, ["ENV~1.LOC"], 1000, 1000).Single();
 
-        Assert.DoesNotContain("KEY=1", file.Content ?? "");
+        Assert.Null(file.Content); // Reported as a file that doesn't exist, like any other rejected path.
     }
 
     // ---- M4: sensitive paths, as the orchestrator sees them (resolved first) ----

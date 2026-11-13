@@ -174,7 +174,9 @@ public static class FilePatcher
             throw new PatchRejectedException($"'{relativePath}' escapes the repository.");
         if (segments.Any(IsGitAlias))
             throw new PatchRejectedException($"'{relativePath}' targets the .git directory.");
-        if (segments.Any(s => s != "." && (s.EndsWith('.') || s.EndsWith(' '))))
+        if (segments.Any(IsShortName))
+            throw new PatchRejectedException($"'{relativePath}' uses a Windows short (8.3) name. Short names are not accepted; use the full name.");
+        if (segments.Any(s => s != "."&& (s.EndsWith('.') || s.EndsWith(' '))))
             throw new PatchRejectedException($"'{relativePath}' has a name ending in a dot or space.");
 
         var root = Path.GetFullPath(repositoryPath);
@@ -199,7 +201,12 @@ public static class FilePatcher
         return visible.Equals(".git", StringComparison.OrdinalIgnoreCase);
     }
 
-    private static readonly string[] SensitiveRoots = [".github", ".claude", ".hatchet", ".vscode", ".husky"];
+    /// <summary>NTFS 8.3 short names (PROGRA~1, ENV~1.LOC). They name a file the name-based checks would not recognise. A leading dot is never part of one.</summary>
+    private static bool IsShortName(string segment) =>
+        !segment.StartsWith('.')
+        && System.Text.RegularExpressions.Regex.IsMatch(segment, @"^[^~]{1,8}~\d+(\.[^.]{0,3})?$", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
+    private static readonly string[] SensitiveRoots =[".github", ".claude", ".hatchet", ".vscode", ".husky"];
     private static readonly string[] SensitiveNames = [".gitattributes", ".gitmodules", ".npmrc", "nuget.config"];
 
     /// <summary>True for CI, agent, editor and hook config, and package-source files: edits there can run code or redirect installs.</summary>
