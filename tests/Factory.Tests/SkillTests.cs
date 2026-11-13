@@ -169,7 +169,8 @@ public class SkillTests : IDisposable
                      PromptBuilder.Fix(subtask, "failed", "files", null, skills: skills)
                  })
         {
-            Assert.Contains("## Skills. Follow these instructions for this subtask\n\n### s\n\nDo it this way.", prompt);
+            Assert.Contains("## Skills. Follow these instructions for this subtask\n\n<skill-", prompt);
+            Assert.Contains("\n### s\n\nDo it this way.\n</skill-", prompt);
         }
         Assert.DoesNotContain("## Skills", PromptBuilder.Build(subtask, "files"));
     }

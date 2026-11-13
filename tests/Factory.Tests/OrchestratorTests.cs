@@ -155,7 +155,9 @@ public class OrchestratorTests : IAsyncLifetime
         Assert.Contains("- unused: Never chosen.", PromptOf(AgentRole.TaskPlanner));
         Assert.Equal(["fluent-ui-blazor", "fixer-notes"], (await _store.GetSubtasksAsync(run.Id)).Single().Skills);
         foreach (var role in new[] { AgentRole.ContextSpecifier, AgentRole.CodeGenerator, AgentRole.BugFixer })
-            Assert.Contains("## Skills. Follow these instructions for this subtask\n\n### fluent-ui-blazor\n\nUse FluentButton", PromptOf(role));
+            Assert.Contains("## Skills. Follow these instructions for this subtask\n\n<skill-", PromptOf(role));
+        foreach (var role in new[] { AgentRole.ContextSpecifier, AgentRole.CodeGenerator, AgentRole.BugFixer })
+            Assert.Contains("\n### fluent-ui-blazor\n\nUse FluentButton", PromptOf(role));
         Assert.DoesNotContain("Read the first error", PromptOf(AgentRole.CodeGenerator));
         Assert.Contains("### fixer-notes\n\nRead the first error before the rest.", PromptOf(AgentRole.BugFixer));
         Assert.DoesNotContain("Unused instructions", PromptOf(AgentRole.BugFixer));
