@@ -738,6 +738,97 @@ public class OrchestratorTests : IAsyncLifetime
         Assert.Equal(DotnetCheck, _commands.Commands.First());
     }
 
+    private static string Lines(int count) => string.Concat(Enumerable.Range(0, count).Select(i => $"line {i}\n"));
+
+    [Fact]
+    public async Task A_diff_over_the_limit_is_reviewed_in_parts_and_every_part_must_pass()
+    {
+        _settings.Settings.MaxDiffChars = 400;
+        _llm.Enqueue(AgentRole.TaskPlanner, PlanCreating("alpha", "a.txt", "b.txt"));
+        _llm.Enqueue(AgentRole.ContextSpecifier, Refined());
+        _llm.Enqueue(AgentRole.CodeGenerator, Patch(("a.txt", FileActions.Create, Lines(12)), ("b.txt", FileActions.Create, Lines(12))));
+        _llm.Enqueue(AgentRole.BugFixer, Patch(("b.txt", FileActions.Overwrite, Lines(13))));
+        // The second part rejects, so the first pass fails; after the fix both parts pass.
+        _llm.Enqueue(AgentRole.StaticReviewer, Verdict(true), Verdict(false, "b.txt is wrong"), Verdict(true), Verdict(true));
+
+        var run = await WaitForAsync((await StartAsync()).Id, RunStatus.ReadyToMerge);
+
+        var reviews = _llm.Calls.Where(c => c.Role == AgentRole.StaticReviewer).ToList();
+        Assert.Equal(4, reviews.Count);
+        Assert.Contains("[Part 1 of 2 of this change]", reviews[0].Prompt);
+        Assert.Contains("[Part 2 of 2 of this change]", reviews[1].Prompt);
+        Assert.Contains("a.txt", reviews[0].Prompt);
+        Assert.DoesNotContain("b/b.txt", reviews[0].Prompt);
+        Assert.Contains("b.txt is wrong", _llm.Calls.Single(c => c.Role == AgentRole.BugFixer).Prompt);
+    }
+
+    [Fact]
+    public async Task A_short_diff_is_reviewed_in_one_call_without_a_part_note()
+    {
+        _llm.Enqueue(AgentRole.TaskPlanner, Plan("alpha"));
+        _llm.Enqueue(AgentRole.ContextSpecifier, Refined());
+        _llm.Enqueue(AgentRole.CodeGenerator, Patch("alpha.txt"));
+        _llm.Enqueue(AgentRole.StaticReviewer, Verdict(true));
+
+        await WaitForAsync((await StartAsync()).Id, RunStatus.ReadyToMerge);
+
+        var review = Assert.Single(_llm.Calls, c => c.Role == AgentRole.StaticReviewer);
+        Assert.DoesNotContain("Part 1 of", review.Prompt);
+    }
+
+    [Fact]
+    public async Task A_pass_that_lists_blocking_issues_is_treated_as_a_rejection()
+    {
+        _llm.Enqueue(AgentRole.TaskPlanner, Plan("alpha"));
+        _llm.Enqueue(AgentRole.ContextSpecifier, Refined());
+        _llm.Enqueue(AgentRole.CodeGenerator, Patch("alpha.txt"));
+        _llm.Enqueue(AgentRole.BugFixer, Patch("alpha.txt", "v2"));
+        _llm.Enqueue(AgentRole.StaticReviewer,
+            JsonSerializer.Serialize(new ReviewVerdictResponse(true, 95, ["it deletes the audit log"], []), LlmSchemas.SerializerOptions),
+            Verdict(true));
+
+        var run = await WaitForAsync((await StartAsync()).Id, RunStatus.ReadyToMerge);
+
+        Assert.Contains("it deletes the audit log", _llm.Calls.Single(c => c.Role == AgentRole.BugFixer).Prompt);
+        Assert.Equal(2, _llm.Calls.Count(c => c.Role == AgentRole.StaticReviewer));
+    }
+
+    [Fact]
+    public async Task A_file_too_large_to_review_in_full_pauses_a_passing_review_until_the_human_carries_on()
+    {
+        _settings.Settings.MaxDiffChars = 400;
+        _llm.Enqueue(AgentRole.TaskPlanner, Plan("alpha"));
+        _llm.Enqueue(AgentRole.ContextSpecifier, Refined());
+        _llm.Enqueue(AgentRole.CodeGenerator, Patch("alpha.txt", Lines(200)));
+        _llm.Enqueue(AgentRole.StaticReviewer, Verdict(true), Verdict(true)); // The second answers the review after resuming.
+
+        var run = await WaitForAsync((await StartAsync()).Id, RunStatus.NeedsHuman);
+
+        Assert.Contains("`alpha.txt`", run.PauseReason);
+        Assert.Contains("saw only the start", run.PauseReason);
+        Assert.Null((await _store.GetSubtasksAsync(run.Id)).Single().CommitSha);
+
+        await _orchestrator.ResumeAsync(run.Id, HumanDecision.Resume, null);
+        run = await WaitForAsync(run.Id, RunStatus.ReadyToMerge);
+
+        Assert.NotNull((await _store.GetSubtasksAsync(run.Id)).Single().CommitSha);
+        Assert.Contains(await _store.GetLogsAsync(run.Id), l => l.Message.Contains("as you chose to carry on"));
+    }
+
+    [Fact]
+    public async Task A_lock_file_too_large_to_review_in_full_is_committed_with_a_log_line()
+    {
+        _settings.Settings.MaxDiffChars = 400;
+        _llm.Enqueue(AgentRole.TaskPlanner, PlanCreating("alpha", "package-lock.json"));
+        _llm.Enqueue(AgentRole.ContextSpecifier, Refined());
+        _llm.Enqueue(AgentRole.CodeGenerator, Patch("package-lock.json", Lines(200)));
+        _llm.Enqueue(AgentRole.StaticReviewer, Verdict(true));
+
+        var run = await WaitForAsync((await StartAsync()).Id, RunStatus.ReadyToMerge);
+
+        Assert.Contains(await _store.GetLogsAsync(run.Id), l => l.Message.StartsWith("package-lock.json is a lock or generated file"));
+    }
+
     [Fact]
     public async Task Reverify_accepts_a_manual_fix_from_the_human()
     {
@@ -2116,7 +2207,7 @@ public class OrchestratorTests : IAsyncLifetime
             TargetFilesToModify = s.TargetFilesToModify, TargetFilesToCreate = s.TargetFilesToCreate, ContextFilesToRead = s.ContextFilesToRead,
             Skills = [.. s.Skills], VerificationCommand = s.VerificationCommand, CommandApproved = s.CommandApproved, Status = s.Status, IsIntegrationFix = s.IsIntegrationFix,
             FixAttempts = s.FixAttempts, ReviewFixAttempts = s.ReviewFixAttempts,
-            LastFailure = s.LastFailure, FixHistory = [.. s.FixHistory], HumanGuidance = s.HumanGuidance, GuidanceFromAgent = s.GuidanceFromAgent, AgentFixerResets = s.AgentFixerResets, RefinedSpecJson = s.RefinedSpecJson,
+            LastFailure = s.LastFailure, FixHistory = [.. s.FixHistory], HumanGuidance = s.HumanGuidance, GuidanceFromAgent = s.GuidanceFromAgent, ReviewGapAccepted = s.ReviewGapAccepted, AgentFixerResets = s.AgentFixerResets, RefinedSpecJson = s.RefinedSpecJson,
             SummaryOfChanges = s.SummaryOfChanges, ReviewJson = s.ReviewJson, CommitSha = s.CommitSha
         };
 

@@ -404,6 +404,9 @@ public sealed partial class FactoryOrchestrator(
             return;
         }
 
+        // Carrying on after a passing review of a file it couldn't see in full is how the person accepts the gap.
+        if (decision is HumanDecision.Resume or HumanDecision.Reverify && run.PauseReason?.Contains(OversizeReasonMarker, StringComparison.Ordinal) == true)
+            paused.ReviewGapAccepted = true;
         paused.HumanGuidance = string.IsNullOrWhiteSpace(guidance) ? paused.HumanGuidance : guidance.Trim();
         var resumePoint = await ApplyDecisionAsync(run, paused, decision, ct);
         await store.UpdateSubtaskAsync(paused, ct);
@@ -1084,6 +1087,7 @@ public sealed partial class FactoryOrchestrator(
     {
         var (run, settings, git) = (context.Run, context.Settings, context.Git);
         subtask.FixAttempts++;
+        subtask.ReviewGapAccepted = false; // The code is about to change, so what was accepted no longer holds.
         // Saved now, as the status may already be Fixing: a restart must not hand out extra attempts.
         await store.UpdateSubtaskAsync(subtask, ct);
         await SetSubtaskStatusAsync(subtask, SubtaskStatus.Fixing, ct);
@@ -1558,17 +1562,105 @@ public sealed partial class FactoryOrchestrator(
         var testSummary = verification is null
             ? "No build or test setup exists yet, so nothing was built or tested. Judge the change on the diff alone."
             : $"Command: {verification.Command}\nExit code: {verification.ExitCode}\nDuration: {verification.Duration.TotalSeconds:0.0}s\n\n{PromptBuilder.Tail(verification.Output, 4000)}";
-        var prompt = PromptBuilder.Review(subtask, PromptBuilder.Head(diff, settings.MaxDiffChars), testSummary, subtask.HumanGuidance);
 
-        var verdict = await InvokeAgentAsync<ReviewVerdictResponse>(context, AgentRole.StaticReviewer, subtask.Id, prompt, null, ct);
+        // Everything staged is committed, so everything staged has to be seen: a long diff is reviewed in parts.
+        var chunks = ReviewChunks(diff, settings.MaxDiffChars);
+        var verdicts = new List<ReviewVerdictResponse>();
+        for (var i = 0; i < chunks.Count; i++)
+        {
+            var shown = chunks.Count == 1 ? chunks[i].Diff : $"[Part {i + 1} of {chunks.Count} of this change]\n{chunks[i].Diff}";
+            var prompt = PromptBuilder.Review(subtask, shown, testSummary, subtask.HumanGuidance);
+            var part = await InvokeAgentAsync<ReviewVerdictResponse>(context, AgentRole.StaticReviewer, subtask.Id, prompt, null, ct);
+            // A pass that lists blocking issues contradicts itself, and the issues win.
+            verdicts.Add(part.Passed && part.BlockingIssues.Count > 0 ? part with { Passed = false } : part);
+        }
+
+        var verdict = verdicts.Count == 1 ? verdicts[0] : new ReviewVerdictResponse(
+            verdicts.All(v => v.Passed), verdicts.Min(v => v.ConfidenceScore),
+            [.. verdicts.SelectMany(v => v.BlockingIssues)], [.. verdicts.SelectMany(v => v.Suggestions)]);
         subtask.ReviewJson = PromptBuilder.ToJson(verdict);
         await store.UpdateSubtaskAsync(subtask, ct);
 
         var outcome = verdict.Passed ? "approved" : "rejected";
         await LogAsync(run.Id, subtask.Id, verdict.Passed ? AgentLogKind.Info : AgentLogKind.Warning, PipelineStage.Review,
-            $"Reviewer {outcome} with {verdict.ConfidenceScore}% confidence; {verdict.BlockingIssues.Count} blocking issues, {verdict.Suggestions.Count} suggestions.", ct);
+            $"Reviewer {outcome}{(chunks.Count > 1 ? $" in {chunks.Count} parts" : "")} with {verdict.ConfidenceScore}% confidence; {verdict.BlockingIssues.Count} blocking issues, {verdict.Suggestions.Count} suggestions.", ct);
+
+        if (verdict.Passed) await RequireReviewedInFullAsync(context, subtask, chunks.SelectMany(c => c.TooLarge).Distinct().ToList(), ct);
         return verdict;
     }
+
+    /// <summary>A part of a change that is reviewed in one call, and the files in it that were cut short to fit.</summary>
+    internal sealed record ReviewChunk(string Diff, IReadOnlyList<string> TooLarge);
+
+    private static readonly string[] GeneratedNames = ["packages.lock.json", "package-lock.json", "yarn.lock", "pnpm-lock.yaml"];
+
+    private static bool IsLockOrGenerated(string path)
+    {
+        var name = path[(path.LastIndexOf('/') + 1)..];
+        return GeneratedNames.Contains(name, StringComparer.OrdinalIgnoreCase)
+            || name.EndsWith(".Designer.cs", StringComparison.OrdinalIgnoreCase) || name.EndsWith(".min.js", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// Splits a diff that is over <paramref name="maxChars"/> into per-file diffs and packs whole files into parts no longer
+    /// than that. A single file over the limit gets a part of its own, cut short, and is named in <see cref="ReviewChunk.TooLarge"/>.
+    /// </summary>
+    internal static List<ReviewChunk> ReviewChunks(string diff, int maxChars)
+    {
+        if (diff.Length <= maxChars) return [new ReviewChunk(diff, [])];
+
+        var chunks = new List<ReviewChunk>();
+        var current = new StringBuilder();
+        void Flush()
+        {
+            if (current.Length > 0) chunks.Add(new ReviewChunk(current.ToString(), []));
+            current.Clear();
+        }
+
+        foreach (var file in Regex.Split(diff, @"(?m)^(?=diff --git )").Where(f => f.Length > 0))
+        {
+            if (file.Length > maxChars)
+            {
+                Flush();
+                var header = file.Split('\n', 2)[0];
+                var at = header.LastIndexOf(" b/", StringComparison.Ordinal);
+                chunks.Add(new ReviewChunk(PromptBuilder.Head(file, maxChars), [at >= 0 ? header[(at + 3)..].Trim() : header]));
+                continue;
+            }
+            if (current.Length + file.Length > maxChars) Flush();
+            current.Append(file);
+        }
+        Flush();
+        return chunks;
+    }
+
+    /// <summary>
+    /// A file too large for the reviewer to see in full can hide anything past what it saw, so a passing review isn't enough
+    /// to commit it: the run pauses, unless the file is a lock or generated file, or a person has already said to carry on.
+    /// </summary>
+    private async Task RequireReviewedInFullAsync(PipelineContext context, FactorySubtask subtask, IReadOnlyList<string> tooLarge, CancellationToken ct)
+    {
+        var (run, limit) = (context.Run, context.Settings.MaxDiffChars);
+        foreach (var path in tooLarge.Where(IsLockOrGenerated))
+            await LogAsync(run.Id, subtask.Id, AgentLogKind.Info, PipelineStage.Review,
+                $"{path} is a lock or generated file too large for the reviewer to see in full, so it was committed without that.", ct);
+        var unseen = tooLarge.Where(p => !IsLockOrGenerated(p)).ToList();
+        if (unseen.Count == 0) return;
+
+        var names = string.Join(", ", unseen.Select(p => $"`{p}`"));
+        if (subtask.ReviewGapAccepted)
+        {
+            await LogAsync(run.Id, subtask.Id, AgentLogKind.Warning, PipelineStage.Review, $"Committed {names}, which the reviewer saw only the start of, as you chose to carry on.", ct);
+            return;
+        }
+
+        var reason = $"The reviewer approved, but {names} {(unseen.Count == 1 ? "is" : "are")} longer than the {limit}-character review limit, so it saw only the start. "
+            + $"{OversizeReasonMarker} Read the file yourself, then choose Resume to commit it as it is; or retry the fixer, restart or skip the subtask.";
+        await LogAsync(run.Id, subtask.Id, AgentLogKind.Warning, PipelineStage.Review, reason, ct);
+        throw new GatePauseException(reason);
+    }
+
+    private const string OversizeReasonMarker = "Nothing was committed.";
 
     private async Task CommitAsync(PipelineContext context, FactorySubtask subtask, CancellationToken ct)
     {
@@ -2121,6 +2213,7 @@ public sealed partial class FactoryOrchestrator(
             case HumanDecision.RestartSubtask when subtask.IsIntegrationFix:
                 await RollbackAsync(run, ct);
                 subtask.ReviewJson = null;
+                subtask.ReviewGapAccepted = false;
                 subtask.FixAttempts = 0;
                 subtask.ReviewFixAttempts = 0;
                 subtask.FixHistory.Clear();
@@ -2132,6 +2225,7 @@ public sealed partial class FactoryOrchestrator(
                 subtask.SummaryOfChanges = null;
                 subtask.LastFailure = null;
                 subtask.ReviewJson = null;
+                subtask.ReviewGapAccepted = false;
                 subtask.FixAttempts = 0;
                 subtask.ReviewFixAttempts = 0;
                 subtask.FixHistory.Clear();

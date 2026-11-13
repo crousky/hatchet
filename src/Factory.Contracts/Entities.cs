@@ -118,6 +118,9 @@ public sealed class FactorySubtask
     public List<string> FixHistory { get; set; } = [];
     public string? HumanGuidance { get; set; }
 
+    /// <summary>The user chose to carry on although a file was too large for the reviewer to see in full. Cleared when the code changes.</summary>
+    public bool ReviewGapAccepted { get; set; }
+
     /// <summary>The guidance came through MCP from the driving agent, not from the user, so agents treat it as a suggestion.</summary>
     public bool GuidanceFromAgent { get; set; }
 

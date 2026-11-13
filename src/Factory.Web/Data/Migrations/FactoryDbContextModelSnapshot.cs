@@ -326,6 +326,9 @@ namespace Factory.Web.Data.Migrations
                     b.Property<int>("ReviewFixAttempts")
                         .HasColumnType("INTEGER");
 
+                    b.Property<bool>("ReviewGapAccepted")
+                        .HasColumnType("INTEGER");
+
                     b.Property<string>("ReviewJson")
                         .HasColumnType("TEXT");
 

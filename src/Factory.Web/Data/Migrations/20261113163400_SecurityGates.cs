@@ -31,6 +31,13 @@ namespace Factory.Web.Data.Migrations
                 nullable: false,
                 defaultValue: false);
 
+            migrationBuilder.AddColumn<bool>(
+                name: "ReviewGapAccepted",
+                table: "Subtasks",
+                type: "INTEGER",
+                nullable: false,
+                defaultValue: false);
+
             migrationBuilder.AddColumn<string>(
                 name: "DetectedVerificationCommand",
                 table: "Runs",
@@ -64,6 +71,10 @@ namespace Factory.Web.Data.Migrations
 
             migrationBuilder.DropColumn(
                 name: "GuidanceFromAgent",
+                table: "Subtasks");
+
+            migrationBuilder.DropColumn(
+                name: "ReviewGapAccepted",
                 table: "Subtasks");
 
             migrationBuilder.DropColumn(

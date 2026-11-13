@@ -11,7 +11,7 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace Factory.Web.Data.Migrations
 {
     [DbContext(typeof(FactoryDbContext))]
-    [Migration("20261113162823_SecurityGates")]
+    [Migration("20261113163400_SecurityGates")]
     partial class SecurityGates
     {
         /// <inheritdoc />
@@ -327,6 +327,9 @@ namespace Factory.Web.Data.Migrations
                         .HasColumnType("TEXT");
 
                     b.Property<int>("ReviewFixAttempts")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<bool>("ReviewGapAccepted")
                         .HasColumnType("INTEGER");
 
                     b.Property<string>("ReviewJson")
