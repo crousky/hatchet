@@ -4,7 +4,10 @@ using Factory.Contracts;
 
 namespace Factory.Engine.Skills;
 
-/// <summary>Where a skill was found. Earlier places win when two skills share a name.</summary>
+/// <summary>
+/// Where a skill was found. When two skills share a name, the user's wins, then <see cref="Project"/>, then <see cref="ClaudeProject"/>.
+/// The order they are declared in is not the order of precedence.
+/// </summary>
 public enum SkillSource
 {
     /// <summary>The repository's <c>.hatchet/skills</c> folder.</summary>
