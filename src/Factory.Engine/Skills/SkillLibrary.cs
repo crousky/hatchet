@@ -23,10 +23,13 @@ public enum SkillSource
 /// <summary>
 /// Instructions written once and given to agents whose subtask needs them. A skill is a folder holding a
 /// <c>SKILL.md</c> in the Claude Code layout: YAML frontmatter with a name and a description, then a markdown body.
-/// Hatchet also reads an optional <c>roles</c> list naming the agents it is for.
+/// Hatchet also reads an optional <c>roles</c> list naming the agents it is for, and an optional <c>always</c> flag.
 /// </summary>
 /// <param name="Path">The full path of the skill's <c>SKILL.md</c>.</param>
 /// <param name="Problems">What was wrong with the file, such as a role Hatchet doesn't know. The skill still loads.</param>
+/// <param name="Always">
+/// The skill goes with every subtask, whether or not the plan lists it, such as rules the whole repository keeps to.
+/// </param>
 public sealed record Skill(
     string Name,
     string Description,
@@ -34,7 +37,8 @@ public sealed record Skill(
     string Body,
     string Path,
     SkillSource Source,
-    IReadOnlyList<string> Problems)
+    IReadOnlyList<string> Problems,
+    bool Always = false)
 {
     public bool IsFor(AgentRole role) => Roles.Contains(role);
 }
@@ -49,8 +53,15 @@ public sealed partial class SkillLibrary(string? userDirectory)
     public static string DefaultUserDirectory =>
         System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Hatchet", "skills");
 
-    /// <summary>The agents whose prompts carry skills. A skill without a roles list goes to all of them.</summary>
-    public static readonly IReadOnlyList<AgentRole> SkilledRoles = [AgentRole.ContextSpecifier, AgentRole.CodeGenerator, AgentRole.BugFixer];
+    /// <summary>The agents whose prompts can carry skills.</summary>
+    public static readonly IReadOnlyList<AgentRole> SkilledRoles = [AgentRole.ContextSpecifier, AgentRole.CodeGenerator, AgentRole.BugFixer, AgentRole.StaticReviewer];
+
+    /// <summary>
+    /// The agents a skill without a roles list goes to: the ones that write the code. The Static Reviewer reads a skill
+    /// as rules a change is rejected for breaking, so it gets one only when the skill's roles name it. Advice on how to
+    /// build something, which is what most skills are, would otherwise turn into grounds for rejection.
+    /// </summary>
+    public static readonly IReadOnlyList<AgentRole> DefaultRoles = [AgentRole.ContextSpecifier, AgentRole.CodeGenerator, AgentRole.BugFixer];
 
     /// <summary>Where a new project skill is written, relative to the repository.</summary>
     public const string ProjectFolder = ".hatchet/skills";
@@ -168,10 +179,24 @@ public sealed partial class SkillLibrary(string? userDirectory)
             foreach (var role in roles.Where(r => !SkilledRoles.Contains(r)))
                 problems.Add($"The {role} doesn't take skills, so it won't get this one.");
         }
-        if (roles.Count == 0) roles.AddRange(SkilledRoles);
+        if (roles.Count == 0) roles.AddRange(DefaultRoles);
 
-        return new Skill(name.Trim(), description.Trim(), roles, body.Trim(), path, source, problems);
+        var always = false;
+        if (Scalar(fields, "always") is { } flag)
+        {
+            if (ParseFlag(flag) is { } value) always = value;
+            else problems.Add($"\"always: {flag}\" isn't true or false, so the skill is given only to subtasks that list it.");
+        }
+
+        return new Skill(name.Trim(), description.Trim(), roles, body.Trim(), path, source, problems, always);
     }
+
+    private static bool? ParseFlag(string text) => text.Trim().ToLowerInvariant() switch
+    {
+        "true" or "yes" or "on" => true,
+        "false" or "no" or "off" => false,
+        _ => null
+    };
 
     /// <summary>Accepts role names as Hatchet writes them, such as <c>CodeGenerator</c>, <c>Code Generator</c> or <c>code-generator</c>.</summary>
     public static AgentRole? ParseRole(string text)
@@ -278,13 +303,14 @@ public sealed partial class SkillLibrary(string? userDirectory)
     }
 
     /// <summary>The text of a new <c>SKILL.md</c>.</summary>
-    public static string Compose(string name, string description, string body, IReadOnlyList<AgentRole>? roles = null)
+    public static string Compose(string name, string description, string body, IReadOnlyList<AgentRole>? roles = null, bool always = false)
     {
         var builder = new StringBuilder();
         builder.Append("---\n");
         builder.Append("name: ").Append(name).Append('\n');
         builder.Append("description: ").Append(Quote(description.ReplaceLineEndings(" ").Trim())).Append('\n');
         if (roles is { Count: > 0 }) builder.Append("roles: [").Append(string.Join(", ", roles)).Append("]\n");
+        if (always) builder.Append("always: true\n");
         builder.Append("---\n\n");
         builder.Append(body.ReplaceLineEndings("\n").Trim()).Append('\n');
         return builder.ToString();

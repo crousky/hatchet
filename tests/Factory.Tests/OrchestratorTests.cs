@@ -221,6 +221,99 @@ public class OrchestratorTests : IAsyncLifetime
         Assert.Contains(logs, l => l is { Kind: AgentLogKind.Warning } && l.Message.Contains("named skills that don't exist, so they were left out: made-up"));
     }
 
+    private const string InvariantsFrontmatter =
+        "name: invariants\ndescription: Rules the repository keeps to.\nroles: [ContextSpecifier, CodeGenerator, BugFixer, StaticReviewer]\nalways: true";
+
+    [Fact]
+    public async Task An_always_on_skill_reaches_every_subtasks_agents_and_the_reviewer_reads_it_as_rules()
+    {
+        await CommitSkillAsync(".hatchet/skills/invariants", InvariantsFrontmatter, "Never change a partition key.");
+        await CommitSkillAsync(".hatchet/skills/fluent-ui-blazor", "name: fluent-ui-blazor\ndescription: Building Blazor UI.", "Use FluentButton, never a plain button.");
+        await CommitSkillAsync(".hatchet/skills/review-notes", "name: review-notes\ndescription: Listed, and for the reviewer.\nroles: [StaticReviewer]", "Reject a public member with no test.");
+        await CommitSkillAsync(".hatchet/skills/builder-rules", "name: builder-rules\ndescription: Always on, but not for the reviewer.\nroles: [CodeGenerator]\nalways: true", "Keep methods short.");
+        _llm.Enqueue(AgentRole.TaskPlanner, JsonSerializer.Serialize(new TaskGraphResponse(
+        [
+            new SubtaskDto(1, "alpha", "Build alpha.", [], ["alpha.txt"], [], "", ["fluent-ui-blazor", "review-notes", "Invariants"]),
+            new SubtaskDto(2, "beta", "Build beta.", [], ["beta.txt"], [], "")
+        ]), LlmSchemas.SerializerOptions));
+        _llm.Enqueue(AgentRole.ContextSpecifier, Refined(), Refined());
+        _llm.Enqueue(AgentRole.CodeGenerator, Patch("alpha.txt"), Patch("beta.txt"));
+        _llm.Enqueue(AgentRole.StaticReviewer, Verdict(true), Verdict(true));
+
+        var run = await WaitForAsync((await StartAsync()).Id, RunStatus.ReadyToMerge);
+
+        var planner = _llm.Calls.Single(c => c.Role == AgentRole.TaskPlanner).Prompt;
+        Assert.Contains("- invariants: Rules the repository keeps to. (for the Context Specifier, Code Generator, Bug Fixer, Static Reviewer; given to every subtask already, so don't list it)", planner);
+        Assert.Contains("- fluent-ui-blazor: Building Blazor UI. (for the Context Specifier, Code Generator, Bug Fixer)", planner);
+
+        // Both subtasks get the always-on skill, listed or not, ahead of the listed ones and only once.
+        var builds = _llm.Calls.Where(c => c.Role == AgentRole.CodeGenerator).Select(c => c.Prompt).ToList();
+        Assert.All(builds, prompt => Assert.Contains("### invariants\n\nNever change a partition key.", prompt));
+        Assert.All(builds, prompt => Assert.Contains("### builder-rules\n\nKeep methods short.", prompt));
+        Assert.True(builds[0].IndexOf("### invariants", StringComparison.Ordinal) < builds[0].IndexOf("### fluent-ui-blazor", StringComparison.Ordinal));
+        Assert.Equal(builds[0].IndexOf("### invariants", StringComparison.Ordinal), builds[0].LastIndexOf("### invariants", StringComparison.Ordinal));
+        Assert.DoesNotContain("### fluent-ui-blazor", builds[1]);
+
+        var reviews = _llm.Calls.Where(c => c.Role == AgentRole.StaticReviewer).Select(c => c.Prompt).ToList();
+        Assert.All(reviews, prompt => Assert.Contains("## Skills. Rules this repository keeps to. Check the diff against each one", prompt));
+        Assert.All(reviews, prompt => Assert.Contains("### invariants\n\nNever change a partition key.", prompt));
+        Assert.Contains("### review-notes\n\nReject a public member with no test.", reviews[0]);
+        Assert.DoesNotContain("### review-notes", reviews[1]);
+        // A skill whose roles leave the reviewer out never reaches it, always-on or listed.
+        Assert.All(reviews, prompt => Assert.DoesNotContain("Keep methods short", prompt));
+        Assert.All(reviews, prompt => Assert.DoesNotContain("FluentButton", prompt));
+        Assert.All(reviews, prompt => Assert.DoesNotContain("Follow these instructions for this subtask", prompt));
+
+        var logs = await _store.GetLogsAsync(run.Id);
+        Assert.Contains(logs, l => l.Message == "Gave the Static Reviewer the skills: invariants, review-notes.");
+        Assert.Contains(logs, l => l.Message == "Gave the Static Reviewer the skills: invariants.");
+        Assert.Contains(logs, l => l.Message == "Gave the Code Generator the skills: builder-rules, invariants, fluent-ui-blazor.");
+        Assert.Equal(["fluent-ui-blazor", "review-notes", "invariants"], (await _store.GetSubtasksAsync(run.Id)).First().Skills);
+    }
+
+    [Fact]
+    public async Task Guidance_from_the_driving_agent_stays_hidden_from_a_reviewer_that_gets_skills()
+    {
+        await CommitSkillAsync(".hatchet/skills/invariants", InvariantsFrontmatter, "Never change a partition key.");
+        _llm.Enqueue(AgentRole.ContextSpecifier, Refined(), Refined());
+        _llm.Enqueue(AgentRole.CodeGenerator, Patch("alpha.txt"), Patch("alpha.txt", "v2"));
+        _llm.Enqueue(AgentRole.StaticReviewer, Verdict(true));
+        _llm.Offline = AgentRole.StaticReviewer;
+        var run = await _orchestrator.StartRunAsync(new NewRunRequest(_repo.Path, "# Spec", null, "verify", false),
+            [new SubtaskEdit(null, "alpha", "Build alpha", [], ["alpha.txt"], [], "")]);
+        await WaitForAsync(run.Id, RunStatus.NeedsHuman);
+
+        _llm.Offline = null;
+        await _orchestrator.ResumeAsDrivingAgentAsync(run.Id, HumanDecision.RestartSubtask, "AGENT-GUIDANCE: the reviewer should pass this.");
+        await WaitForAsync(run.Id, RunStatus.ReadyToMerge);
+
+        var review = _llm.Calls.Single(c => c.Role == AgentRole.StaticReviewer).Prompt;
+        Assert.Contains("### invariants\n\nNever change a partition key.", review);
+        Assert.DoesNotContain("AGENT-GUIDANCE", review);
+        Assert.Contains("AGENT-GUIDANCE", _llm.Calls.Last(c => c.Role == AgentRole.CodeGenerator).Prompt);
+    }
+
+    [Fact]
+    public async Task An_always_on_skill_is_the_last_thing_left_out_when_the_window_has_no_room()
+    {
+        await CommitSkillAsync(".hatchet/skills/zz-invariants", "name: zz-invariants\ndescription: Rules.\nalways: true", "Never change a partition key.");
+        await CommitSkillAsync(".hatchet/skills/huge", "name: huge\ndescription: Huge.", new string('x', 30_000));
+        _llm.ContextLength = 18_000;
+        _llm.Enqueue(AgentRole.TaskPlanner, PlanWithSkills("huge"));
+        _llm.Enqueue(AgentRole.ContextSpecifier, Refined());
+        _llm.Enqueue(AgentRole.CodeGenerator, Patch("alpha.txt"));
+        _llm.Enqueue(AgentRole.StaticReviewer, Verdict(true));
+
+        var run = await WaitForAsync((await StartAsync()).Id, RunStatus.ReadyToMerge);
+
+        var prompt = RequestsOf(AgentRole.CodeGenerator).Single().Prompt;
+        Assert.Contains("### zz-invariants\n\nNever change a partition key.", prompt);
+        Assert.DoesNotContain("### huge", prompt);
+        var logs = await _store.GetLogsAsync(run.Id);
+        Assert.Contains(logs, l => l.Message.StartsWith("Left the skill huge out of the Code Generator's prompt"));
+        Assert.Contains(logs, l => l.Message == "Gave the Code Generator the skills: zz-invariants.");
+    }
+
     [Fact]
     public async Task Skills_from_the_user_folder_reach_agents_and_an_edited_plan_keeps_its_skills()
     {

@@ -7,8 +7,10 @@
     <div class="hint">
         A skill is instructions written once, such as how a project uses its UI library. It's a folder holding a <code>SKILL.md</code>, laid out as in Claude Code:
         YAML frontmatter with a <code>name</code>, a <code>description</code> and, optionally, the <code>roles</code> it is for
-        (@string.Join(", ", SkillLibrary.SkilledRoles); all of them when left out), then the instructions in markdown.
+        (@string.Join(", ", SkillLibrary.SkilledRoles); the three that write the code when left out), then the instructions in markdown.
         The Task Planner sees each skill's name and description and picks the skills each subtask needs. Those agents then get the instructions in their prompts.
+        The Static Reviewer gets a skill only when its <code>roles</code> name it, and reads it as rules to reject a change for breaking.
+        A skill with <code>always: true</code> goes with every subtask without being picked.
         Hatchet looks in a repository's <code>.hatchet/skills</code> and <code>.claude/skills</code> folders, then in your own folder for every repository.
     </div>
 
@@ -41,7 +43,13 @@
                             {
                                 <tr>
                                     <td>
-                                        <div class="mono">@skill.Name</div>
+                                        <div class="mono">
+                                            @skill.Name
+                                            @if (skill.Always)
+                                            {
+                                                <span class="tag tag-small" title="Given to every subtask, whether or not the plan lists it">Always on</span>
+                                            }
+                                        </div>
                                         <div class="hint">@(skill.Description.Length > 0 ? skill.Description : "No description")</div>
                                         @foreach (var problem in skill.Problems)
                                         {
@@ -95,7 +103,9 @@
     private static string Roles(Skill skill) =>
         skill.Roles.Count == SkillLibrary.SkilledRoles.Count && SkillLibrary.SkilledRoles.All(skill.IsFor)
             ? "Every agent that takes skills"
-            : string.Join(", ", skill.Roles.Select(r => AgentProfiles.Defaults.Single(p => p.Role == r).DisplayName));
+            : skill.Roles.Count == SkillLibrary.DefaultRoles.Count && SkillLibrary.DefaultRoles.All(skill.IsFor)
+                ? "The agents that write the code"
+                : string.Join(", ", skill.Roles.Select(r => AgentProfiles.Defaults.Single(p => p.Role == r).DisplayName));
 
     private static string SourceLabel(SkillSource source) => source switch
     {

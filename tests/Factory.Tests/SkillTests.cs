@@ -62,22 +62,74 @@ public class SkillTests : IDisposable
     [Fact]
     public void Unknown_roles_and_roles_that_take_no_skills_are_reported()
     {
-        var skill = Parse("---\nname: s\ndescription: d\nroles: [Designer, StaticReviewer, 3]\n---\nBody");
+        var skill = Parse("---\nname: s\ndescription: d\nroles: [Designer, TaskPlanner, 3]\n---\nBody");
 
-        Assert.Equal([AgentRole.StaticReviewer], skill.Roles);
+        Assert.Equal([AgentRole.TaskPlanner], skill.Roles);
         Assert.Contains(skill.Problems, p => p.Contains("\"Designer\" isn't a Hatchet agent role"));
         Assert.Contains(skill.Problems, p => p.Contains("\"3\" isn't"));
-        Assert.Contains(skill.Problems, p => p.Contains("StaticReviewer doesn't take skills"));
+        Assert.Contains(skill.Problems, p => p.Contains("TaskPlanner doesn't take skills"));
         Assert.False(skill.IsFor(AgentRole.CodeGenerator));
     }
 
     [Fact]
-    public void A_skill_without_roles_is_for_every_agent_that_takes_skills()
+    public void A_skill_without_roles_is_for_the_agents_that_write_the_code_and_not_the_reviewer()
     {
         var skill = Parse("---\nname: s\ndescription: \"Use when: always\"\n---\nBody");
 
-        Assert.Equal(SkillLibrary.SkilledRoles, skill.Roles);
+        Assert.Equal([AgentRole.ContextSpecifier, AgentRole.CodeGenerator, AgentRole.BugFixer], skill.Roles);
+        Assert.False(skill.IsFor(AgentRole.StaticReviewer));
         Assert.Equal("Use when: always", skill.Description);
+    }
+
+    [Theory]
+    [InlineData("roles: [StaticReviewer]")]
+    [InlineData("roles: Static Reviewer")]
+    [InlineData("roles:\n  - static-reviewer")]
+    public void The_reviewer_takes_a_skill_whose_roles_name_it(string roles)
+    {
+        var skill = Parse($"---\nname: s\ndescription: d\n{roles}\n---\nBody");
+
+        Assert.Equal([AgentRole.StaticReviewer], skill.Roles);
+        Assert.Empty(skill.Problems);
+    }
+
+    [Theory]
+    [InlineData("always: true", true)]
+    [InlineData("always: True", true)]
+    [InlineData("always: yes", true)]
+    [InlineData("always: \"true\"", true)]
+    [InlineData("always: false", false)]
+    [InlineData("always: no", false)]
+    [InlineData("other: true", false)]
+    public void A_skill_is_always_on_only_when_its_frontmatter_says_so(string line, bool expected)
+    {
+        var skill = Parse($"---\nname: s\ndescription: d\n{line}\n---\nBody");
+
+        Assert.Equal(expected, skill.Always);
+        Assert.Empty(skill.Problems);
+    }
+
+    [Fact]
+    public void An_always_value_that_is_not_a_flag_is_reported_and_the_skill_stays_opt_in()
+    {
+        var skill = Parse("---\nname: s\ndescription: d\nalways: sometimes\n---\nBody");
+
+        Assert.False(skill.Always);
+        Assert.Contains(skill.Problems, p => p.Contains("always: sometimes"));
+    }
+
+    [Fact]
+    public void A_composed_always_on_skill_reads_back_as_one()
+    {
+        var text = SkillLibrary.Compose("invariants", "Rules the repository keeps to.", "Never change a partition key.",
+            [AgentRole.CodeGenerator, AgentRole.StaticReviewer], always: true);
+
+        var skill = Parse(text);
+
+        Assert.True(skill.Always);
+        Assert.Equal([AgentRole.CodeGenerator, AgentRole.StaticReviewer], skill.Roles);
+        Assert.Empty(skill.Problems);
+        Assert.DoesNotContain("always", SkillLibrary.Compose("s", "d", "b"));
     }
 
     [Fact]
