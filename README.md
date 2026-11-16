@@ -14,7 +14,7 @@ Hatchet is for people who want to put a local model (it's built around Qwen 3.8,
 - **You see what it used.** Tokens are counted apart for the local model and Claude, for the run and for each subtask, with Claude Code's own cost figure. An optional token ceiling pauses a subtask that keeps spending.
 - **Stuck work comes back to you.** When a subtask runs out of attempts, or the model server goes away, the run pauses and asks. You can give guidance, fix it by hand and re-verify, skip it, or cancel.
 - **Claude as a backup, or as the whole crew.** Any agent can run on Claude through the Claude Code CLI, which uses your Claude login, not an API key. By default, fixes the local model can't land escalate to Claude.
-- **Built for small-model failure modes.** It catches runaway repetition, trims prompts that don't fit the context window, feeds agents real type signatures from your repo and its NuGet packages, and keeps fixes from routing around the spec. See [how it works](docs/how-it-works.md).
+- **Built for small-model failure modes.** It catches runaway repetition, trims prompts that don't fit the context window, feeds agents real type signatures from your repo, its NuGet packages and the .NET shared framework, and the parameters of your Razor components, and keeps fixes from routing around the spec. See [how it works](docs/how-it-works.md).
 - **Drivable from Claude Code.** Hatchet is also an MCP server, so you can plan a change with Claude and have your local model build it. See [docs/mcp.md](docs/mcp.md).
 
 ## Quick start

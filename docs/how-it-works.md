@@ -63,7 +63,10 @@ Before each call, Hatchet finds the types the subtask, its files and its errors 
 - **The repository's own types.** It adds the source files that declare them.
 - **Types from packages.** For .NET projects that have been restored, it adds the public signatures of the package types they name, such as a UI library's components with their namespace and parameters. They're read from the compile assemblies listed in each project's `obj/project.assets.json`. Only names that read as code are looked up, such as `FluentSelect` or `IToastService`, so capitalised words in prose don't pull in types.
 
-Two kinds of type are not looked up yet. Types from the .NET shared framework, such as `UserManager` or `NavigationManager`, aren't in a NuGet package, so their signatures aren't added. Razor components in the repository (`.razor` files) aren't indexed as types, so naming one doesn't add its parameters.
+- **Types from the shared framework.** ASP.NET Core and the Windows desktop framework come with the SDK and not in a package, so types such as `UserManager` or `NavigationManager` are read from the framework a project references in its `obj/project.assets.json`: the reference assemblies of the .NET version it targets where the machine has them, and the nearest version otherwise. The version read is named beside each type. A name that a package or the repository also has gives way to that one. The base class library (`List`, `Task`, `HttpClient`) is not looked up: agents know it, and nearly every name in a C# file belongs to it.
+- **Razor components.** A `.razor` file in the repository is a type named after the file. When an agent names one it gets the component's `@typeparam`, `@inherits` and `@page` lines and its `[Parameter]` and `[CascadingParameter]` properties, and not the markup, which is most of the file and no use to code that uses the component. A component the agent is changing is already in its prompt whole. A code-behind file (`.razor.cs`) is found as source like any other class.
+
+Framework types need the repository to have been restored, as package types do. Up to four framework types and six components are added to a prompt, after the repository's own definitions and the package types, and only while they fit the context budget.
 
 ## Runaway answers
 

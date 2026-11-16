@@ -635,6 +635,37 @@ public class OrchestratorTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task An_agent_that_names_a_razor_component_gets_its_parameters_and_not_its_markup()
+    {
+        _repo.Write(".gitignore", "local/\n");
+        _repo.Write("src/Web/DeviceCard.razor", "<div class=\"MARKUP-OF-THE-CARD\">@Title</div>\n@code {\n    [Parameter] public string Title { get; set; } = \"\";\n}\n");
+        _repo.Write("src/Web/Devices.razor", "@page \"/devices\"\n<p>list</p>\n");
+        await _git.StageAllAsync();
+        await _git.CommitStagedAsync("Add components");
+        // A component Git ignores is not described, as none of its text may reach a prompt.
+        _repo.Write("local/SecretPanel.razor", "@code {\n    [Parameter] public string HIDDEN-PARAMETER { get; set; }\n}\n");
+
+        _llm.Enqueue(AgentRole.ContextSpecifier, Refined());
+        _llm.Enqueue(AgentRole.CodeGenerator, Patch("src/Web/Devices.razor", "@page \"/devices\"\n<DeviceCard Title=\"x\" />\n"));
+        _llm.Enqueue(AgentRole.StaticReviewer, Verdict(true));
+        var started = await _orchestrator.StartRunAsync(new NewRunRequest(_repo.Path, "# Spec", null, "verify", false),
+            [new SubtaskEdit(null, "cards", "Show each device in a DeviceCard beside a SecretPanel on the Devices page.", ["src/Web/Devices.razor"], [], [], "")]);
+        var run = await WaitForAsync(started.Id, RunStatus.ReadyToMerge);
+
+        foreach (var role in new[] { AgentRole.ContextSpecifier, AgentRole.CodeGenerator })
+        {
+            var prompt = _llm.Calls.First(c => c.Role == role).Prompt;
+            Assert.Contains("component src/Web/DeviceCard.razor", prompt);
+            Assert.Contains("[Parameter] public string Title { get; set; }", prompt);
+            Assert.DoesNotContain("MARKUP-OF-THE-CARD", prompt);
+            Assert.DoesNotContain("HIDDEN-PARAMETER", prompt);
+            // The page being changed is in the prompt whole, so it isn't described as well.
+            Assert.DoesNotContain("component src/Web/Devices.razor", prompt);
+        }
+        Assert.Contains(await _store.GetLogsAsync(run.Id), l => l.Message.EndsWith("the parameters of Razor components it names: src/Web/DeviceCard.razor."));
+    }
+
+    [Fact]
     public async Task Failed_verification_goes_to_the_fixer_without_invoking_the_reviewer()
     {
         _llm.Enqueue(AgentRole.TaskPlanner, Plan("alpha"));
