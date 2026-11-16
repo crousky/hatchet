@@ -180,8 +180,24 @@ else
                     <div class="tab-content @(_tab == EditorTab.Diff ? "" : "scroll")">
                         @switch (_tab)
                         {
+                            case EditorTab.Plan when Amendable && (_amending || _proposal is not null):
+                                <PlanEditor Subtasks="AmendSteps"
+                                            Editable="true"
+                                            Amending="true"
+                                            FromAgent="@(_proposal is not null)"
+                                            Replaces="@(NotStarted.Count == 1 ? "1 step" : $"{NotStarted.Count} steps")"
+                                            NumberOffset="@(_subtasks.Count - NotStarted.Count)"
+                                            Version="@(_run.ProposedAmendmentJson ?? "amend")"
+                                            Busy="_busy"
+                                            DefaultCommand="@_run.Task.VerificationCommand"
+                                            StrongModels="@_strongModels"
+                                            OnApprove="AmendPlanAsync"
+                                            OnCancel="CancelAmendAsync" />
+                                break;
                             case EditorTab.Plan:
                                 <PlanEditor Subtasks="_subtasks"
+                                            Amendable="@Amendable"
+                                            OnStartAmend="@(() => _amending = true)"
                                             Editable="@(_run.Status == RunStatus.AwaitingPlanApproval && _spot is null)"
                                             Planning="@(_run.Status is RunStatus.Queued or RunStatus.Ingesting or RunStatus.Decomposing)"
                                             Queued="@(_spot is not null)"
@@ -341,6 +357,9 @@ else
             ? "Chosen when the work was started. Every agent in this run uses it, whatever Settings say."
             : $"Run profile, chosen when the work was started and kept until the run finishes. {ModelChoices.Explain(await SettingsStore.GetAsync(), _run.Task.ModelChoice)}";
         _strongModels = ModelChoices.DescribeTier(await SettingsStore.GetAsync());
+        _proposal = FactoryOrchestrator.ProposedAmendment(_run);
+        if (_proposal is not null && Amendable) _tab = EditorTab.Plan;
+        if (!Amendable) _amending = false;
         _usageRows = await Store.GetUsageAsync(RunId);
         _usage = RunUsageBuilder.ForRun(_usageRows);
         _gates = VerificationGates.Parse(_run.Task.GatesJson);
@@ -504,6 +523,39 @@ else
         : ActAsync(() => Orchestrator.HandOverCallAsync(RunId, target));
 
     private Task ApprovePlanAsync(IReadOnlyList<SubtaskEdit> plan) => ActAsync(() => Orchestrator.ApprovePlanAsync(RunId, plan));
+
+    private bool _amending;
+    private IReadOnlyList<SubtaskEdit>? _proposal;
+
+    /// <summary>The run is paused where its steps that haven't started can still be changed.</summary>
+    private bool Amendable => _run is not null && FactoryOrchestrator.WhyNotAmendable(_run) is null;
+
+    private List<FactorySubtask> NotStarted => _subtasks.Where(s => FactoryOrchestrator.NotStarted(s) && s.Id != _run!.CurrentSubtaskId).OrderBy(s => s.Order).ToList();
+
+    /// <summary>
+    /// What the amend editor starts from: the steps not started, or the driving agent's proposal. A proposed command is
+    /// loaded unapproved, so it runs only if the user ticks it.
+    /// </summary>
+    private IReadOnlyList<FactorySubtask> AmendSteps => _proposal is null
+        ? NotStarted
+        : _proposal.Select((step, i) => new FactorySubtask
+        {
+            Id = -(i + 1), Title = step.Title, Description = step.Description, TargetFilesToModify = step.TargetFilesToModify,
+            TargetFilesToCreate = step.TargetFilesToCreate, ContextFilesToRead = step.ContextFilesToRead, Skills = step.Skills ?? [],
+            VerificationCommand = step.VerificationCommand, CommandApproved = false, Tier = SubtaskTiers.Parse(step.Tier) ?? SubtaskTiers.Local
+        }).ToList();
+
+    private async Task AmendPlanAsync(IReadOnlyList<SubtaskEdit> steps)
+    {
+        await ActAsync(() => Orchestrator.AmendPlanAsync(RunId, steps));
+        _amending = false;
+    }
+
+    private async Task CancelAmendAsync()
+    {
+        _amending = false;
+        if (_proposal is not null) await ActAsync(() => Orchestrator.DiscardAmendmentAsync(RunId));
+    }
 
     private Task RegeneratePlanAsync(string? feedback) => ActAsync(() => Orchestrator.RegeneratePlanAsync(RunId, feedback));
 

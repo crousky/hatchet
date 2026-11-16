@@ -375,6 +375,95 @@ public sealed partial class FactoryOrchestrator(
         await ApprovePlanAsync(runId, plan, ct);
     }
 
+    /// <summary>True for a subtask no agent has touched: still waiting its turn, and not one Hatchet added to fix the final check.</summary>
+    public static bool NotStarted(FactorySubtask subtask) => subtask is { Status: SubtaskStatus.Pending, IsIntegrationFix: false };
+
+    /// <summary>
+    /// Whether the run's steps that haven't started can be changed now, with the reason when they can't. They can while
+    /// the run is paused part-way through its subtasks: before that the whole plan is still open, and after it nothing is left to change.
+    /// </summary>
+    public static string? WhyNotAmendable(FactoryRun run) => run switch
+    {
+        { Status: RunStatus.AwaitingPlanApproval } => "The whole plan is still waiting for approval, so change it there.",
+        { Status: not RunStatus.NeedsHuman } => RunStateMachine.IsTerminal(run.Status)
+            ? "The run has finished, so its steps can't be changed."
+            : "The steps that haven't started can be changed while the run is paused. Pause it first.",
+        { PausedStage: null or PipelineStage.Ingest or PipelineStage.Decompose } => "The run has no plan yet, so there are no steps to change.",
+        { PausedStage: PipelineStage.Integrate } => "Every step is done and the run is at its final check, so there are no steps left to change.",
+        _ => null
+    };
+
+    /// <summary>
+    /// Replaces the steps of a paused run that haven't started with <paramref name="steps"/>, in that order: steps can be
+    /// edited, added, removed and reordered. Steps that are done, skipped or under way stay as they are. This is the user's
+    /// act, so the commands in the steps are approved by it, and it settles any proposal that was waiting.
+    /// </summary>
+    public async Task AmendPlanAsync(int runId, IReadOnlyList<SubtaskEdit> steps, CancellationToken ct = default)
+    {
+        var run = await store.GetRunAsync(runId, ct);
+        var pending = await RequireAmendableAsync(run, steps, ct);
+        var kept = (await store.GetSubtasksAsync(runId, ct)).Where(s => !pending.Contains(s.Id)).ToList();
+        var first = kept.Count == 0 ? 1 : kept.Max(s => s.Order) + 1;
+
+        var added = ToSubtasks(runId, steps);
+        for (var i = 0; i < added.Count; i++) added[i].Order = first + i;
+        await store.SwapSubtasksAsync(runId, pending, added, ct);
+
+        var proposed = run.ProposedAmendmentJson is not null;
+        run.ProposedAmendmentJson = null;
+        await store.UpdateRunAsync(run, ct);
+        bus.Publish(new PlanChanged(runId));
+        await LogAsync(runId, null, AgentLogKind.Info, null,
+            $"{(proposed ? "The user approved a change to" : "The user changed")} the steps not started yet: {pending.Count} {Plural(pending.Count, "step")} replaced by {added.Count}"
+            + (added.Count > 0 ? $", now steps {first} to {first + added.Count - 1}." : "."), ct);
+    }
+
+    /// <summary>
+    /// Puts a change to the steps not started yet before the user, for an MCP client. Nothing changes until the user
+    /// approves it in Hatchet, where they see every step and command, and the run can't carry on until they decide.
+    /// </summary>
+    public async Task<IReadOnlyList<PlanWarning>> ProposeAmendmentAsync(int runId, IReadOnlyList<SubtaskEdit> steps, CancellationToken ct = default)
+    {
+        var run = await store.GetRunAsync(runId, ct);
+        var pending = await RequireAmendableAsync(run, steps, ct);
+        if (pending.Count == 0 && steps.Count == 0)
+            throw new FactoryValidationException("The run has no steps waiting to start, and the amendment adds none, so there is nothing to change.");
+
+        var path = run.Task.RepositoryPath;
+        var warnings = await PlanValidator.ValidateAsync(path, steps, Skills.Load(path), ct);
+        run.ProposedAmendmentJson = JsonSerializer.Serialize(steps);
+        await store.UpdateRunAsync(run, ct);
+        bus.Publish(new PlanChanged(runId));
+        await LogAsync(runId, null, AgentLogKind.Warning, null,
+            $"The driving agent proposed replacing the {pending.Count} {Plural(pending.Count, "step")} not started yet with {steps.Count}. Nothing changes until you approve it on the Plan tab.", ct);
+        return warnings;
+    }
+
+    /// <summary>Drops a proposal an MCP client made, leaving the steps as they were.</summary>
+    public async Task DiscardAmendmentAsync(int runId, CancellationToken ct = default)
+    {
+        var run = await store.GetRunAsync(runId, ct);
+        if (run.ProposedAmendmentJson is null) return;
+        run.ProposedAmendmentJson = null;
+        await store.UpdateRunAsync(run, ct);
+        bus.Publish(new PlanChanged(runId));
+        await LogAsync(runId, null, AgentLogKind.Info, null, "The user discarded the change the driving agent proposed. The steps stay as they were.", ct);
+    }
+
+    /// <summary>The proposal waiting on a run, or null.</summary>
+    public static IReadOnlyList<SubtaskEdit>? ProposedAmendment(FactoryRun run) =>
+        run.ProposedAmendmentJson is null ? null : JsonSerializer.Deserialize<List<SubtaskEdit>>(run.ProposedAmendmentJson);
+
+    /// <summary>Checks the run can be amended and the steps are well formed, and returns the ids of the steps that haven't started.</summary>
+    private async Task<IReadOnlyList<int>> RequireAmendableAsync(FactoryRun run, IReadOnlyList<SubtaskEdit> steps, CancellationToken ct)
+    {
+        if (WhyNotAmendable(run) is { } reason) throw new FactoryValidationException(reason);
+        if (steps.Any(s => string.IsNullOrWhiteSpace(s.Title) || string.IsNullOrWhiteSpace(s.Description)))
+            throw new FactoryValidationException("Every step needs a title and a description.");
+        foreach (var step in steps) RequireTier(step);
+        return (await store.GetSubtasksAsync(run.Id, ct)).Where(s => NotStarted(s) && s.Id != run.CurrentSubtaskId).Select(s => s.Id).ToList();
+    }
+
     public async Task RegeneratePlanAsync(int runId, string? feedback, CancellationToken ct = default)
     {
         var run = await store.GetRunAsync(runId, ct);
@@ -400,6 +489,10 @@ public sealed partial class FactoryOrchestrator(
     {
         var run = await store.GetRunAsync(runId, ct);
         RequireStatus(run, RunStatus.NeedsHuman);
+        if (run.ProposedAmendmentJson is not null)
+            throw new FactoryValidationException(fromDrivingAgent
+                ? "A change to this run's steps is waiting for the user's approval in Hatchet, and the run can't carry on until they approve or discard it. Tell the user it is waiting for them."
+                : "The driving agent proposed a change to the steps not started yet. Approve or discard it on the Plan tab, then carry on.");
         await RequireModelChoiceAsync(run, ct);
         if (fromDrivingAgent && decision == HumanDecision.RetryFixer) await CountAgentFixerResetAsync(run, ct);
         if (fromDrivingAgent && decision != HumanDecision.SkipSubtask && run.PauseReason?.Contains(TokenCeilingMarker, StringComparison.Ordinal) == true)

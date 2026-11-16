@@ -511,6 +511,7 @@ button.terminal-head:hover { background: var(--bg-3); }
 .file-modify { color: var(--active); background: var(--active-soft); }
 .file-create { color: var(--good); background: var(--good-soft); }
 .file-skill { color: var(--accent-strong); background: var(--accent-soft); }
+.plan-amend-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding: 8px 12px; background: var(--bg-2); border: 1px solid var(--line); border-radius: 8px; }
 .plan-footer { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .plan-regenerate { display: flex; gap: 6px; flex: 1; min-width: 280px; }
 

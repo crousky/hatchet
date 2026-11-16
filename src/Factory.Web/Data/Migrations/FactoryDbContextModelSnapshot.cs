@@ -255,6 +255,9 @@ namespace Factory.Web.Data.Migrations
                     b.Property<int>("PromptTokens")
                         .HasColumnType("INTEGER");
 
+                    b.Property<string>("ProposedAmendmentJson")
+                        .HasColumnType("TEXT");
+
                     b.Property<string>("QueuedRequest")
                         .HasColumnType("TEXT");
 
