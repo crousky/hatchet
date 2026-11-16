@@ -435,6 +435,82 @@ public class OrchestratorTests : IAsyncLifetime
         Assert.True(File.Exists(_repo.File("alpha.txt")));
     }
 
+    private FactoryOrchestrator WithTools(Func<string, bool> installed) =>
+        new(_store, _settings, _llm, _commands, new FactoryEventBus(), NullLogger<FactoryOrchestrator>.Instance, toolInstalled: installed);
+
+    private static readonly VerificationGate[] InfraGate = [new("infra/**", "bicep-lint infra")];
+
+    [Fact]
+    public async Task A_gate_runs_after_the_main_check_for_a_subtask_that_touches_its_paths_and_is_skipped_for_one_that_does_not()
+    {
+        _llm.Enqueue(AgentRole.ContextSpecifier, Refined());
+        _llm.Enqueue(AgentRole.CodeGenerator, Patch("infra/main.bicep"));
+        _llm.Enqueue(AgentRole.StaticReviewer, Verdict(true));
+        _llm.Enqueue(AgentRole.ContextSpecifier, Refined());
+        _llm.Enqueue(AgentRole.CodeGenerator, Patch("src/app.txt"));
+        _llm.Enqueue(AgentRole.StaticReviewer, Verdict(true));
+
+        var started = await WithTools(_ => true).StartRunAsync(new NewRunRequest(_repo.Path, "# Spec", null, "verify", false, Gates: InfraGate),
+        [
+            new SubtaskEdit(null, "infra", "Build infra", [], ["infra/main.bicep"], [], ""),
+            new SubtaskEdit(null, "app", "Build app", [], ["src/app.txt"], [], "")
+        ]);
+        var run = await WaitForAsync(started.Id, RunStatus.ReadyToMerge);
+
+        // The main check and the gate for the first subtask, the main check alone for the second, and the final check.
+        Assert.Equal(["verify", "bicep-lint infra", "verify", "verify"], _commands.Commands);
+        var logs = await _store.GetLogsAsync(run.Id);
+        Assert.Single(logs, l => l.Message.StartsWith("The subtask changed files matching \"infra/**\", so the extra check `bicep-lint infra` runs too."));
+        // The reviewer hears about both checks.
+        var review = _llm.Calls.First(c => c.Role == AgentRole.StaticReviewer).Prompt;
+        Assert.Contains("Command: verify && bicep-lint infra", review);
+    }
+
+    [Fact]
+    public async Task A_failing_gate_goes_to_the_fixer_like_any_other_failure()
+    {
+        _llm.Enqueue(AgentRole.ContextSpecifier, Refined());
+        _llm.Enqueue(AgentRole.CodeGenerator, Patch("infra/main.bicep", "broken"));
+        _llm.Enqueue(AgentRole.BugFixer, Patch("infra/main.bicep", "fixed"));
+        _llm.Enqueue(AgentRole.StaticReviewer, Verdict(true));
+        _commands.Results.Enqueue((0, "ok"));
+        _commands.Results.Enqueue((1, "main.bicep(3,1) : Error BCP018: Expected the \"}\" character"));
+
+        var started = await WithTools(_ => true).StartRunAsync(new NewRunRequest(_repo.Path, "# Spec", null, "verify", false, Gates: InfraGate),
+            [new SubtaskEdit(null, "infra", "Build infra", [], ["infra/main.bicep"], [], "")]);
+        var run = await WaitForAsync(started.Id, RunStatus.ReadyToMerge);
+
+        var subtask = (await _store.GetSubtasksAsync(run.Id)).Single();
+        Assert.Equal(1, subtask.FixAttempts);
+        Assert.Equal("fixed", File.ReadAllText(_repo.File("infra/main.bicep")));
+        Assert.Contains("BCP018", _llm.Calls.Single(c => c.Role == AgentRole.BugFixer).Prompt);
+        Assert.Single(_llm.Calls, c => c.Role == AgentRole.StaticReviewer);
+        // After the fix, both checks run again.
+        Assert.Equal(["verify", "bicep-lint infra", "verify", "bicep-lint infra", "verify"], _commands.Commands);
+    }
+
+    [Fact]
+    public async Task A_gate_whose_tool_is_missing_stops_the_run_before_it_starts_and_names_the_tool()
+    {
+        var orchestrator = WithTools(tool => tool != "bicep-lint");
+
+        var refused = await Assert.ThrowsAsync<FactoryValidationException>(() =>
+            orchestrator.StartRunAsync(new NewRunRequest(_repo.Path, "# Spec", null, "verify", false, Gates: InfraGate)));
+
+        Assert.Contains("\"bicep-lint\" isn't installed", refused.Message);
+        Assert.Contains("infra/**", refused.Message);
+        Assert.Empty(await _store.ListRunsAsync());
+        Assert.Empty(_commands.Commands);
+
+        // A gate with half of it missing is refused too, and one that is wholly empty is dropped.
+        await Assert.ThrowsAsync<FactoryValidationException>(() =>
+            orchestrator.StartRunAsync(new NewRunRequest(_repo.Path, "# Spec", null, "verify", false, Gates: [new("infra/**", " ")])));
+        _llm.Enqueue(AgentRole.TaskPlanner, Plan("alpha"));
+        var run = await orchestrator.StartRunAsync(new NewRunRequest(_repo.Path, "# Spec", null, "verify", true, Gates: [new("", "")]));
+        Assert.Null(run.Task.GatesJson);
+        await WaitForAsync(run.Id, RunStatus.AwaitingPlanApproval);
+    }
+
     [Fact]
     public async Task Failed_verification_goes_to_the_fixer_without_invoking_the_reviewer()
     {

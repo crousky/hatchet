@@ -17,7 +17,7 @@ Then plan a change with Claude in conversation and ask it to hand the plan to Ha
 | Tool | Does |
 |---|---|
 | `probe_repository` | Checks a folder is a clean Git repository and how it would be verified |
-| `start_run` | Starts a run from a spec, with a ready-made plan or with Hatchet's planner, and a `model` if you want one. See [Choosing the model](#choosing-the-model). A plan is checked against the repository first: see [Plan warnings](#plan-warnings) |
+| `start_run` | Starts a run from a spec, with a ready-made plan or with Hatchet's planner, and a `model` if you want one. See [Choosing the model](#choosing-the-model). A plan is checked against the repository first: see [Plan warnings](#plan-warnings). `gates` adds checks for particular files: see [Extra checks](#extra-checks) |
 | `list_runs`, `get_run` | Status, project, place in line, progress, subtasks, recent events and working time left. When a run needs a person, `get_run` also returns `needsFromYou`: what happened, what is blocking it, what guidance to give and what each `resume_run` action needs from you |
 | `get_subtask` | One subtask in full: last failure, fix history, review verdict, diff |
 | `approve_plan` | Approves the plan of a run you started with `reviewPlanInHatchet: true`, without the commands Hatchet's planner proposed. It refuses every other plan: one you didn't ask to review, one for a defect or change report, and one longer than Hatchet builds unattended (40 subtasks by default). Those are approved by you, in Hatchet |
@@ -61,6 +61,23 @@ When `start_run` is given a plan, Hatchet checks it against the repository befor
 These are warnings, not errors, and the run starts all the same. A plan with nothing to report returns an empty list. If a warning is a mistake in the plan, cancel the run and start it again with the plan corrected, or pass `reviewPlanInHatchet: true` so the plan can be fixed in Hatchet before it builds. The same warnings are written to the run's log, so whoever approves the plan sees them.
 
 The check reads the working tree as it is when the run is started. If another run is open in the repository, that is the other run's branch, and files it has added or removed can show up as warnings.
+
+## Extra checks
+
+`start_run` takes `gates`, a list of extra checks for files the run's main check doesn't cover. Each has `paths`, a pattern for the changed files it is for, and `command`:
+
+```json
+"gates": [
+  { "paths": "infra/**", "command": "az bicep build --file infra/main.bicep" },
+  { "paths": "*.sh", "command": "shellcheck scripts/*.sh" }
+]
+```
+
+A gate runs after the main check, and only for a step that changed a file matching its `paths`. A failure goes to the Bug Fixer like any other failed check. Gates passed to `start_run` run without further approval, as the commands in a plan you pass do, and they are kept for the whole run: nothing changes them once it has started. `get_run` lists them under `gates`.
+
+If the program a gate's command starts with isn't installed on the user's machine, `start_run` is refused and the message names it. Tell the user what is missing. Starting the run without the gate gets past the refusal, but it also leaves those files unchecked, so that is for the user to decide.
+
+See [What gets verified and reviewed](how-it-works.md#what-gets-verified-and-reviewed) for how patterns match.
 
 ## Choosing the model
 

@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using Factory.Contracts;
 using Factory.Engine.Orchestration;
+using Factory.Engine.Verification;
 using Factory.Engine.Workspace;
 using Factory.Web.Services;
 using ModelContextProtocol;
@@ -33,12 +34,23 @@ public sealed class PlanStep
     public List<string>? Skills { get; set; }
 }
 
+/// <summary>An extra check for a run, as an MCP client writes it.</summary>
+public sealed class GateSpec
+{
+    [Description("Which changed files the check is for, as a repository-relative pattern: infra/** for a folder and everything in it, *.sh for an extension at any depth, .github/workflows/*.yml for files in one folder.")]
+    public string Paths { get; set; } = "";
+
+    [Description("The command to run from the repository root, such as az bicep build --file infra/main.bicep. It must exit 0. The program it starts with has to be installed on the user's machine, or start_run is refused.")]
+    public string Command { get; set; } = "";
+}
+
 /// <param name="Model">The model choice the run was started with, such as profile:strong, or null when it runs as Settings has it.</param>
 public sealed record RunSummary(int RunId, string Title, string Status, string Project, string Repository, int SubtasksDone, int Subtasks, string? CurrentStep, string? Queue, string? PauseReason, string Url, string? Model = null);
 
 public sealed record SubtaskSummary(int Order, string Title, string Status, int FixAttempts);
 
-public sealed record RunDetails(RunSummary Run, string? Branch, string? BaseBranch, bool? FinalCheckPassed, int Tokens, string? WorkLeft, IReadOnlyList<SubtaskSummary> Subtasks, IReadOnlyList<string> RecentEvents, PauseBrief? NeedsFromYou = null, string Note = McpNotes.Data, IReadOnlyList<PlanWarning>? PlanWarnings = null);
+public sealed record RunDetails(RunSummary Run, string? Branch, string? BaseBranch, bool? FinalCheckPassed, int Tokens, string? WorkLeft, IReadOnlyList<SubtaskSummary> Subtasks, IReadOnlyList<string> RecentEvents, PauseBrief? NeedsFromYou = null, string Note = McpNotes.Data, IReadOnlyList<PlanWarning>? PlanWarnings = null,
+    IReadOnlyList<VerificationGate>? Gates = null);
 
 public sealed record SubtaskDetails(
     int Order, string Title, string Status, string Description, int FixAttempts,
@@ -79,6 +91,7 @@ public sealed class HatchetTools(FactoryOrchestrator orchestrator, IRunStore sto
         Pass the plan you worked out with the user to skip Hatchet's own planner. Without a plan, Hatchet plans from the spec itself, which is slower.
         The working tree must be clean. The run continues in the background: follow it with get_run.
         If the user's limit of runs at once is reached, or another open run has the repository, the run waits in line and starts by itself; queue says why.
+        gates adds checks for files the main check doesn't cover, such as infrastructure templates, scripts or workflow files. Each runs after the main check, only for a step that changed a file matching its paths, and a failure goes to the Bug Fixer like any other. If a gate's program isn't installed, the run is refused with the program named: tell the user, and don't drop the gate to get past it.
         A plan you pass is checked against the repository, and planWarnings lists what doesn't match: unknown_skill, file_to_modify_missing, file_to_read_missing, file_to_create_exists, secret_path, ignored_path or invalid_path, each with its step. The run starts anyway, so if a warning is a mistake, cancel_run and start again with the plan corrected, or set reviewPlanInHatchet so the user can fix it first.
         """ + " " + McpNotes.Data)]
     public async Task<RunDetails> StartRun(
@@ -89,13 +102,16 @@ public sealed class HatchetTools(FactoryOrchestrator orchestrator, IRunStore sto
         [Description("Command that verifies the whole repository. Omit to let Hatchet detect it (dotnet, npm, cargo and others).")] string? verificationCommand = null,
         [Description("True to stop after planning so the user can review or edit the plan in Hatchet's UI before building.")] bool reviewPlanInHatchet = false,
         [Description(McpNotes.ModelParameter + " The run keeps its choice when it is paused, resumed or Hatchet restarts. A profile Settings doesn't have is refused.")] string? model = null,
+        [Description("Extra checks, each a path pattern and a command, run in addition to the main check when a step changes matching files. They are kept for the whole run and can't be changed once it has started.")] List<GateSpec>? gates = null,
         CancellationToken ct = default)
     {
         PathGuard.RejectNetworkPath(repositoryPath, nameof(repositoryPath));
         // A client may send null for a list or field it leaves empty.
         var edits = plan?.Select(step => new SubtaskEdit(null, step.Title ?? "", step.Description ?? "",
             step.FilesToModify ?? [], step.FilesToCreate ?? [], step.FilesToRead ?? [], step.VerificationCommand ?? "", step.Skills ?? [])).ToList();
-        var (run, warnings) = await Do(() => orchestrator.StartPlannedRunAsync(new NewRunRequest(repositoryPath, spec, title, verificationCommand, reviewPlanInHatchet, model, PlanReviewByUser: false), edits, ct));
+        var extra = gates?.Select(g => new VerificationGate(g.Paths ?? "", g.Command ?? "")).ToList();
+        var (run, warnings) = await Do(() => orchestrator.StartPlannedRunAsync(
+            new NewRunRequest(repositoryPath, spec, title, verificationCommand, reviewPlanInHatchet, model, PlanReviewByUser: false, Gates: extra), edits, ct));
         return await DescribeRunAsync(run.Id, ct) with { PlanWarnings = edits is null ? null : warnings };
     }
 
@@ -237,7 +253,8 @@ public sealed class HatchetTools(FactoryOrchestrator orchestrator, IRunStore sto
         return new RunDetails(Summarize(run, subtasks), run.BranchName, run.BaseBranch, run.IntegrationPassed,
             run.PromptTokens + run.CompletionTokens, estimate is null ? null : Fmt.WorkLeft(estimate),
             subtasks.OrderBy(s => s.Order).Select(s => new SubtaskSummary(s.Order, s.Title, s.Status.ToString(), s.FixAttempts)).ToList(),
-            events, PauseBriefBuilder.Build(run, subtasks.FirstOrDefault(s => s.Status == SubtaskStatus.NeedsHuman)));
+            events, PauseBriefBuilder.Build(run, subtasks.FirstOrDefault(s => s.Status == SubtaskStatus.NeedsHuman)),
+            Gates: VerificationGates.Parse(run.Task.GatesJson) is { Count: > 0 } gates ? gates : null);
     }
 
     private RunSummary Summarize(FactoryRun run, IReadOnlyList<FactorySubtask> subtasks)

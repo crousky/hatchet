@@ -45,7 +45,16 @@ public sealed record NewRunRequest(
     string? VerificationCommand,
     bool RequirePlanApproval,
     string? ModelChoice = null,
-    bool PlanReviewByUser = true);
+    bool PlanReviewByUser = true,
+    IReadOnlyList<VerificationGate>? Gates = null);
+
+/// <summary>
+/// An extra check for a run: a command that runs after the main check, and only for a subtask that changed a file
+/// matching the pattern. It is for files the main check doesn't cover, such as infrastructure templates or scripts.
+/// </summary>
+/// <param name="Paths">A path pattern, such as <c>infra/**</c>, <c>*.sh</c> or <c>.github/workflows/*.yml</c>.</param>
+/// <param name="Command">The command, run from the repository root. It must exit 0.</param>
+public sealed record VerificationGate(string Paths, string Command);
 
 public sealed record SubtaskEdit(
     int? Id,

@@ -40,6 +40,10 @@ else
                     {
                         <span class="meta-item" title="@_modelDetail"><Icon Name="sparkle" Size="12" /> @chosenModel</span>
                     }
+                    @if (_gates.Count > 0)
+                    {
+                        <span class="meta-item" title="@_gatesDetail"><Icon Name="terminal" Size="12" /> @(_gates.Count == 1 ? "1 extra check" : $"{_gates.Count} extra checks")</span>
+                    }
                     @if (_run.BranchName is not null)
                     {
                         <span class="meta-item mono-small"><Icon Name="git-branch" Size="12" /> @_run.BaseBranch ← @_run.BranchName</span>
@@ -313,6 +317,8 @@ else
     }
 
     private string _modelDetail = "";
+    private IReadOnlyList<VerificationGate> _gates = [];
+    private string _gatesDetail = "";
 
     private async Task ReloadAsync()
     {
@@ -330,6 +336,8 @@ else
         _modelDetail = ModelChoices.ProfileNameOf(_run.Task.ModelChoice) is null
             ? "Chosen when the work was started. Every agent in this run uses it, whatever Settings say."
             : $"Run profile, chosen when the work was started and kept until the run finishes. {ModelChoices.Explain(await SettingsStore.GetAsync(), _run.Task.ModelChoice)}";
+        _gates = VerificationGates.Parse(_run.Task.GatesJson);
+        _gatesDetail = "Run after the main check, for a subtask that changed matching files:\n" + string.Join("\n", _gates.Select(g => $"{g.Paths}  →  {g.Command}"));
         _subtasks = await Store.GetSubtasksAsync(RunId);
         _diffs = await Store.GetDiffsAsync(RunId);
         _logs.AddRange(await Store.GetLogsAsync(RunId, _logs.LastOrDefault()?.Id ?? 0));

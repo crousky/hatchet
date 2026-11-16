@@ -382,6 +382,9 @@ namespace Factory.Web.Data.Migrations
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("TEXT");
 
+                    b.Property<string>("GatesJson")
+                        .HasColumnType("TEXT");
+
                     b.Property<string>("ModelChoice")
                         .HasColumnType("TEXT");
 

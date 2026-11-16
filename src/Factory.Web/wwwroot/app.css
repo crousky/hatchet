@@ -642,6 +642,9 @@ button.agent-card-head:hover { background: var(--bg-3); }
 .input-row { display: flex; gap: 6px; }
 .input-row .input-with-icon { flex: 1; min-width: 0; }
 .field .segmented { align-self: flex-start; }
+.gate-row { display: flex; gap: 6px; align-items: center; }
+.gate-row input { flex: 1; min-width: 0; }
+.gate-row input:first-child { flex: 0 0 32%; }
 .detected { display: flex; flex-direction: column; gap: 6px; padding: 9px 11px; font-size: 12px; background: var(--good-soft); border: 1px solid rgba(76, 195, 138, .3); border-radius: 7px; }
 .detected-head { display: flex; align-items: center; gap: 6px; font-weight: 600; color: var(--good); }
 .detected .command-line { align-self: flex-start; }
