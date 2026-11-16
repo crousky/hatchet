@@ -864,6 +864,36 @@ public class OrchestratorTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task The_report_of_a_real_run_has_its_summaries_files_skipped_step_and_reviewer_suggestions()
+    {
+        _llm.Enqueue(AgentRole.TaskPlanner, Plan("alpha", "beta"));
+        _llm.Enqueue(AgentRole.ContextSpecifier, Refined(), Refined());
+        _llm.Enqueue(AgentRole.CodeGenerator, Patch("alpha.txt"), Patch("beta.txt"));
+        _llm.Enqueue(AgentRole.BugFixer, Patch("alpha.txt", "1"), Patch("alpha.txt", "2"), Patch("alpha.txt", "3"));
+        _llm.Enqueue(AgentRole.StaticReviewer, JsonSerializer.Serialize(new ReviewVerdictResponse(true, 90, [], ["Add a test for the empty case"]), LlmSchemas.SerializerOptions));
+        for (var i = 0; i < 4; i++) _commands.Results.Enqueue((1, $"still broken {i}"));
+        var run = await WaitForAsync((await StartAsync()).Id, RunStatus.NeedsHuman);
+
+        var paused = RunReportBuilder.Build(run, await _store.GetSubtasksAsync(run.Id), await _store.GetDiffsAsync(run.Id));
+        Assert.Equal([1, 2], paused.Unfinished.Select(u => u.Order));
+        Assert.Empty(paused.FilesChanged);
+
+        await _orchestrator.ResumeAsync(run.Id, HumanDecision.SkipSubtask, null);
+        run = await WaitForAsync(run.Id, RunStatus.ReadyToMerge);
+        var report = RunReportBuilder.Build(run, await _store.GetSubtasksAsync(run.Id), await _store.GetDiffsAsync(run.Id));
+
+        Assert.Equal([new RunReportSkipped(1, "alpha", "Skipped")], report.Skipped);
+        Assert.Empty(report.Unfinished);
+        Assert.Null(report.Steps[0].Summary);
+        Assert.Equal("Wrote beta.txt", report.Steps[1].Summary);
+        Assert.NotNull(report.Steps[1].Commit);
+        Assert.Equal([new RunReportFile("beta.txt", "added")], report.Steps[1].Files);
+        Assert.Equal([new RunReportFile("beta.txt", "added")], report.FilesChanged);
+        Assert.Equal([new RunReportSuggestion(2, "beta", "Add a test for the empty case")], report.UnactionedSuggestions);
+        Assert.True(report.FinalCheckPassed);
+    }
+
+    [Fact]
     public async Task Retry_fixer_resets_the_budget_and_passes_human_guidance()
     {
         _llm.Enqueue(AgentRole.TaskPlanner, Plan("alpha"));
