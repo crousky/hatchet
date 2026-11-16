@@ -20,6 +20,7 @@ Then plan a change with Claude in conversation and ask it to hand the plan to Ha
 | `start_run` | Starts a run from a spec, with a ready-made plan or with Hatchet's planner, and a `model` if you want one. See [Choosing the model](#choosing-the-model). A plan is checked against the repository first: see [Plan warnings](#plan-warnings). `gates` adds checks for particular files: see [Extra checks](#extra-checks). A step can be marked `strong`: see [Strong steps](#strong-steps) |
 | `list_runs`, `get_run` | Status, project, place in line, progress, subtasks, recent events and working time left. When a run needs a person, `get_run` also returns `needsFromYou`: what happened, what is blocking it, what guidance to give and what each `resume_run` action needs from you |
 | `get_subtask` | One subtask in full: last failure, fix history, review verdict, diff |
+| `get_run_report` | What a run did: each step's summary and commit, the steps skipped or not finished, the files the branch changes, and the reviewer's suggestions nothing acted on. See [The run report](#the-run-report) |
 | `approve_plan` | Approves the plan of a run you started with `reviewPlanInHatchet: true`, without the commands Hatchet's planner proposed. It refuses every other plan: one you didn't ask to review, one for a defect or change report, and one longer than Hatchet builds unattended (40 subtasks by default). Those are approved by you, in Hatchet |
 | `pause_run`, `resume_run` | Pause now or after the current step; resume, retry the fixer with guidance, re-verify, restart or skip. Guidance sent this way reaches the agents labelled as the driving agent's, and not the reviewer. `retry_fixer` works three times per subtask over MCP, and after that it has to be done in Hatchet. `resume` and `reverify` are refused at the two pauses only the user can clear: a changed check command, and a file too long to review in full |
 | `hand_over_call` | Stops the call an agent is making and makes it again on the local model or a Claude model |
@@ -78,6 +79,22 @@ A gate runs after the main check, and only for a step that changed a file matchi
 If the program a gate's command starts with isn't installed on the user's machine, `start_run` is refused and the message names it. Tell the user what is missing. Starting the run without the gate gets past the refusal, but it also leaves those files unchecked, so that is for the user to decide.
 
 See [What gets verified and reviewed](how-it-works.md#what-gets-verified-and-reviewed) for how patterns match.
+
+## The run report
+
+`get_run_report` sums a run up for whoever takes the work on from there, such as the session that planned it writing the pull request or planning the next phase. It returns:
+
+| Field | Holds |
+|---|---|
+| `steps` | Every subtask in order: title, status, commit, fix attempts, tier, the summary its agent gave, and the files its commit changed. `addedByHatchet` marks the subtask Hatchet adds when the final check fails |
+| `skipped` | The subtasks someone chose to skip. Their work is not in the branch |
+| `unfinished` | The subtasks that are neither done nor skipped: still to build, waiting for a person, or cancelled |
+| `filesChanged` | The files the branch changes against the commit the run started from, each `added`, `modified`, `deleted` or `renamed` |
+| `unactionedSuggestions` | What the reviewer suggested on changes it passed, each with its step. A suggestion doesn't block a change, so nothing acted on these |
+
+It also gives the run's status, branch, base branch, whether the final check passed, and the merge commit once there is one. The report is built from what Hatchet stored, so it reads the same after the branch is merged or deleted, and a run still under way reports what it has done so far.
+
+The summaries and suggestions are what the models wrote. Check them against the diff before passing them on as fact.
 
 ## Strong steps
 

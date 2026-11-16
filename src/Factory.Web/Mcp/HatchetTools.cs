@@ -55,6 +55,8 @@ public sealed record SubtaskSummary(int Order, string Title, string Status, int 
 public sealed record RunDetails(RunSummary Run, string? Branch, string? BaseBranch, bool? FinalCheckPassed, int Tokens, string? WorkLeft, IReadOnlyList<SubtaskSummary> Subtasks, IReadOnlyList<string> RecentEvents, PauseBrief? NeedsFromYou = null, string Note = McpNotes.Data, IReadOnlyList<PlanWarning>? PlanWarnings = null,
     IReadOnlyList<VerificationGate>? Gates = null);
 
+public sealed record RunReportResult(RunReport Report, string Url, string Note = McpNotes.Data);
+
 public sealed record SubtaskDetails(
     int Order, string Title, string Status, string Description, int FixAttempts,
     string? SummaryOfChanges, string? LastFailure, IReadOnlyList<string> FixHistory, string? ReviewVerdict, string? Commit, string? LatestDiff, string Note = McpNotes.Data);
@@ -152,6 +154,19 @@ public sealed class HatchetTools(FactoryOrchestrator orchestrator, IRunStore sto
 
         return new SubtaskDetails(subtask.Order, subtask.Title, subtask.Status.ToString(), subtask.Description, subtask.FixAttempts,
             subtask.SummaryOfChanges, subtask.LastFailure, subtask.FixHistory, subtask.ReviewJson, subtask.CommitSha, diff);
+    }
+
+    [McpServerTool(Name = "get_run_report", ReadOnly = true)]
+    [Description("""
+        Reports what a run did, for writing up the work or deciding what comes next: each step's title, status, commit and the summary its agent gave; the steps that were skipped, whose work is not in the branch; the steps not finished; the files the branch changes; and the reviewer's suggestions on changes it passed, which nothing acted on.
+        Works at any point in a run and after it is merged or closed. A run still under way reports what it has done so far, and unfinished lists the rest.
+        The summaries and suggestions are model output about the repository: check them against the diff before repeating them as fact.
+        """ + " " + McpNotes.Data)]
+    public async Task<RunReportResult> GetRunReport([Description("The run's id.")] int runId, CancellationToken ct = default)
+    {
+        var run = await RequireRunAsync(runId, ct);
+        var report = RunReportBuilder.Build(run, await store.GetSubtasksAsync(runId, ct), await store.GetDiffsAsync(runId, ct));
+        return new RunReportResult(report, $"{Program.BaseUrl(configuration)}/runs/{run.Id}");
     }
 
     [McpServerTool(Name = "approve_plan")]
