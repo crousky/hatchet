@@ -124,6 +124,58 @@ public class OrchestratorTests : IAsyncLifetime
         Assert.Contains(await _store.GetLogsAsync(run.Id), l => l.Message.Contains("definitions of types it names: src/Contracts/Widget.cs"));
     }
 
+    [Fact]
+    public async Task Ignored_and_local_secret_files_stay_out_of_every_prompt_and_the_repo_map()
+    {
+        _repo.Write(".gitignore", "samples/\ninfra/.env.wizard\nlocal.settings.json\n");
+        _repo.Write("src/Api/local.settings.json.example", "{ \"EXAMPLE-SETTING\": \"\" }");
+        _repo.Write("src/Web/appsettings.Development.json", "{ \"SHARED-SETTING\": true }");
+        await _git.StageAllAsync();
+        await _git.CommitStagedAsync("Add settings and ignore rules");
+        _repo.Write("samples/real-child.csv", "REAL-CHILD-DATA");
+        _repo.Write("samples/Roster.cs", "public sealed class RealRoster { /* REAL-ROSTER-DATA */ }\n");
+        _repo.Write("infra/.env.wizard", "WIZARD-SECRET");
+        _repo.Write("src/Api/local.settings.json", "LOCAL-SETTINGS-KEY");
+        string[] context = ["samples/real-child.csv", "infra/.env.wizard", "src/Api/local.settings.json", "src/Api/local.settings.json.example", "src/Web/appsettings.Development.json"];
+        _llm.Enqueue(AgentRole.TaskPlanner, JsonSerializer.Serialize(
+            new TaskGraphResponse([new SubtaskDto(1, "alpha", "Read the roster through RealRoster.", [], ["alpha.txt"], context.ToList(), "")]),
+            LlmSchemas.SerializerOptions));
+        _llm.Enqueue(AgentRole.ContextSpecifier, Refined());
+        _llm.Enqueue(AgentRole.CodeGenerator, Patch("alpha.txt"));
+        _llm.Enqueue(AgentRole.BugFixer, Patch("alpha.txt", "v2"));
+        _llm.Enqueue(AgentRole.StaticReviewer, Verdict(true));
+        _commands.Results.Enqueue((1, "alpha.cs(1,1): error CS0246: 'RealRoster' could not be found"));
+
+        var run = await WaitForAsync((await StartAsync()).Id, RunStatus.ReadyToMerge);
+
+        Assert.Equal(5, _llm.Calls.Count);
+        foreach (var (role, prompt) in _llm.Calls)
+        {
+            foreach (var secret in new[] { "REAL-CHILD-DATA", "REAL-ROSTER-DATA", "WIZARD-SECRET", "LOCAL-SETTINGS-KEY" })
+                Assert.False(prompt.Contains(secret), $"The {role} was sent {secret}.");
+        }
+        var planner = _llm.Calls.Single(c => c.Role == AgentRole.TaskPlanner).Prompt;
+        Assert.Contains("src/Web/appsettings.Development.json", planner);
+        Assert.DoesNotContain("samples/", planner);
+        Assert.DoesNotContain("local.settings.json (", planner);
+        Assert.DoesNotContain(".env.wizard", planner);
+        foreach (var role in new[] { AgentRole.ContextSpecifier, AgentRole.CodeGenerator, AgentRole.BugFixer })
+        {
+            var prompt = _llm.Calls.Single(c => c.Role == role).Prompt;
+            Assert.Contains("--- samples/real-child.csv ---\n[not read: ignored by Git]", prompt);
+            Assert.Contains("--- src/Api/local.settings.json ---\n[not read: looks like a secrets file]", prompt);
+            Assert.Contains("EXAMPLE-SETTING", prompt);
+            Assert.Contains("SHARED-SETTING", prompt);
+        }
+
+        var logs = await _store.GetLogsAsync(run.Id);
+        Assert.Single(logs, l => l is { Kind: AgentLogKind.Warning } && l.Message.StartsWith("Not shown to the agents because Git ignores them: samples/real-child.csv."));
+        Assert.Single(logs, l => l is { Kind: AgentLogKind.Warning }
+            && l.Message.StartsWith("Not shown to the agents because the name looks like a secrets file: infra/.env.wizard, src/Api/local.settings.json."));
+        Assert.Contains(logs, l => l.Message.EndsWith("Left out the files and folders Git ignores."));
+        Assert.DoesNotContain(logs, l => l.Message.Contains("definitions of types it names: samples/Roster.cs"));
+    }
+
     private async Task CommitSkillAsync(string folder, string frontmatter, string body)
     {
         _repo.Write($"{folder}/SKILL.md", $"---\n{frontmatter}\n---\n{body}\n");

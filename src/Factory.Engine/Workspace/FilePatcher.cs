@@ -219,14 +219,19 @@ public static class FilePatcher
     }
 
     private static readonly string[] SecretNames =
-        [".env", ".env.local", ".netrc", ".pgpass", "credentials", "credentials.json", "secrets.json", "secrets.yml", "secrets.yaml", "secrets.env"];
+        [".env", ".netrc", ".pgpass", "credentials", "credentials.json", "secrets.json", "secrets.yml", "secrets.yaml", "secrets.env", "local.settings.json"];
 
-    private static readonly string[] SecretExtensions = [".pem", ".pfx", ".p12", ".p8", ".jks", ".keystore", ".tfstate", ".tfstate.backup"];
+    private static readonly string[] SecretExtensions = [".pem", ".pfx", ".p12", ".p8", ".jks", ".keystore", ".tfstate", ".tfstate.backup", ".publishsettings"];
+
+    /// <summary>A .env file with one of these endings is a committed example with the values left blank.</summary>
+    private static readonly string[] ExampleEndings = [".example", ".sample", ".template"];
 
     /// <summary>
     /// True when the file name is one that holds credentials or keys by convention. The list is kept narrow, because a
     /// match hides the file from the model and keeps a new one out of the commit: names that are often ordinary source
-    /// or shared config (secrets.ts, .env.development, prod.tfvars, a .key file) are not on it.
+    /// or shared config (secrets.ts, prod.tfvars, appsettings.Development.json, a .key file) are not on it. Every
+    /// .env.* file is, apart from the examples: one that holds no secrets costs the model little, and one that does
+    /// would be sent to the model and kept in the run's log.
     /// </summary>
     public static bool IsSecretPath(string relativePath)
     {
@@ -235,7 +240,7 @@ public static class FilePatcher
         var name = segments[^1].ToLowerInvariant();
         // .npmrc is not here on purpose: it is a sensitive path (see IsSensitivePath) and is commonly committed.
         return SecretNames.Contains(name)
-            || (name.StartsWith(".env.") && name.EndsWith(".local"))
+            || (name.StartsWith(".env.") && !ExampleEndings.Any(name.EndsWith))
             || (name.StartsWith("service-account") && name.EndsWith(".json"))
             || SecretExtensions.Any(name.EndsWith)
             || name is "id_rsa" or "id_ed25519" or "id_ecdsa" or "id_dsa";
