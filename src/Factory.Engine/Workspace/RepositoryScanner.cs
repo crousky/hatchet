@@ -2,7 +2,8 @@ using System.Text;
 
 namespace Factory.Engine.Workspace;
 
-public sealed record ContextFile(string RelativePath, string? Content, bool Truncated);
+/// <param name="Withheld">The file exists but was not read, and Content says why in place of what it holds.</param>
+public sealed record ContextFile(string RelativePath, string? Content, bool Truncated, bool Withheld = false);
 
 /// <summary>Builds the lightweight repository map and reads files for agent context.</summary>
 public static class RepositoryScanner
@@ -15,27 +16,37 @@ public static class RepositoryScanner
         "__pycache__", ".venv", "venv", "packages", "TestResults", ".next", "coverage"
     };
 
-    public static string BuildRepoMap(string repositoryPath)
+    public const string SecretNotice = "[not read: looks like a secrets file]";
+    public const string IgnoredNotice = "[not read: ignored by Git]";
+
+    /// <param name="ignored">
+    /// Paths to leave out, as <see cref="GitWorkspace.GetIgnoredEntriesAsync"/> gives them: the names of ignored files
+    /// can be private too, such as real customer data kept beside the code.
+    /// </param>
+    public static string BuildRepoMap(string repositoryPath, IReadOnlySet<string>? ignored = null)
     {
         var lines = new List<string>();
-        Walk(new DirectoryInfo(repositoryPath), "", lines);
+        Walk(new DirectoryInfo(repositoryPath), "", lines, ignored);
         if (lines.Count == 0) return "(the repository has no files yet)";
 
         var map = string.Join('\n', lines.Take(MaxMapEntries));
         return lines.Count > MaxMapEntries ? $"{map}\n... and {lines.Count - MaxMapEntries} more files" : map;
     }
 
-    private static void Walk(DirectoryInfo directory, string prefix, List<string> lines)
+    private static void Walk(DirectoryInfo directory, string prefix, List<string> lines, IReadOnlySet<string>? ignored)
     {
         if (lines.Count > MaxMapEntries * 2) return;
 
         foreach (var file in directory.EnumerateFiles().OrderBy(f => f.Name, StringComparer.OrdinalIgnoreCase))
+        {
+            if (ignored?.Contains(prefix + file.Name) == true) continue;
             lines.Add($"{prefix}{file.Name} ({FormatSize(file.Length)})");
+        }
 
         foreach (var child in directory.EnumerateDirectories().OrderBy(d => d.Name, StringComparer.OrdinalIgnoreCase))
         {
-            if (IsIgnoredDirectory(child)) continue;
-            Walk(child, $"{prefix}{child.Name}/", lines);
+            if (IsIgnoredDirectory(child) || ignored?.Contains($"{prefix}{child.Name}/") == true) continue;
+            Walk(child, $"{prefix}{child.Name}/", lines, ignored);
         }
     }
 
@@ -44,9 +55,12 @@ public static class RepositoryScanner
 
     /// <summary>
     /// Reads files up to the per-file and total budgets. Unsafe paths and missing files come back
-    /// with null content, so the agent is told they don't exist instead of the run failing.
+    /// with null content, so the agent is told they don't exist instead of the run failing. A file that looks like
+    /// a secrets file, or is one of <paramref name="ignored"/>, comes back with a note in place of what it holds.
     /// </summary>
-    public static IReadOnlyList<ContextFile> ReadFiles(string repositoryPath, IEnumerable<string> relativePaths, int maxFileChars, int maxTotalChars)
+    /// <param name="ignored">The paths Git ignores, as <see cref="GitWorkspace.GetIgnoredAsync"/> gives them.</param>
+    public static IReadOnlyList<ContextFile> ReadFiles(string repositoryPath, IEnumerable<string> relativePaths, int maxFileChars, int maxTotalChars,
+        IReadOnlySet<string>? ignored = null)
     {
         var files = new List<ContextFile>();
         var remaining = maxTotalChars;
@@ -68,7 +82,13 @@ public static class RepositoryScanner
 
             if (FilePatcher.IsSecretPath(relative))
             {
-                files.Add(new ContextFile(relative, "[not read: looks like a secrets file]", false));
+                files.Add(new ContextFile(relative, SecretNotice, false, Withheld: true));
+                continue;
+            }
+
+            if (ignored?.Contains(relative) == true)
+            {
+                files.Add(new ContextFile(relative, IgnoredNotice, false, Withheld: true));
                 continue;
             }
 

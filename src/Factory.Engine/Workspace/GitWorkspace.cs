@@ -120,6 +120,67 @@ public sealed class GitWorkspace(string repositoryPath)
     /// <summary>The new files the last <see cref="StageAllAsync"/> left unstaged because they look like secrets, so the caller can say so.</summary>
     public IReadOnlyList<string> WithheldSecrets { get; private set; } = [];
 
+    /// <summary>
+    /// Which of the given paths Git ignores, spelled as they were given. A tracked file is never ignored, whatever
+    /// .gitignore says, because the user chose to commit it. A path that can't be checked, such as one inside a
+    /// submodule, counts as ignored: what it holds is then kept from the model, not sent by mistake.
+    /// </summary>
+    public async Task<IReadOnlySet<string>> GetIgnoredAsync(IEnumerable<string> relativePaths, CancellationToken ct = default)
+    {
+        // Paths the resolver refuses are never read, and some of them (a drive letter, a symbolic link) git would stop on.
+        var paths = relativePaths.Distinct(StringComparer.OrdinalIgnoreCase).Where(IsSafePath).ToList();
+        if (paths.Count == 0) return new HashSet<string>();
+        if (await CheckIgnoredAsync(paths, ct) is { } found) return found.ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        // One path git refuses fails the whole call, so each is asked about on its own to find it.
+        var ignored = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var path in paths)
+            if (await CheckIgnoredAsync([path], ct) is not { Count: 0 }) ignored.Add(path);
+        return ignored;
+    }
+
+    private bool IsSafePath(string relativePath)
+    {
+        try
+        {
+            FilePatcher.ResolveSafePath(RepositoryPath, relativePath);
+            return true;
+        }
+        catch (PatchRejectedException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>The ignored paths among those given, or null if git couldn't answer.</summary>
+    private async Task<IReadOnlyList<string>?> CheckIgnoredAsync(IReadOnlyList<string> paths, CancellationToken ct)
+    {
+        // The paths go in on standard input, NUL-separated, so no name needs quoting and any number fit.
+        // check-ignore exits with 0 when a path is ignored, 1 when none is, and 128 when it fails.
+        var input = string.Concat(paths.Select(p => ToGitPath(p) + '\0'));
+        var (exitCode, output, _) = await RunGitAsync(true, ct, ["check-ignore", "-z", "--stdin"], input);
+        if (exitCode == 1) return [];
+        if (exitCode != 0) return null;
+        var reported = output.Split('\0', StringSplitOptions.RemoveEmptyEntries).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        return paths.Where(p => reported.Contains(ToGitPath(p))).ToList();
+    }
+
+    private static string ToGitPath(string relativePath)
+    {
+        var path = relativePath.Trim().Replace('\\', '/');
+        while (path.StartsWith("./", StringComparison.Ordinal)) path = path[2..];
+        return path;
+    }
+
+    /// <summary>
+    /// Every untracked file and folder Git ignores, as paths with forward slashes. A folder ends in a slash and stands
+    /// for all it holds.
+    /// </summary>
+    public async Task<IReadOnlySet<string>> GetIgnoredEntriesAsync(CancellationToken ct = default) =>
+        (await ReadAsync(ct, "ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z"))
+            .Split('\0', StringSplitOptions.RemoveEmptyEntries)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
     /// <summary>Refuses a name that git would read as an option or that holds whitespace or control characters.</summary>
     private static string ValidateRefName(string name)
     {
@@ -259,6 +320,14 @@ public sealed class GitWorkspace(string repositoryPath)
 
     private async Task<(bool Success, string Output)> TryGitCoreAsync(bool readOnly, CancellationToken ct, string[] args)
     {
+        var (exitCode, output, error) = await RunGitAsync(readOnly, ct, args);
+        return exitCode == 0
+            ? (true, output)
+            : (false, string.Join('\n', new[] { error, output }.Where(s => s.Length > 0)).Trim());
+    }
+
+    private async Task<(int ExitCode, string Output, string Error)> RunGitAsync(bool readOnly, CancellationToken ct, string[] args, string? input = null)
+    {
         var info = new ProcessStartInfo("git")
         {
             WorkingDirectory = RepositoryPath,
@@ -283,6 +352,11 @@ public sealed class GitWorkspace(string repositoryPath)
         }
         foreach (var arg in args) info.ArgumentList.Add(arg);
         info.Environment["GIT_TERMINAL_PROMPT"] = "0";
+        if (input is not null)
+        {
+            info.RedirectStandardInput = true;
+            info.StandardInputEncoding = new UTF8Encoding(false);
+        }
 
         var timeout = readOnly ? TimeSpan.FromSeconds(60) : TimeSpan.FromMinutes(10);
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -293,12 +367,18 @@ public sealed class GitWorkspace(string repositoryPath)
         var stderr = process.StandardError.ReadToEndAsync(cts.Token);
         try
         {
+            if (input is not null)
+            {
+                // git may stop reading once it fails, which closes the pipe: its exit code then says what happened.
+                try
+                {
+                    await process.StandardInput.WriteAsync(input.AsMemory(), cts.Token);
+                    process.StandardInput.Close();
+                }
+                catch (IOException) { }
+            }
             await process.WaitForExitAsync(cts.Token);
-            var output = await stdout;
-            var error = await stderr;
-            return process.ExitCode == 0
-                ? (true, output)
-                : (false, string.Join('\n', new[] { error, output }.Where(s => s.Length > 0)).Trim());
+            return (process.ExitCode, await stdout, await stderr);
         }
         catch (OperationCanceledException)
         {

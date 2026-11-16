@@ -830,14 +830,17 @@ public sealed partial class FactoryOrchestrator(
         run.BaseBranch = await git.GetCurrentBranchAsync(ct);
         run.BaseCommit = await git.GetHeadShaAsync(ct);
         run.BranchName = await git.GetUnusedBranchNameAsync($"factory/run-{run.Id}", ct);
-        run.RepoMap = RepositoryScanner.BuildRepoMap(task.RepositoryPath);
+        // What Git ignores stays out of the map, names included: real data and local secrets are kept that way.
+        var ignored = await git.GetIgnoredEntriesAsync(ct);
+        run.RepoMap = RepositoryScanner.BuildRepoMap(task.RepositoryPath, ignored);
         // What the repository detects before any model has touched it is what the user saw on the New Run page.
         run.DetectedVerificationCommand = VerificationDetector.Detect(task.RepositoryPath)?.Command;
         run.PendingVerificationCommand = null;
         await store.UpdateRunAsync(run, ct);
 
         var fileCount = run.RepoMap.Count(c => c == '\n') + 1;
-        await LogAsync(run.Id, null, AgentLogKind.Info, PipelineStage.Ingest, $"Mapped {fileCount} files in {task.RepositoryPath}, based on {run.BaseBranch}.", ct);
+        var leftOut = ignored.Count == 0 ? "" : " Left out the files and folders Git ignores.";
+        await LogAsync(run.Id, null, AgentLogKind.Info, PipelineStage.Ingest, $"Mapped {fileCount} files in {task.RepositoryPath}, based on {run.BaseBranch}.{leftOut}", ct);
     }
 
     private async Task DecomposeAndContinueAsync(PipelineContext context, string? feedback, CancellationToken ct)
@@ -1027,12 +1030,8 @@ public sealed partial class FactoryOrchestrator(
         await SetStageAsync(run, PipelineStage.Refine, subtask.Id, ct);
 
         var planned = PlannedFiles(subtask).ToList();
-        var files = RepositoryScanner.ReadFiles(context.Task.RepositoryPath, planned, settings.MaxFileChars, settings.MaxContextChars);
-        if (planned.Where(FilePatcher.IsSecretPath).ToList() is { Count: > 0 } withheld)
-        {
-            await LogAsync(run.Id, subtask.Id, AgentLogKind.Warning, PipelineStage.Refine,
-                $"Not shown to the agents because the name looks like a secrets file: {string.Join(", ", withheld)}. They are told the file exists but not what is in it.", ct);
-        }
+        var files = await ReadFilesAsync(context, planned, settings.MaxContextChars, ct);
+        await LogWithheldAsync(run, subtask, files, PipelineStage.Refine, ct);
         var definitions = await ReadDefinitionsAsync(context, subtask, AgentRole.ContextSpecifier, planned, files, ct, subtask.Title, subtask.Description, subtask.HumanGuidance);
         var fileContext = RepositoryScanner.Render(files);
         var prompt = await FitPromptAsync(context, subtask, AgentRole.ContextSpecifier, definitions,
@@ -1067,7 +1066,7 @@ public sealed partial class FactoryOrchestrator(
         string? cutOff = null;
         for (var part = 1; ; part++)
         {
-            var files = RepositoryScanner.ReadFiles(context.Task.RepositoryPath, planned, settings.MaxFileChars, settings.MaxContextChars);
+            var files = await ReadFilesAsync(context, planned, settings.MaxContextChars, ct);
             var definitions = await ReadDefinitionsAsync(context, subtask, AgentRole.CodeGenerator, planned, files, ct,
                 subtask.Title, subtask.Description, subtask.RefinedSpecJson, subtask.HumanGuidance);
             var fileContext = RepositoryScanner.Render(files);
@@ -1114,6 +1113,27 @@ public sealed partial class FactoryOrchestrator(
         return normal.TrimStart('/');
     }
 
+    /// <summary>
+    /// Reads files for an agent's prompt. A file Git ignores is not read, and neither is one that looks like a secrets
+    /// file: the prompt goes to the model and is kept in the run's log.
+    /// </summary>
+    private static async Task<IReadOnlyList<ContextFile>> ReadFilesAsync(PipelineContext context, IReadOnlyList<string> paths, int maxTotalChars, CancellationToken ct)
+    {
+        var ignored = await context.Git.GetIgnoredAsync(paths, ct);
+        return RepositoryScanner.ReadFiles(context.Task.RepositoryPath, paths, context.Settings.MaxFileChars, maxTotalChars, ignored);
+    }
+
+    private async Task LogWithheldAsync(FactoryRun run, FactorySubtask subtask, IReadOnlyList<ContextFile> files, PipelineStage stage, CancellationToken ct)
+    {
+        var withheld = files.Where(f => f.Withheld).ToList();
+        if (withheld.Where(f => f.Content == RepositoryScanner.SecretNotice).Select(f => f.RelativePath).ToList() is { Count: > 0 } secrets)
+            await LogAsync(run.Id, subtask.Id, AgentLogKind.Warning, stage,
+                $"Not shown to the agents because the name looks like a secrets file: {string.Join(", ", secrets)}. They are told the file exists but not what is in it.", ct);
+        if (withheld.Where(f => f.Content == RepositoryScanner.IgnoredNotice).Select(f => f.RelativePath).ToList() is { Count: > 0 } ignored)
+            await LogAsync(run.Id, subtask.Id, AgentLogKind.Warning, stage,
+                $"Not shown to the agents because Git ignores them: {string.Join(", ", ignored)}. They are told the file exists but not what is in it.", ct);
+    }
+
     private const int MaxDefinitionFiles = 10;
 
     private static IEnumerable<string> PlannedFiles(FactorySubtask subtask) =>
@@ -1135,7 +1155,7 @@ public sealed partial class FactoryOrchestrator(
         var paths = DefinitionFinder.Find(repository, named, planned, MaxDefinitionFiles);
         var definitions = paths.Count == 0
             ? []
-            : RepositoryScanner.ReadFiles(repository, paths, settings.MaxFileChars, budget).Where(f => f.Content is { Length: > 0 }).ToList();
+            : (await ReadFilesAsync(context, paths, budget, ct)).Where(f => f is { Content.Length: > 0, Withheld: false }).ToList();
         budget -= definitions.Sum(f => f.Content!.Length);
 
         // Types from packages, such as a UI library's components, which agents otherwise guess at from memory.
@@ -1181,7 +1201,9 @@ public sealed partial class FactoryOrchestrator(
         await git.StageAllAsync(ct);
         var changed = await git.GetStagedFilesAsync(ct);
         var planned = changed.Concat(PlannedFiles(subtask)).ToList();
-        var files = RepositoryScanner.ReadFiles(context.Task.RepositoryPath, planned, settings.MaxFileChars, settings.MaxContextChars);
+        var files = await ReadFilesAsync(context, planned, settings.MaxContextChars, ct);
+        // A final-check fix was never refined, so this is the first time its files are read.
+        if (subtask.IsIntegrationFix) await LogWithheldAsync(run, subtask, files, PipelineStage.Fix, ct);
         // The errors name what the fix got wrong, so the types they name come first.
         var definitions = await ReadDefinitionsAsync(context, subtask, AgentRole.BugFixer, planned, files, ct,
             subtask.LastFailure, subtask.HumanGuidance, subtask.Title, subtask.Description, subtask.RefinedSpecJson);
