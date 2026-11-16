@@ -19,6 +19,22 @@ public class ClaudeCodeTests
         """;
 
     [Fact]
+    public void The_cost_claude_code_reports_is_kept_and_a_result_without_one_has_none()
+    {
+        var priced = new ClaudeStreamParser(_ => { });
+        priced.Accept("""{"type":"result","subtype":"success","is_error":false,"result":"Done","total_cost_usd":0.04215,"usage":{"input_tokens":7,"output_tokens":3}}""");
+        Assert.Equal(0.04215, priced.Result(0, "").CostUsd);
+
+        var unpriced = new ClaudeStreamParser(_ => { });
+        unpriced.Accept(Success.ReplaceLineEndings(""));
+        Assert.Null(unpriced.Result(0, "").CostUsd);
+
+        var odd = new ClaudeStreamParser(_ => { });
+        odd.Accept("""{"type":"result","subtype":"success","is_error":false,"result":"Done","total_cost_usd":"free","usage":{}}""");
+        Assert.Null(odd.Result(0, "").CostUsd);
+    }
+
+    [Fact]
     public void Streams_thinking_and_the_answer_then_returns_the_structured_output()
     {
         var deltas = new List<LlmDelta>();

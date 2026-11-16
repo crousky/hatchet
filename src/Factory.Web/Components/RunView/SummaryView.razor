@@ -4,8 +4,12 @@
     <div class="stat-row">
         <div class="stat"><div class="stat-value">@Completed<span class="stat-of">/@Subtasks.Count</span></div><div class="stat-label">subtasks done</div></div>
         <div class="stat"><div class="stat-value">@Subtasks.Sum(s => s.FixAttempts)</div><div class="stat-label">fix attempts</div></div>
-        <div class="stat"><div class="stat-value">@Fmt.Tokens(Run.PromptTokens)</div><div class="stat-label">prompt tokens</div></div>
-        <div class="stat"><div class="stat-value">@Fmt.Tokens(Run.CompletionTokens)</div><div class="stat-label">completion tokens</div></div>
+        <div class="stat" title="@Fmt.UsageDetail(Total)"><div class="stat-value">@Fmt.Tokens(Total.LocalTokens)</div><div class="stat-label">local tokens</div></div>
+        <div class="stat" title="@Fmt.UsageDetail(Total)"><div class="stat-value">@Fmt.Tokens(Total.ClaudeTokens)</div><div class="stat-label">Claude tokens</div></div>
+        @if (Total.ClaudeCostUsd is > 0)
+        {
+            <div class="stat" title="Claude Code's own figure at API prices. On a subscription it measures use and is not a bill."><div class="stat-value">@Fmt.Usd(Total.ClaudeCostUsd.Value)</div><div class="stat-label">Claude cost</div></div>
+        }
         <div class="stat"><div class="stat-value">@Fmt.Duration((Run.CompletedAt ?? DateTime.UtcNow) - Run.CreatedAt)</div><div class="stat-label">elapsed</div></div>
     </div>
 
@@ -51,6 +55,7 @@
                     <td class="muted">@subtask.Order</td>
                     <td>@subtask.Title</td>
                     <td class="muted">@Fmt.Label(subtask.Status)</td>
+                    <td class="muted small" title="@(BySubtask.GetValueOrDefault(subtask.Id) is { } detail ? Fmt.UsageDetail(detail) : "")">@(BySubtask.GetValueOrDefault(subtask.Id) is { } used ? $"{Fmt.Usage(used)} tokens" : "")</td>
                     <td class="mono-small muted">@Fmt.ShortSha(subtask.CommitSha)</td>
                 </tr>
             }
@@ -62,6 +67,12 @@
     [Parameter, EditorRequired] public FactoryRun Run { get; set; } = null!;
     [Parameter] public IReadOnlyList<FactorySubtask> Subtasks { get; set; } = [];
     [Parameter] public PullRequestDraft? Draft { get; set; }
+
+    /// <summary>The run's model calls, added up by subtask and model.</summary>
+    [Parameter] public IReadOnlyList<UsageRow> Usage { get; set; } = [];
+
+    private RunUsage Total => RunUsageBuilder.ForRun(Usage);
+    private IReadOnlyDictionary<int, RunUsage> BySubtask => RunUsageBuilder.BySubtask(Usage);
 
     private int Completed => Subtasks.Count(s => s.Status == SubtaskStatus.Completed);
 

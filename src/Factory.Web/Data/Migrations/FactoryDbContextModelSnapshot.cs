@@ -96,6 +96,9 @@ namespace Factory.Web.Data.Migrations
                     b.Property<int>("CompletionTokens")
                         .HasColumnType("INTEGER");
 
+                    b.Property<double?>("CostUsd")
+                        .HasColumnType("REAL");
+
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("TEXT");
 
@@ -361,6 +364,9 @@ namespace Factory.Web.Data.Migrations
                     b.Property<string>("Title")
                         .IsRequired()
                         .HasColumnType("TEXT");
+
+                    b.Property<long>("TokenBudgetStart")
+                        .HasColumnType("INTEGER");
 
                     b.Property<string>("VerificationCommand")
                         .IsRequired()

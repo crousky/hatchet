@@ -25,6 +25,8 @@ public interface IRunStore
     Task<IReadOnlyList<AgentLogEntry>> GetRecentEventsAsync(int runId, int count, CancellationToken ct = default);
     /// <summary>Working time spent on each subtask of a run, by subtask id: what its model calls and commands took.</summary>
     Task<IReadOnlyDictionary<int, TimeSpan>> GetWorkBySubtaskAsync(int runId, CancellationToken ct = default);
+    /// <summary>The run's model calls added up by subtask and model, counting only log entries after <paramref name="afterLogId"/>.</summary>
+    Task<IReadOnlyList<UsageRow>> GetUsageAsync(int runId, long afterLogId = 0, CancellationToken ct = default);
 
     Task<DiffSnapshot> AddDiffAsync(DiffSnapshot diff, CancellationToken ct = default);
     Task<IReadOnlyList<DiffSnapshot>> GetDiffsAsync(int runId, CancellationToken ct = default);

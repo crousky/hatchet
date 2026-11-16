@@ -402,6 +402,9 @@ public sealed partial class FactoryOrchestrator(
         RequireStatus(run, RunStatus.NeedsHuman);
         await RequireModelChoiceAsync(run, ct);
         if (fromDrivingAgent && decision == HumanDecision.RetryFixer) await CountAgentFixerResetAsync(run, ct);
+        if (fromDrivingAgent && decision != HumanDecision.SkipSubtask && run.PauseReason?.Contains(TokenCeilingMarker, StringComparison.Ordinal) == true)
+            throw new FactoryValidationException("This subtask reached the token ceiling the user set in Hatchet, so carrying on is theirs to decide. "
+                + "Ask the user to resume it in Hatchet; through MCP the subtask can only be skipped.");
         if (fromDrivingAgent && AcceptsGate(run, decision))
             throw new FactoryValidationException("This pause asks a person to approve a changed check command or a file the reviewer could not read in full. "
                 + "Ask the user to resume it in Hatchet; through MCP the run can be handed back to the fixer, restarted or skipped.");
@@ -1002,12 +1005,15 @@ public sealed partial class FactoryOrchestrator(
 
             if (entry == SubtaskEntry.Start)
             {
+                if (await PausedAtTokenCeilingAsync(context, subtask, ct)) return false;
                 await RefineAsync(context, subtask, ct);
                 needsFix = !await BuildAsync(context, subtask, ct);
             }
 
             while (true)
             {
+                // Asked before each fix and each review, which is where a subtask that isn't converging spends.
+                if (await PausedAtTokenCeilingAsync(context, subtask, ct)) return false;
                 if (needsFix)
                 {
                     // Fixes before the first review and fixes after it have a budget each, so the reviewer's findings
@@ -2154,7 +2160,7 @@ public sealed partial class FactoryOrchestrator(
             {
                 // A stopped stream sends no token counts, so the output is estimated from its length.
                 var tokens = result is { CompletionTokens: > 0 } finished ? finished.CompletionTokens : ContextWindow.EstimateTokens(answer.Length + thinking.Length);
-                result = new LlmResult(answer.ToString(), thinking.ToString(), result?.PromptTokens ?? 0, tokens, "loop", result?.Duration ?? elapsed.Elapsed);
+                result = new LlmResult(answer.ToString(), thinking.ToString(), result?.PromptTokens ?? 0, tokens, "loop", result?.Duration ?? elapsed.Elapsed, result?.CostUsd);
             }
             var outcome = result!;
 
@@ -2368,6 +2374,7 @@ public sealed partial class FactoryOrchestrator(
             Response = result?.Content,
             PromptTokens = result?.PromptTokens ?? 0,
             CompletionTokens = result?.CompletionTokens ?? 0,
+            CostUsd = result?.CostUsd,
             DurationMs = (long)(result?.Duration ?? duration ?? TimeSpan.Zero).TotalMilliseconds,
             Succeeded = succeeded
         }, CancellationToken.None);
@@ -2527,6 +2534,36 @@ public sealed partial class FactoryOrchestrator(
         {
             await LogAsync(run.Id, null, AgentLogKind.Warning, null, $"Could not switch back to {run.BaseBranch}: {ex.Message}", ct);
         }
+    }
+
+    /// <summary>Marks the pause at the token ceiling. Only the user may carry on past it, as it is their spending limit.</summary>
+    internal const string TokenCeilingMarker = "Nothing more was sent to a model.";
+
+    /// <summary>
+    /// Pauses the run when the subtask has used more tokens than Settings allows one subtask before asking, and returns
+    /// true if it did. What counts is what was used since the subtask last paused here, so resuming gives it as many again.
+    /// </summary>
+    private async Task<bool> PausedAtTokenCeilingAsync(PipelineContext context, FactorySubtask subtask, CancellationToken ct)
+    {
+        var (run, ceiling) = (context.Run, context.Settings.MaxSubtaskTokens);
+        if (ceiling <= 0) return false;
+
+        var usage = RunUsageBuilder.BySubtask(await store.GetUsageAsync(run.Id, subtask.TokenBudgetStart, ct)).GetValueOrDefault(subtask.Id);
+        if (usage is null || usage.Tokens < ceiling) return false;
+
+        var since = subtask.TokenBudgetStart > 0 ? " since it was last resumed" : "";
+        var split = usage.ClaudeTokens > 0 ? $" ({usage.LocalTokens:N0} on the local model and {usage.ClaudeTokens:N0} on Claude)" : "";
+        var reason = $"\"{subtask.Title}\" has used {usage.Tokens:N0} tokens{since}{split}, and the most a subtask may use before Hatchet asks is {ceiling:N0}. "
+            + $"{TokenCeilingMarker} Resume to let it use as many again, or restart or skip the subtask. The ceiling is under Settings, where 0 turns it off.";
+        var entry = await store.AppendLogAsync(new AgentLogEntry
+        {
+            RunId = run.Id, SubtaskId = subtask.Id, Kind = AgentLogKind.Warning, Stage = run.CurrentStage, Message = reason
+        }, ct);
+        bus.Publish(new LogAppended(run.Id, entry.Id));
+        subtask.TokenBudgetStart = entry.Id;
+        await store.UpdateSubtaskAsync(subtask, ct);
+        await PauseForSubtaskAsync(run, subtask, reason, ct);
+        return true;
     }
 
     private async Task PauseForSubtaskAsync(FactoryRun run, FactorySubtask subtask, string reason, CancellationToken ct)

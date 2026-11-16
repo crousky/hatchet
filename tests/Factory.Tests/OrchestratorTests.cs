@@ -471,6 +471,70 @@ public class OrchestratorTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Usage_is_split_between_the_local_model_and_claude_for_the_run_and_for_each_subtask()
+    {
+        _settings.Settings.ProfileOverrides = Enum.GetValues<AgentRole>().Select(role => new AgentProfileOverride { Role = role, Engine = AgentEngine.Local }).ToList();
+        _llm.Enqueue(AgentRole.ContextSpecifier, Refined(), Refined());
+        _llm.Enqueue(AgentRole.CodeGenerator, Patch("hard.txt"), Patch("easy.txt"));
+        _llm.Enqueue(AgentRole.StaticReviewer, Verdict(true), Verdict(true));
+
+        var started = await _orchestrator.StartRunAsync(new NewRunRequest(_repo.Path, "# Spec", null, "verify", false),
+        [
+            new SubtaskEdit(null, "hard", "Build hard", [], ["hard.txt"], [], "", Tier: SubtaskTiers.Strong),
+            new SubtaskEdit(null, "easy", "Build easy", [], ["easy.txt"], [], "")
+        ]);
+        var run = await WaitForAsync(started.Id, RunStatus.ReadyToMerge);
+
+        // The scripted model reports 5,261 prompt and 2,931 completion tokens for every call, and 25 cents for one on Claude.
+        var rows = await _store.GetUsageAsync(run.Id);
+        var total = RunUsageBuilder.ForRun(rows);
+        Assert.Equal((4 * 8192L, 2 * 8192L, 0.5), (total.LocalTokens, total.ClaudeTokens, total.ClaudeCostUsd));
+        Assert.Equal(
+            [new ModelUsage("local", null, 4, 4 * 5261, 4 * 2931, null), new ModelUsage("claude", "sonnet", 2, 2 * 5261, 2 * 2931, 0.5)],
+            total.ByModel);
+        Assert.Equal(run.PromptTokens + run.CompletionTokens, total.Tokens);
+
+        var subtasks = (await _store.GetSubtasksAsync(run.Id)).OrderBy(s => s.Order).ToList();
+        var bySubtask = RunUsageBuilder.BySubtask(rows);
+        var (hard, easy) = (bySubtask[subtasks[0].Id], bySubtask[subtasks[1].Id]);
+        Assert.Equal((8192L, 2 * 8192L, 0.5), (hard.LocalTokens, hard.ClaudeTokens, hard.ClaudeCostUsd));
+        Assert.Equal((3 * 8192L, 0L, (double?)null), (easy.LocalTokens, easy.ClaudeTokens, easy.ClaudeCostUsd));
+    }
+
+    [Fact]
+    public async Task A_subtask_over_the_token_ceiling_pauses_for_the_user_and_resuming_gives_it_as_many_again()
+    {
+        _settings.Settings.MaxSubtaskTokens = 10_000;
+        _llm.Enqueue(AgentRole.TaskPlanner, Plan("alpha"));
+        _llm.Enqueue(AgentRole.ContextSpecifier, Refined());
+        _llm.Enqueue(AgentRole.CodeGenerator, Patch("alpha.txt"));
+        _llm.Enqueue(AgentRole.StaticReviewer, Verdict(true));
+
+        // Planning isn't the subtask's, so the two calls that built it are what crossed the ceiling.
+        var run = await WaitForAsync((await StartAsync()).Id, RunStatus.NeedsHuman);
+
+        Assert.Contains("\"alpha\" has used 16,384 tokens, and the most a subtask may use before Hatchet asks is 10,000.", run.PauseReason);
+        Assert.Contains(FactoryOrchestrator.TokenCeilingMarker, run.PauseReason);
+        Assert.DoesNotContain(_llm.Calls, c => c.Role == AgentRole.StaticReviewer);
+        Assert.Empty(_commands.Commands);
+        Assert.Equal(SubtaskStatus.NeedsHuman, (await _store.GetSubtasksAsync(run.Id)).Single().Status);
+
+        // It is the user's spending limit, so an agent can skip the subtask but not carry on past it.
+        foreach (var decision in new[] { HumanDecision.Resume, HumanDecision.Reverify, HumanDecision.RetryFixer, HumanDecision.RestartSubtask })
+        {
+            var refused = await Assert.ThrowsAsync<FactoryValidationException>(() => _orchestrator.ResumeAsDrivingAgentAsync(run.Id, decision, null));
+            Assert.Contains("token ceiling the user set", refused.Message);
+        }
+
+        await _orchestrator.ResumeAsync(run.Id, HumanDecision.Resume, null);
+        run = await WaitForAsync(run.Id, RunStatus.ReadyToMerge);
+
+        // The count starts again at the pause, so the review's 8,192 tokens were within the allowance.
+        Assert.Single(_llm.Calls, c => c.Role == AgentRole.StaticReviewer);
+        Assert.Equal(SubtaskStatus.Completed, (await _store.GetSubtasksAsync(run.Id)).Single().Status);
+    }
+
+    [Fact]
     public async Task A_tier_that_is_neither_local_nor_strong_is_refused_and_the_plan_editor_can_change_one()
     {
         var refused = await Assert.ThrowsAsync<FactoryValidationException>(() => _orchestrator.StartRunAsync(new NewRunRequest(_repo.Path, "# Spec", null, "verify", true),
@@ -2723,7 +2787,7 @@ public class OrchestratorTests : IAsyncLifetime
                     : throw new LlmException($"No scripted response left for {role}.");
             }
             onDelta?.Invoke(new LlmDelta(content, false));
-            return new LlmResult(content, "", 5261, 2931, finishReason, TimeSpan.FromMilliseconds(1));
+            return new LlmResult(content, "", 5261, 2931, finishReason, TimeSpan.FromMilliseconds(1), request.Profile.UsesClaude ? 0.25 : null);
         }
 
         public Task<IReadOnlyList<string>> ListModelsAsync(string baseUrl, CancellationToken ct) =>
@@ -2768,7 +2832,7 @@ public class OrchestratorTests : IAsyncLifetime
         {
             Id = s.Id, RunId = s.RunId, Order = s.Order, Title = s.Title, Description = s.Description,
             TargetFilesToModify = s.TargetFilesToModify, TargetFilesToCreate = s.TargetFilesToCreate, ContextFilesToRead = s.ContextFilesToRead,
-            Skills = [.. s.Skills], VerificationCommand = s.VerificationCommand, CommandApproved = s.CommandApproved, Tier = s.Tier, Status = s.Status, IsIntegrationFix = s.IsIntegrationFix,
+            Skills = [.. s.Skills], VerificationCommand = s.VerificationCommand, CommandApproved = s.CommandApproved, Tier = s.Tier, TokenBudgetStart = s.TokenBudgetStart, Status = s.Status, IsIntegrationFix = s.IsIntegrationFix,
             FixAttempts = s.FixAttempts, ReviewFixAttempts = s.ReviewFixAttempts,
             LastFailure = s.LastFailure, FixHistory = [.. s.FixHistory], HumanGuidance = s.HumanGuidance, GuidanceFromAgent = s.GuidanceFromAgent, ReviewGapAccepted = s.ReviewGapAccepted, AgentFixerResets = s.AgentFixerResets, RefinedSpecJson = s.RefinedSpecJson,
             SummaryOfChanges = s.SummaryOfChanges, ReviewJson = s.ReviewJson, CommitSha = s.CommitSha
@@ -2867,6 +2931,16 @@ public class OrchestratorTests : IAsyncLifetime
         public Task<IReadOnlyList<AgentLogEntry>> GetRecentEventsAsync(int runId, int count, CancellationToken ct = default)
         {
             lock (_gate) return Task.FromResult<IReadOnlyList<AgentLogEntry>>(_logs.Where(l => l.RunId == runId && (l.Kind != AgentLogKind.LlmCall || !l.Succeeded)).TakeLast(count).ToList());
+        }
+
+        public Task<IReadOnlyList<UsageRow>> GetUsageAsync(int runId, long afterLogId = 0, CancellationToken ct = default)
+        {
+            lock (_gate)
+                return Task.FromResult<IReadOnlyList<UsageRow>>(_logs
+                    .Where(l => l.RunId == runId && l.Kind == AgentLogKind.LlmCall && l.Id > afterLogId)
+                    .GroupBy(l => (l.SubtaskId, l.Model))
+                    .Select(g => new UsageRow(g.Key.SubtaskId, g.Key.Model, g.Count(), g.Sum(l => (long)l.PromptTokens), g.Sum(l => (long)l.CompletionTokens), g.Sum(l => l.CostUsd ?? 0)))
+                    .ToList());
         }
 
         public Task<IReadOnlyDictionary<int, TimeSpan>> GetWorkBySubtaskAsync(int runId, CancellationToken ct = default)

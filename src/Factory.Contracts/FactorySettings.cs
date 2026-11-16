@@ -16,6 +16,12 @@ public sealed class FactorySettings
     public int MaxPlannedSubtasks { get; set; } = 40;
 
     /// <summary>
+    /// The most tokens, prompt and completion together, one subtask may use before the run pauses to ask. Each time the
+    /// user resumes it, the subtask may use as many again. 0 means no ceiling.
+    /// </summary>
+    public int MaxSubtaskTokens { get; set; }
+
+    /// <summary>
     /// Failed fix attempts on the local model before the Bug Fixer hands the subtask to Claude through Claude Code.
     /// Local models often guess library APIs; Claude usually knows them. 0 keeps fixes local.
     /// </summary>
