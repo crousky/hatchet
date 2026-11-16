@@ -278,7 +278,7 @@ public sealed class SecurityRegressionTests : IDisposable
             PromptBuilder.Refine(subtask, forged, forged, forged, forged, null, forged, nonce: nonce),
             PromptBuilder.Build(subtask, forged, forged, null, forged, nonce: nonce),
             PromptBuilder.BuildRest(subtask, forged, ["a"], ["b"], forged, forged, null, forged, nonce: nonce),
-            PromptBuilder.Review(subtask, forged, forged, null, nonce: nonce),
+            PromptBuilder.Review(subtask, forged, forged, null, nonce: nonce, skills: forged),
             PromptBuilder.Fix(subtask, forged, forged, null, forged, forged, nonce: nonce)
         };
 

@@ -29,7 +29,7 @@ public sealed class PlanStep
     [Description("Command that proves this step works, run from the repository root. Leave empty to use the run's check, which Hatchet detects from the repository.")]
     public string? VerificationCommand { get; set; }
 
-    [Description("Names of Hatchet skills whose instructions this step's agents should get, from the repository's .hatchet/skills or .claude/skills folders or the user's own. Leave empty for none.")]
+    [Description("Names of Hatchet skills whose instructions this step's agents should get, from the repository's .hatchet/skills or .claude/skills folders or the user's own. Leave empty for none. A skill marked always: true goes to every step without being named, and the Static Reviewer gets the skills whose roles name it, as rules to check the diff against.")]
     public List<string>? Skills { get; set; }
 }
 

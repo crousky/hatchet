@@ -75,6 +75,7 @@ public static class AgentProfiles
         - suggestions: optional improvements that should not block the change.
         - confidenceScore: 0 to 100, how sure you are of the verdict.
         - Do not reject for style preferences, or for work that belongs to other subtasks.
+        - If skills are included, they are rules this repository keeps to. Check the diff against each one. A change that breaks a rule has a blocking issue: name the rule, the file and what breaks it. A rule the diff doesn't touch is not an issue.
 
         {JsonOnly}
         """);

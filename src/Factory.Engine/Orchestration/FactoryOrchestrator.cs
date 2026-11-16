@@ -1719,7 +1719,9 @@ public sealed partial class FactoryOrchestrator(
         for (var i = 0; i < chunks.Count; i++)
         {
             var shown = chunks.Count == 1 ? chunks[i].Diff : $"[Part {i + 1} of {chunks.Count} of this change]\n{chunks[i].Diff}";
-            var prompt = PromptBuilder.Review(subtask, shown, testSummary, subtask.HumanGuidance, GuidanceOf(subtask));
+            // The reviewer gets the skills written for it, as rules to hold the diff to. Guidance from the driving agent still never reaches it.
+            var prompt = await FitPromptAsync(context, subtask, AgentRole.StaticReviewer, "",
+                (_, k) => PromptBuilder.Review(subtask, shown, testSummary, subtask.HumanGuidance, GuidanceOf(subtask), skills: k), ct);
             var part = await InvokeAgentAsync<ReviewVerdictResponse>(context, AgentRole.StaticReviewer, subtask.Id, prompt, null, ct);
             // A pass that lists blocking issues contradicts itself, and the issues win.
             verdicts.Add(part.Passed && part.BlockingIssues.Count > 0 ? part with { Passed = false } : part);
@@ -2187,7 +2189,8 @@ public sealed partial class FactoryOrchestrator(
     /// <summary>
     /// Builds a prompt with the definitions of the types it names and the skills chosen for the subtask. When the local
     /// model's context window wouldn't then leave the agent room to think and answer, the definitions are left out
-    /// first, and then skills from the end of the subtask's list.
+    /// first, and then skills from the end of the subtask's list. Always-on skills come first in that list, so they
+    /// are the last to go.
     /// </summary>
     private async Task<string> FitPromptAsync(PipelineContext context, FactorySubtask subtask, AgentRole role, string definitions,
         Func<string, string, string> build, CancellationToken ct)
@@ -2235,20 +2238,20 @@ public sealed partial class FactoryOrchestrator(
     private static string Plural(int count, string noun) => count == 1 ? noun : $"{noun}s";
 
     /// <summary>
-    /// The subtask's skills that are for this agent, in the subtask's order. They are read again for every call, so a
-    /// skill edited or saved while the run is paused is used when it resumes.
+    /// The skills for this agent: the always-on ones, which go with every subtask, and then the subtask's own in the
+    /// subtask's order. They are read again for every call, so a skill edited or saved while the run is paused is
+    /// used when it resumes.
     /// </summary>
     private async Task<List<Skill>> SkillsForAsync(PipelineContext context, FactorySubtask subtask, AgentRole role, CancellationToken ct)
     {
-        if (subtask.Skills.Count == 0) return [];
-        var available = Skills.Load(context.Task.RepositoryPath).ToDictionary(s => s.Name, StringComparer.OrdinalIgnoreCase);
+        var loaded = Skills.Load(context.Task.RepositoryPath);
+        var available = loaded.ToDictionary(s => s.Name, StringComparer.OrdinalIgnoreCase);
         var missing = subtask.Skills.Where(n => !available.ContainsKey(n)).ToList();
         if (missing.Count > 0)
             await LogAsync(context.Run.Id, subtask.Id, AgentLogKind.Warning, context.Run.CurrentStage,
                 $"Couldn't find the {Plural(missing.Count, "skill")} {string.Join(", ", missing)}, so the {AgentProfiles.Resolve(context.Settings, role).DisplayName} goes without.", ct);
-        return subtask.Skills
-            .Where(available.ContainsKey)
-            .Select(n => available[n])
+        return loaded.Where(s => s.Always)
+            .Concat(subtask.Skills.Where(available.ContainsKey).Select(n => available[n]))
             .Where(s => s.IsFor(role))
             .DistinctBy(s => s.Name, StringComparer.OrdinalIgnoreCase)
             .ToList();
