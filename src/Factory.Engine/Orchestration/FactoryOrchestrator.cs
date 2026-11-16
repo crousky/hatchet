@@ -276,6 +276,7 @@ public sealed partial class FactoryOrchestrator(
             throw new FactoryValidationException("The architecture spec is empty.");
         if (plan is not null && (plan.Count == 0 || plan.Any(s => string.IsNullOrWhiteSpace(s.Title) || string.IsNullOrWhiteSpace(s.Description))))
             throw new FactoryValidationException("A supplied plan needs at least one subtask, and every subtask needs a title and a description.");
+        foreach (var step in plan ?? []) RequireTier(step);
 
         var command = request.VerificationCommand?.Trim() ?? "";
         var gates = VerificationGates.Normalize(request.Gates);
@@ -326,8 +327,13 @@ public sealed partial class FactoryOrchestrator(
             ContextFilesToRead = edit.ContextFilesToRead,
             Skills = edit.Skills ?? [],
             VerificationCommand = edit.VerificationCommand.Trim(),
-            CommandApproved = true
+            CommandApproved = true,
+            Tier = RequireTier(edit)
         }).ToList();
+
+    private static string RequireTier(SubtaskEdit edit) =>
+        SubtaskTiers.Parse(edit.Tier)
+        ?? throw new FactoryValidationException($"The subtask \"{edit.Title.Trim()}\" has the tier \"{edit.Tier}\". A tier is {SubtaskTiers.Local} or {SubtaskTiers.Strong}.");
 
     /// <summary>Starts a fresh run of an earlier run's task.</summary>
     public async Task<FactoryRun> RerunAsync(int runId, CancellationToken ct = default)
@@ -986,6 +992,14 @@ public sealed partial class FactoryOrchestrator(
         var needsFix = entry == SubtaskEntry.Fix;
         try
         {
+            if (SubtaskTiers.IsStrong(subtask.Tier))
+            {
+                // Everything from here reads the subtask's settings, so the fix budget and escalation follow the stronger models too.
+                context = new PipelineContext(run, ModelChoices.ApplyTier(context.Settings, subtask.Tier));
+                await LogAsync(run.Id, subtask.Id, AgentLogKind.Info, run.CurrentStage,
+                    $"This subtask is marked strong, so it is built on the strong profile's models. {ModelChoices.DescribeTier(context.Settings)}.", ct);
+            }
+
             if (entry == SubtaskEntry.Start)
             {
                 await RefineAsync(context, subtask, ct);

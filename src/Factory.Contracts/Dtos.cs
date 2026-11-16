@@ -64,7 +64,28 @@ public sealed record SubtaskEdit(
     List<string> TargetFilesToCreate,
     List<string> ContextFilesToRead,
     string VerificationCommand,
-    List<string>? Skills = null);
+    List<string>? Skills = null,
+    string? Tier = null);
+
+/// <summary>
+/// How much model a subtask gets. A <c>local</c> one, the default, is built by the agents as the run has them. A
+/// <c>strong</c> one has its Context Specifier, Code Generator and Bug Fixer moved to the models the "strong" run
+/// profile names for them, for a step too hard or too long for the local model.
+/// </summary>
+public static class SubtaskTiers
+{
+    public const string Local = "local";
+    public const string Strong = "strong";
+
+    /// <summary>The tier as stored, or null when the text is neither. Nothing at all is <see cref="Local"/>.</summary>
+    public static string? Parse(string? tier)
+    {
+        var text = tier?.Trim().ToLowerInvariant();
+        return string.IsNullOrEmpty(text) || text == Local ? Local : text == Strong ? Strong : null;
+    }
+
+    public static bool IsStrong(string? tier) => Parse(tier) == Strong;
+}
 
 /// <summary>Something in a supplied plan that doesn't match the repository. The run starts all the same.</summary>
 /// <param name="Kind">One of <see cref="PlanWarningKinds"/>.</param>

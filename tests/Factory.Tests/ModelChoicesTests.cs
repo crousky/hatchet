@@ -78,6 +78,58 @@ public class ModelChoicesTests
     }
 
     [Fact]
+    public void A_strong_subtask_moves_its_building_agents_to_the_strong_profile_and_leaves_the_rest()
+    {
+        var run = ModelChoices.Apply(new FactorySettings(), "profile:local");
+        (bool OnClaude, string Model) RouteOf(FactorySettings settings, AgentRole role)
+        {
+            var agent = AgentProfiles.Resolve(settings, role);
+            return (agent.UsesClaude, agent.UsesClaude ? agent.ClaudeModel : "");
+        }
+
+        var strong = ModelChoices.ApplyTier(run, SubtaskTiers.Strong);
+
+        Assert.All(ModelChoices.TieredRoles, role => Assert.Equal((true, "sonnet"), RouteOf(strong, role)));
+        // The planner and the reviewer stay where the run's own profile put them.
+        Assert.Equal((true, "opus"), RouteOf(strong, AgentRole.TaskPlanner));
+        Assert.Equal((true, "sonnet"), RouteOf(strong, AgentRole.StaticReviewer));
+        Assert.Equal("opus", FactoryOrchestrator.LastResortModel(strong));
+        // The run's settings are shared by its other subtasks, so they are left alone.
+        Assert.All(ModelChoices.TieredRoles, role => Assert.Equal((false, ""), RouteOf(run, role)));
+
+        Assert.Same(run, ModelChoices.ApplyTier(run, SubtaskTiers.Local));
+        Assert.Same(run, ModelChoices.ApplyTier(run, null));
+        Assert.Same(run, ModelChoices.ApplyTier(run, ""));
+        Assert.Equal("Context Specifier, Code Generator, Bug Fixer: Claude Sonnet", ModelChoices.DescribeTier(run));
+    }
+
+    [Fact]
+    public void Strong_means_what_the_users_strong_profile_says_and_the_built_in_one_if_they_removed_it()
+    {
+        var settings = new FactorySettings();
+        var strong = settings.RunProfiles.Single(p => p.Name == "strong");
+        strong.Roles.Single(r => r.Role == AgentRole.CodeGenerator).ClaudeModel = "opus";
+        strong.Roles.RemoveAll(r => r.Role == AgentRole.ContextSpecifier);
+
+        var applied = ModelChoices.ApplyTier(settings, "Strong");
+        Assert.Equal("opus", AgentProfiles.Resolve(applied, AgentRole.CodeGenerator).ClaudeModel);
+        // A role the profile leaves out runs as the run has it.
+        Assert.Equal(AgentProfiles.Resolve(settings, AgentRole.ContextSpecifier).UsesClaude, AgentProfiles.Resolve(applied, AgentRole.ContextSpecifier).UsesClaude);
+
+        settings.RunProfiles.Clear();
+        var builtIn = AgentProfiles.Resolve(ModelChoices.ApplyTier(settings, SubtaskTiers.Strong), AgentRole.CodeGenerator);
+        Assert.Equal((true, "sonnet"), (builtIn.UsesClaude, builtIn.ClaudeModel));
+    }
+
+    [Theory]
+    [InlineData(null, "local")]
+    [InlineData("", "local")]
+    [InlineData(" Local ", "local")]
+    [InlineData("STRONG", "strong")]
+    [InlineData("claude", null)]
+    public void A_tier_is_local_or_strong(string? text, string? expected) => Assert.Equal(expected, SubtaskTiers.Parse(text));
+
+    [Fact]
     public void A_profile_changes_where_an_agent_runs_and_nothing_else_and_leaves_out_roles_as_settings_has_them()
     {
         var settings = new FactorySettings();

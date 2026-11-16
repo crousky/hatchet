@@ -69,6 +69,8 @@ A run can also bring its own choice, picked under **Model** on the New run page 
 - **A run profile** (`profile:<name>`) gives each agent its own model. Hatchet starts with three, and you can edit them or add your own in Settings: `local` builds on the local model with Claude planning and reviewing, `strong` builds on Claude Sonnet with Claude Opus planning, reviewing and making the last fix attempt, and `all-opus` puts every agent on Claude Opus.
 - **One model** (`local:<model id>`, `claude:opus`, `claude:sonnet` or `claude:haiku`) puts every agent on it.
 
+One subtask can also be marked **strong**, in the plan editor or with `tier` in a plan handed over through MCP. Its Context Specifier, Code Generator and Bug Fixer then run on the `strong` profile's models while the rest of the run stays where it was, so a mostly local run can send its one long, hard step to Claude.
+
 The run keeps its choice when it is paused, resumed or Hatchet restarts, and other runs keep theirs, so a run that needs Claude throughout and one built locally can be open at once without changing Settings in between. The run page shows the choice.
 
 Once three subtasks are done, the run header shows a likely range for the working time left. It's based on how long the finished subtasks took, and time paused doesn't count. It narrows as more subtasks finish.
