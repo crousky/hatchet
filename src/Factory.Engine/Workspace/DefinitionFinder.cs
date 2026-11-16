@@ -16,7 +16,9 @@ public static partial class DefinitionFinder
     private static readonly HashSet<string> SourceExtensions = new(StringComparer.OrdinalIgnoreCase)
     {
         ".cs", ".fs", ".vb", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".java", ".kt", ".scala", ".go", ".rs", ".py",
-        ".swift", ".dart", ".php", ".rb", ".cpp", ".cc", ".h", ".hpp"
+        ".swift", ".dart", ".php", ".rb", ".cpp", ".cc", ".h", ".hpp",
+        // A Razor component declares no type in its text. Its type is its file name.
+        RazorComponents.Extension
     };
 
     // A type declaration in most languages: class, interface, record, struct, enum, trait, protocol, object or type
@@ -35,9 +37,17 @@ public static partial class DefinitionFinder
 
     /// <summary>
     /// The repository files that declare a type the text names, in the order the text first names them, without the
-    /// files in <paramref name="exclude"/>. Paths are relative and use forward slashes.
+    /// files in <paramref name="exclude"/>. Paths are relative and use forward slashes. Razor components are left to
+    /// <see cref="FindComponents"/>, as an agent wants a component's parameters and not its markup.
     /// </summary>
-    public static IReadOnlyList<string> Find(string repositoryPath, string text, IEnumerable<string> exclude, int maxFiles)
+    public static IReadOnlyList<string> Find(string repositoryPath, string text, IEnumerable<string> exclude, int maxFiles) =>
+        Find(repositoryPath, text, exclude, maxFiles, components: false);
+
+    /// <summary>The repository's Razor components the text names, by their .razor files, in the order the text first names them.</summary>
+    public static IReadOnlyList<string> FindComponents(string repositoryPath, string text, IEnumerable<string> exclude, int maxFiles) =>
+        Find(repositoryPath, text, exclude, maxFiles, components: true);
+
+    private static IReadOnlyList<string> Find(string repositoryPath, string text, IEnumerable<string> exclude, int maxFiles, bool components)
     {
         var names = TypeLikeName().Matches(text).Select(m => m.Value).Distinct(StringComparer.Ordinal).ToList();
         if (names.Count == 0 || maxFiles <= 0 || !Directory.Exists(repositoryPath)) return [];
@@ -50,6 +60,7 @@ public static partial class DefinitionFinder
             if (!index.TryGetValue(name, out var files)) continue;
             foreach (var file in files)
             {
+                if (file.EndsWith(RazorComponents.Extension, StringComparison.OrdinalIgnoreCase) != components) continue;
                 if (!skip.Add(file)) continue;
                 found.Add(file);
                 if (found.Count == maxFiles) return found;
@@ -80,12 +91,19 @@ public static partial class DefinitionFinder
             var relative = Normalize(Path.GetRelativePath(root.FullName, file.FullName));
             if (!previous.TryGetValue(relative, out var entry) || entry.Modified != file.LastWriteTimeUtc || entry.Length != file.Length)
             {
-                string content;
-                try { content = File.ReadAllText(file.FullName); }
-                catch (IOException) { continue; }
-                catch (UnauthorizedAccessException) { continue; }
-                entry = new IndexedFile(file.LastWriteTimeUtc, file.Length,
-                    Declaration().Matches(content).Select(m => m.Groups[1].Value).Distinct(StringComparer.Ordinal).ToArray());
+                if (file.Extension.Equals(RazorComponents.Extension, StringComparison.OrdinalIgnoreCase))
+                {
+                    entry = new IndexedFile(file.LastWriteTimeUtc, file.Length, RazorComponents.NameOf(file.Name) is { } component ? [component] : []);
+                }
+                else
+                {
+                    string content;
+                    try { content = File.ReadAllText(file.FullName); }
+                    catch (IOException) { continue; }
+                    catch (UnauthorizedAccessException) { continue; }
+                    entry = new IndexedFile(file.LastWriteTimeUtc, file.Length,
+                        Declaration().Matches(content).Select(m => m.Groups[1].Value).Distinct(StringComparer.Ordinal).ToArray());
+                }
             }
             current[relative] = entry;
 

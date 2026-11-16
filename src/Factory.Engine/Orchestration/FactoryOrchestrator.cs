@@ -1332,15 +1332,76 @@ public sealed partial class FactoryOrchestrator(
             }
         }
 
+        // Types from the shared frameworks the projects reference, such as ASP.NET Core's UserManager, which no package holds.
+        var framework = new List<ContextFile>();
+        if (budget > 0)
+        {
+            foreach (var type in PackageDefinitions.FindFramework(repository, named, DefinitionFinder.DeclaredNames(repository), MaxFrameworkTypes, Math.Min(MaxPackageTypeChars, settings.MaxFileChars)))
+            {
+                if (type.Content!.Length > budget) break;
+                framework.Add(type);
+                budget -= type.Content.Length;
+            }
+        }
+
+        // The repository's own Razor components, as their parameters. Their markup is no use to code that uses them.
+        var components = new List<ContextFile>();
+        if (budget > 0)
+        {
+            foreach (var component in await ReadComponentsAsync(context, DefinitionFinder.FindComponents(repository, named, planned, MaxComponents), ct))
+            {
+                if (component.Content!.Length > budget) break;
+                components.Add(component);
+                budget -= component.Content.Length;
+            }
+        }
+
         var name = AgentProfiles.Resolve(settings, role).DisplayName;
         if (definitions.Count > 0)
             await LogAsync(context.Run.Id, subtask.Id, AgentLogKind.Info, context.Run.CurrentStage,
                 $"Gave the {name} the definitions of types it names: {string.Join(", ", definitions.Select(f => f.RelativePath))}.", ct);
+        if (components.Count > 0)
+            await LogAsync(context.Run.Id, subtask.Id, AgentLogKind.Info, context.Run.CurrentStage,
+                $"Gave the {name} the parameters of Razor components it names: {string.Join(", ", components.Select(f => f.RelativePath["component ".Length..]))}.", ct);
+        if (framework.Count > 0)
+            await LogAsync(context.Run.Id, subtask.Id, AgentLogKind.Info, context.Run.CurrentStage,
+                $"Gave the {name} the signatures of framework types it names: {string.Join(", ", framework.Select(f => f.RelativePath["framework ".Length..]))}.", ct);
         if (packaged.Count > 0)
             await LogAsync(context.Run.Id, subtask.Id, AgentLogKind.Info, context.Run.CurrentStage,
                 $"Gave the {name} the signatures of package types it names: {string.Join(", ", packaged.Select(f => f.RelativePath["package ".Length..]))}.", ct);
-        return definitions.Count + packaged.Count == 0 ? "" : RepositoryScanner.Render([.. definitions, .. packaged]);
+        return definitions.Count + components.Count + packaged.Count + framework.Count == 0
+            ? ""
+            : RepositoryScanner.Render([.. definitions, .. components, .. packaged, .. framework]);
     }
+
+    /// <summary>
+    /// Each component as a caller sees it: its name, directives and parameters. A component Git ignores, or whose name
+    /// looks like a secrets file, is left out, as its text may not go into a prompt in any form.
+    /// </summary>
+    private static async Task<IReadOnlyList<ContextFile>> ReadComponentsAsync(PipelineContext context, IReadOnlyList<string> paths, CancellationToken ct)
+    {
+        if (paths.Count == 0) return [];
+        var repository = context.Task.RepositoryPath;
+        var ignored = await context.Git.GetIgnoredAsync(paths, ct);
+        var components = new List<ContextFile>();
+        foreach (var path in paths.Where(p => !ignored.Contains(p) && !FilePatcher.IsSecretPath(p)))
+        {
+            try
+            {
+                var full = FilePatcher.ResolveSafePath(repository, path);
+                components.Add(new ContextFile($"component {path}", RazorComponents.Describe(path, await File.ReadAllTextAsync(full, ct), File.Exists(full + ".cs"), MaxComponentChars), false));
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or PatchRejectedException)
+            {
+                // A file that went away or can't be read is one definition fewer, not a failed subtask.
+            }
+        }
+        return components;
+    }
+
+    private const int MaxFrameworkTypes = 4;
+    private const int MaxComponents = 6;
+    private const int MaxComponentChars = 3000;
 
     private const int MaxPackageTypes = 6;
     private const int MaxPackageTypeChars = 6000;

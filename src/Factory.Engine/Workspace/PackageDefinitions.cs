@@ -14,6 +14,8 @@ namespace Factory.Engine.Workspace;
 /// own source, such as a UI library's components. Without them an agent guesses at a package's namespaces, members and
 /// return types from memory. Read from the compile assemblies that a restore lists in each project's
 /// obj/project.assets.json, so it only knows packages once the repository has been restored or built.
+/// The same goes for the shared frameworks a project references beyond the base class library, such as ASP.NET Core,
+/// whose types (UserManager, NavigationManager) come with the SDK and not in a package.
 /// </summary>
 public static partial class PackageDefinitions
 {
@@ -21,9 +23,15 @@ public static partial class PackageDefinitions
     private const int MaxTypesPerName = 2;
 
     /// <summary>One public type in a package's compile assembly.</summary>
-    private sealed record PackageType(string Package, string Version, string AssemblyPath, string FullName);
+    private sealed record PackageType(string Package, string Version, string AssemblyPath, string FullName, bool Framework = false);
 
-    private sealed record Index(string Stamp, IReadOnlyList<string> AssemblyPaths, Dictionary<string, List<PackageType>> Types);
+    /// <param name="FrameworkTypes">The public types of the shared frameworks the projects reference, other than the base class library.</param>
+    /// <param name="FrameworkResolverPaths">Every assembly of those frameworks and of the base class library they are built on.</param>
+    private sealed record Index(string Stamp, IReadOnlyList<string> AssemblyPaths, Dictionary<string, List<PackageType>> Types,
+        Dictionary<string, List<PackageType>> FrameworkTypes, IReadOnlyList<string> FrameworkPaths, IReadOnlyList<string> FrameworkResolverPaths);
+
+    /// <summary>The base class library. Agents know it well, and nearly every name in a C# file is one of its types, so it isn't looked up.</summary>
+    private const string BaseFramework = "Microsoft.NETCore.App";
 
     // By repository, rebuilt only when an assets file changes, which is when a restore changed the packages.
     private static readonly ConcurrentDictionary<string, Index> Indexes = new(StringComparer.OrdinalIgnoreCase);
@@ -44,19 +52,44 @@ public static partial class PackageDefinitions
         var index = GetIndex(repositoryPath);
         if (index is null || index.Types.Count == 0) return [];
 
+        var wanted = Wanted(index.Types, text, skip.Contains, maxTypes);
+        return wanted.Count == 0 ? [] : RenderAll(wanted, ResolverPaths(index.AssemblyPaths), index.AssemblyPaths, maxCharsPerType);
+    }
+
+    /// <summary>
+    /// The signatures of the shared-framework types the text names, such as UserManager from ASP.NET Core, for the
+    /// frameworks the repository's projects reference. Names in <paramref name="skip"/> and names a package also has
+    /// are left out, as the project compiles against those. The base class library is never looked up.
+    /// </summary>
+    public static IReadOnlyList<ContextFile> FindFramework(string repositoryPath, string text, IReadOnlySet<string> skip, int maxTypes, int maxCharsPerType)
+    {
+        if (maxTypes <= 0 || string.IsNullOrWhiteSpace(text)) return [];
+        var index = GetIndex(repositoryPath);
+        if (index is null || index.FrameworkTypes.Count == 0) return [];
+
+        var wanted = Wanted(index.FrameworkTypes, text, name => skip.Contains(name) || index.Types.ContainsKey(name), maxTypes);
+        // Framework assemblies are resolved among themselves. A package of the same name would be a second copy.
+        return wanted.Count == 0 ? [] : RenderAll(wanted, index.FrameworkResolverPaths, index.FrameworkPaths, maxCharsPerType);
+    }
+
+    private static List<PackageType> Wanted(Dictionary<string, List<PackageType>> types, string text, Func<string, bool> skip, int maxTypes)
+    {
         var wanted = new List<PackageType>();
         foreach (var name in CodeLikeName().Matches(text).Select(m => m.Value).Distinct(StringComparer.Ordinal))
         {
-            if (skip.Contains(name) || !index.Types.TryGetValue(name, out var types)) continue;
-            wanted.AddRange(types.Take(MaxTypesPerName));
+            if (skip(name) || !types.TryGetValue(name, out var named)) continue;
+            wanted.AddRange(named.Take(MaxTypesPerName));
             if (wanted.Count >= maxTypes) break;
         }
-        if (wanted.Count == 0) return [];
+        return wanted.Take(maxTypes).ToList();
+    }
 
+    private static IReadOnlyList<ContextFile> RenderAll(IReadOnlyList<PackageType> wanted, IEnumerable<string> resolverPaths, IEnumerable<string> ownPaths, int maxCharsPerType)
+    {
         var found = new List<ContextFile>();
-        using var context = new MetadataLoadContext(new PathAssemblyResolver(ResolverPaths(index.AssemblyPaths)));
-        var packagePaths = index.AssemblyPaths.ToHashSet(StringComparer.OrdinalIgnoreCase);
-        foreach (var type in wanted.Take(maxTypes))
+        using var context = new MetadataLoadContext(new PathAssemblyResolver(resolverPaths));
+        var packagePaths = ownPaths.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        foreach (var type in wanted)
         {
             string? rendered;
             try
@@ -69,7 +102,7 @@ public static partial class PackageDefinitions
                 rendered = null;
             }
             if (rendered is not null)
-                found.Add(new ContextFile($"package {type.Package} {type.Version}: {DisplayName(type.FullName)}", rendered, false));
+                found.Add(new ContextFile($"{(type.Framework ? "framework" : "package")} {type.Package} {type.Version}: {DisplayName(type.FullName)}", rendered, false));
         }
         return found;
     }
@@ -107,9 +140,106 @@ public static partial class PackageDefinitions
             }
         }
 
-        var index = new Index(stamp, assemblies.Keys.ToList(), types);
+        var (frameworkTypes, frameworkPaths, frameworkResolver) = IndexFrameworks(assetsFiles.Select(f => f.FullName).ToList());
+        var index = new Index(stamp, assemblies.Keys.ToList(), types, frameworkTypes, frameworkPaths, frameworkResolver);
         Indexes[key] = index;
         return index;
+    }
+
+    /// <summary>
+    /// The public types of the shared frameworks the projects reference, from the reference assemblies of the version
+    /// they target where the machine has them, and the nearest version otherwise.
+    /// </summary>
+    private static (Dictionary<string, List<PackageType>> Types, IReadOnlyList<string> Paths, IReadOnlyList<string> ResolverPaths) IndexFrameworks(IReadOnlyList<string> assetsPaths)
+    {
+        var types = new Dictionary<string, List<PackageType>>(StringComparer.Ordinal);
+        var references = assetsPaths.Select(FrameworkReferences).ToList();
+        var names = references.SelectMany(r => r.Names).Where(n => n != BaseFramework).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        if (names.Count == 0) return (types, [], []);
+
+        var major = references.Max(r => r.Major);
+        var packageFolders = references.SelectMany(r => r.PackageFolders).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        var paths = new List<string>();
+        foreach (var name in names)
+        {
+            if (FrameworkFolder(name, major, packageFolders) is not { } folder) continue;
+            foreach (var path in Directory.EnumerateFiles(folder.Path, "*.dll"))
+            {
+                paths.Add(path);
+                foreach (var fullName in PublicTypeNames(path))
+                {
+                    var simple = SimpleName(fullName);
+                    if (!types.TryGetValue(simple, out var list)) types[simple] = list = [];
+                    list.Add(new PackageType(name, folder.Version.ToString(), path, fullName, Framework: true));
+                }
+            }
+        }
+
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var resolver = paths
+            .Concat(FrameworkFolder(BaseFramework, major, packageFolders) is { } core ? Directory.EnumerateFiles(core.Path, "*.dll") : FrameworkAssemblies())
+            .Where(p => seen.Add(Path.GetFileNameWithoutExtension(p)))
+            .ToList();
+        return (types, paths, resolver);
+    }
+
+    /// <summary>The shared frameworks one project references, the newest .NET version it targets, and where its packages are kept.</summary>
+    internal static (IReadOnlyList<string> Names, int Major, IReadOnlyList<string> PackageFolders) FrameworkReferences(string assetsPath)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(File.ReadAllText(assetsPath));
+            var root = document.RootElement;
+            var names = new List<string>();
+            var major = 0;
+            if (root.TryGetProperty("project", out var project) && project.TryGetProperty("frameworks", out var frameworks))
+            {
+                foreach (var framework in frameworks.EnumerateObject())
+                {
+                    if (TargetVersion().Match(framework.Name) is { Success: true } match) major = Math.Max(major, int.Parse(match.Groups[1].Value));
+                    if (!framework.Value.TryGetProperty("frameworkReferences", out var referenced)) continue;
+                    names.AddRange(referenced.EnumerateObject().Select(r => r.Name));
+                }
+            }
+            var folders = root.TryGetProperty("packageFolders", out var packageFolders) ? packageFolders.EnumerateObject().Select(f => f.Name).ToList() : [];
+            return (names, major, folders);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or InvalidOperationException)
+        {
+            return ([], 0, []);
+        }
+    }
+
+    // net8.0, net9.0-windows and the like. Older names such as netstandard2.0 and net48 have no shared framework to read.
+    [GeneratedRegex(@"^net(\d+)\.\d+")]
+    private static partial Regex TargetVersion();
+
+    /// <summary>
+    /// Where a shared framework's assemblies are: its reference pack, in the SDK or the NuGet cache, or else the
+    /// installed runtime. The version the projects target is preferred, then the nearest newer one, then an older one.
+    /// </summary>
+    private static (string Path, Version Version)? FrameworkFolder(string name, int major, IReadOnlyList<string> packageFolders)
+    {
+        var runtime = RuntimeEnvironment.GetRuntimeDirectory();
+        var shared = Path.GetDirectoryName(Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(runtime)));
+        var dotnet = shared is null ? null : Path.GetDirectoryName(shared);
+
+        var candidates = new List<(string Path, Version Version)>();
+        var packs = packageFolders.Select(f => Path.Combine(f, $"{name}.Ref".ToLowerInvariant())).ToList();
+        if (dotnet is not null) packs.Insert(0, Path.Combine(dotnet, "packs", $"{name}.Ref"));
+        foreach (var (path, version) in packs.SelectMany(Versions))
+        {
+            var reference = Path.Combine(path, "ref", $"net{version.Major}.0");
+            if (Directory.Exists(reference)) candidates.Add((reference, version));
+        }
+        if (shared is not null) candidates.AddRange(Versions(Path.Combine(shared, name)));
+        if (candidates.Count == 0) return null;
+
+        return candidates
+            .OrderBy(c => major == 0 || c.Version.Major == major ? 0 : c.Version.Major > major ? 1 : 2)
+            .ThenBy(c => major == 0 ? 0 : Math.Abs(c.Version.Major - major))
+            .ThenByDescending(c => c.Version)
+            .First();
     }
 
     /// <summary>Each project's obj/project.assets.json, skipping the folders the repository scan skips.</summary>
@@ -255,7 +385,7 @@ public static partial class PackageDefinitions
     {
         var builder = new StringBuilder();
         builder.Append("// From the ").Append(source.Package).Append(' ').Append(source.Version)
-            .Append(" package: its public members, without bodies.\n");
+            .Append(source.Framework ? " shared framework" : " package").Append(": its public members, without bodies.\n");
         if (type.Namespace is { Length: > 0 } ns) builder.Append("namespace ").Append(ns).Append(";\n\n");
 
         if (IsDelegate(type))
