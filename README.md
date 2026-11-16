@@ -37,7 +37,7 @@ You need:
 
    Then open http://localhost:5199. On Windows, `./run.ps1` does the same and opens your browser for you.
 3. **Connect the model.** In **Settings**, pick your server and press **Test**. Choose the model ID your server actually reports. The default is `qwen3.8`, and servers often name it differently.
-4. **Start a run.** In **New run**, paste or upload your spec, point at a clean Git repository, and set the verification command, or leave it on automatic detection.
+4. **Start a run.** In **New run**, paste or upload your spec, point at a clean Git repository, and set the verification command, or leave it on automatic detection. Add extra checks for files your build doesn't cover, such as `az bicep build` for `infra/**`.
 
 New to this? Try a small, throwaway repository first, so you can watch a whole run before trusting it with anything you care about.
 
@@ -107,7 +107,7 @@ What it does to limit the damage:
 
 - **Clean tree required.** A run won't start with uncommitted changes, so rollbacks can't touch your work.
 - **Separate branch.** Work stays on `factory/run-N`. Rollback refuses to run on any other branch, and nothing merges until you click Merge.
-- **No unreviewed commands.** Verification commands proposed by Hatchet's planner only run if you approved them at plan review. Otherwise Hatchet runs your own command, or one it detects from the repository. A plan handed over through MCP counts as approved by whoever handed it over, but an MCP client can't approve commands proposed by Hatchet's planner.
+- **No unreviewed commands.** Verification commands proposed by Hatchet's planner only run if you approved them at plan review. Otherwise Hatchet runs your own command, or one it detects from the repository. A plan handed over through MCP counts as approved by whoever handed it over, and so do the extra checks handed over with it, but an MCP client can't approve commands proposed by Hatchet's planner. Extra checks are fixed when the run starts.
 - **The check command is pinned.** A detected check command is recorded when the run starts. If the model's edits change what Hatchet detects, such as a new `package.json`, the run pauses instead of running the new command, until you choose Re-verify. A Bug Fixer patch also may not delete a test or change the files that define the check (`package.json`, solution and test project files, `Makefile` and the like) unless the subtask's plan lists them. Such a patch is refused and the fixer is told to fix the code instead.
 - **Writes stay inside the repo.** A patch with an absolute path, a `..`, a symlink on the way, or a target in `.git` is rejected whole, before anything is written. That includes `.git` under another spelling: `.git.`, `.git ` with a trailing space, the Windows short name `GIT~1`, or `.git` with invisible Unicode characters in it. Any Windows short name that stands in for an existing file is refused, so a file can't be reached under a name the checks don't recognise. The path is checked again after it is resolved.
 - **Config that runs code needs a plan.** Writes to `.github/`, `.claude/`, `.hatchet/`, `.vscode/`, `.husky/`, `.gitattributes`, `.gitmodules`, `.npmrc` and `nuget.config` only happen when the subtask's plan lists the file as a target, or you name it in guidance typed in Hatchet. Otherwise nothing is written and the run pauses. Guidance an MCP client sends doesn't count.

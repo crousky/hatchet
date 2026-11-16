@@ -93,6 +93,20 @@
         </div>
 
         <div class="field">
+            <label>Extra checks <span class="muted">(optional)</span></label>
+            @foreach (var gate in _gates)
+            {
+                <div class="gate-row">
+                    <input autocomplete="off" data-1p-ignore data-lpignore="true" class="mono" spellcheck="false" placeholder="infra/**" title="Path pattern: which changed files this check is for" aria-label="Path pattern" @bind="gate.Paths" @bind:event="oninput" />
+                    <input autocomplete="off" data-1p-ignore data-lpignore="true" class="mono" spellcheck="false" placeholder="az bicep build --file infra/main.bicep" title="Command, run from the repository root" aria-label="Command" @bind="gate.Command" @bind:event="oninput" />
+                    <button class="btn btn-ghost btn-small" title="Remove this check" aria-label="Remove this check" @onclick="() => _gates.Remove(gate)"><Icon Name="x" Size="13" /></button>
+                </div>
+            }
+            <div><button class="btn btn-small" disabled="@(_gates.Count >= VerificationGates.MaxGates)" @onclick="() => _gates.Add(new GateRow())"><Icon Name="plus" Size="13" /> Add a check</button></div>
+            <div class="hint">For files the main check doesn't cover, such as infrastructure templates or scripts. A check runs after the main one, only for a subtask that changed a file matching its pattern, and must exit 0. Use <code>infra/**</code> for a folder, <code>*.sh</code> for an extension.</div>
+        </div>
+
+        <div class="field">
             <label for="title">Title <span class="muted">(optional)</span></label>
             <input autocomplete="off" data-1p-ignore data-lpignore="true" id="title" placeholder="Taken from the spec's first heading" @bind="_title" />
         </div>
@@ -157,6 +171,13 @@
     private IReadOnlyList<ModelOption> _options = [new("", "As set in Settings", "")];
     private string _model = "";
     private CancellationTokenSource? _probeDelay;
+    private readonly List<GateRow> _gates = [];
+
+    private sealed class GateRow
+    {
+        public string Paths { get; set; } = "";
+        public string Command { get; set; } = "";
+    }
 
     private bool RepositoryReady => _probe is { IsGitRepository: true } && (_openRun is not null || _probe is { IsClean: true, CurrentBranch: not null });
     private bool CanStart => StartBlockedReason is null && !_starting;
@@ -246,7 +267,8 @@
         _error = null;
         try
         {
-            var run = await Orchestrator.StartRunAsync(new NewRunRequest(_path, _spec, _title, _customCommand ? _command : null, _reviewPlan, _model));
+            var run = await Orchestrator.StartRunAsync(new NewRunRequest(_path, _spec, _title, _customCommand ? _command : null, _reviewPlan, _model,
+                Gates: _gates.Select(g => new VerificationGate(g.Paths, g.Command)).ToList()));
             Nav.NavigateTo($"/runs/{run.Id}");
         }
         catch (FactoryValidationException ex)

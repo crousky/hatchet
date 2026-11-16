@@ -11,6 +11,12 @@ public sealed class FactoryTask
     /// <summary>The user's configured verification command; used by integration and any subtask without its own approved command.</summary>
     public string VerificationCommand { get; set; } = "";
 
+    /// <summary>
+    /// The extra checks, as JSON <see cref="VerificationGate"/>s: commands that run after the main one when a subtask
+    /// changed files matching their pattern. Null when there are none.
+    /// </summary>
+    public string? GatesJson { get; set; }
+
     public bool RequirePlanApproval { get; set; } = true;
 
     /// <summary>

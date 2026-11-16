@@ -29,10 +29,14 @@ public sealed partial class FactoryOrchestrator(
     ICommandRunner commands,
     FactoryEventBus bus,
     ILogger<FactoryOrchestrator> logger,
-    SkillLibrary? skills = null) : IRunStarter
+    SkillLibrary? skills = null,
+    Func<string, bool>? toolInstalled = null) : IRunStarter
 {
     /// <summary>Where the skills for a run's repository come from. Without one, only the repository's own skills are used.</summary>
     public SkillLibrary Skills { get; } = skills ?? new SkillLibrary(null);
+
+    /// <summary>Whether the machine has a program an extra check starts with. Tests replace it, as they don't run real commands.</summary>
+    private readonly Func<string, bool> _toolInstalled = toolInstalled ?? VerificationGates.IsInstalled;
 
     private enum SubtaskEntry { Start, Verify, Fix }
 
@@ -274,6 +278,9 @@ public sealed partial class FactoryOrchestrator(
             throw new FactoryValidationException("A supplied plan needs at least one subtask, and every subtask needs a title and a description.");
 
         var command = request.VerificationCommand?.Trim() ?? "";
+        var gates = VerificationGates.Normalize(request.Gates);
+        // Found now, a missing tool costs nothing. Found later, it would stop the run at the first subtask to touch the gate's files.
+        RequireGateTools(gates);
         var path = Path.GetFullPath(request.RepositoryPath.Trim());
         // A profile that Settings doesn't have is refused here, before there is a run to fail part-way.
         var modelChoice = ModelChoices.Require(await settingsStore.GetAsync(ct), request.ModelChoice);
@@ -287,6 +294,7 @@ public sealed partial class FactoryOrchestrator(
             RepositoryPath = path,
             ArchitectureSpec = request.ArchitectureSpec,
             VerificationCommand = command,
+            GatesJson = VerificationGates.ToJson(gates),
             RequirePlanApproval = request.RequirePlanApproval,
             PlanReviewByUser = request.RequirePlanApproval && request.PlanReviewByUser,
             SuppliedPlanJson = plan is null ? null : JsonSerializer.Serialize(plan),
@@ -299,6 +307,11 @@ public sealed partial class FactoryOrchestrator(
         foreach (var warning in warnings)
             await LogAsync(run.Id, null, AgentLogKind.Warning, PipelineStage.Decompose, $"Plan step {warning.Step}, \"{warning.StepTitle}\": {warning.Message}", CancellationToken.None);
         return (run, warnings);
+    }
+
+    private void RequireGateTools(IReadOnlyList<VerificationGate> gates)
+    {
+        if (VerificationGates.MissingTool(gates, _toolInstalled) is { } missing) throw new FactoryValidationException(missing);
     }
 
     private static List<FactorySubtask> ToSubtasks(int runId, IReadOnlyList<SubtaskEdit> plan) =>
@@ -321,6 +334,7 @@ public sealed partial class FactoryOrchestrator(
     {
         var previous = await store.GetRunAsync(runId, ct);
         await RequireModelChoiceAsync(previous, ct);
+        RequireGateTools(VerificationGates.Parse(previous.Task.GatesJson));
         await RequireStartableRepositoryAsync(previous.Task.RepositoryPath, ct);
         var run = await store.CreateRunAsync(previous.TaskId, null, ct);
         Launch(run.Id, new QueuedRequest(RequestKind.Start));
@@ -1686,13 +1700,49 @@ public sealed partial class FactoryOrchestrator(
             pending.Length == 0 ? "Accepted that no check command is detected any more." : $"Accepted the new check command `{pending}`.", ct);
     }
 
-    /// <summary>Returns null when there is nothing to run yet: no command was given and no build or tests can be detected.</summary>
+    /// <summary>
+    /// Runs the main check, and then each extra check whose pattern matches a file the subtask changed. The first
+    /// failure is the result, so it goes to the Bug Fixer like any other. Returns null when there was nothing to run.
+    /// </summary>
     private async Task<CommandResult?> VerifyAsync(PipelineContext context, FactorySubtask subtask, CancellationToken ct)
     {
         var run = context.Run;
         PauseIfRequested(run.Id);
         await SetSubtaskStatusAsync(subtask, SubtaskStatus.Verifying, ct);
         await SetStageAsync(run, PipelineStage.Verify, subtask.Id, ct);
+
+        var main = await RunMainCheckAsync(context, subtask, ct);
+        if (main is { Success: false }) return main;
+        var gates = VerificationGates.Parse(context.Task.GatesJson);
+        if (gates.Count == 0) return main;
+
+        // Deleted files count too: a gate still has a say when what it checks is removed.
+        await context.Git.StageAllAsync(ct);
+        var changed = await context.Git.GetStagedFilesAsync(ct);
+        var passed = new List<CommandResult>();
+        if (main is not null) passed.Add(main);
+        foreach (var gate in VerificationGates.For(gates, changed))
+        {
+            if (passed.Any(p => p.Command == gate.Command)) continue;
+            await LogAsync(run.Id, subtask.Id, AgentLogKind.Info, PipelineStage.Verify,
+                $"The subtask changed files matching \"{gate.Paths}\", so the extra check `{gate.Command}` runs too.", ct);
+            var result = await RunCommandAsync(context, subtask.Id, PipelineStage.Verify, gate.Command, ct);
+            if (!result.Success) return result;
+            passed.Add(result);
+        }
+
+        // The reviewer is told about every check that ran, not only the first.
+        return passed.Count <= 1
+            ? passed.FirstOrDefault()
+            : new CommandResult(string.Join(" && ", passed.Select(p => p.Command)), 0, false,
+                string.Join("\n\n", passed.Select(p => $"$ {p.Command}\n{PromptBuilder.Tail(p.Output, 4000 / passed.Count)}")),
+                TimeSpan.FromTicks(passed.Sum(p => p.Duration.Ticks)));
+    }
+
+    /// <summary>Returns null when there is nothing to run yet: no command was given and no build or tests can be detected.</summary>
+    private async Task<CommandResult?> RunMainCheckAsync(PipelineContext context, FactorySubtask subtask, CancellationToken ct)
+    {
+        var run = context.Run;
 
         if (ConfiguredCommand(context.Task, subtask) is { } configured)
             return await RunCommandAsync(context, subtask.Id, PipelineStage.Verify, configured, ct);
@@ -2364,6 +2414,15 @@ public sealed partial class FactoryOrchestrator(
         null;
 
     private static string DescribeVerification(FactoryTask task)
+    {
+        var gates = VerificationGates.Parse(task.GatesJson);
+        return gates.Count == 0
+            ? DescribeMainCheck(task)
+            : $"{DescribeMainCheck(task)} Extra checks run as well when a subtask changes files matching their pattern: "
+              + string.Join("; ", gates.Select(g => $"`{g.Command}` for {g.Paths}")) + ".";
+    }
+
+    private static string DescribeMainCheck(FactoryTask task)
     {
         if (task.VerificationCommand.Length > 0)
             return $"The user configured `{task.VerificationCommand}`. It runs after every subtask and must pass.";
