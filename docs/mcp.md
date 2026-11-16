@@ -17,7 +17,7 @@ Then plan a change with Claude in conversation and ask it to hand the plan to Ha
 | Tool | Does |
 |---|---|
 | `probe_repository` | Checks a folder is a clean Git repository and how it would be verified |
-| `start_run` | Starts a run from a spec, with a ready-made plan or with Hatchet's planner, and a `model` if you want one. See [Choosing the model](#choosing-the-model) |
+| `start_run` | Starts a run from a spec, with a ready-made plan or with Hatchet's planner, and a `model` if you want one. See [Choosing the model](#choosing-the-model). A plan is checked against the repository first: see [Plan warnings](#plan-warnings) |
 | `list_runs`, `get_run` | Status, project, place in line, progress, subtasks, recent events and working time left. When a run needs a person, `get_run` also returns `needsFromYou`: what happened, what is blocking it, what guidance to give and what each `resume_run` action needs from you |
 | `get_subtask` | One subtask in full: last failure, fix history, review verdict, diff |
 | `approve_plan` | Approves the plan of a run you started with `reviewPlanInHatchet: true`, without the commands Hatchet's planner proposed. It refuses every other plan: one you didn't ask to review, one for a defect or change report, and one longer than Hatchet builds unattended (40 subtasks by default). Those are approved by you, in Hatchet |
@@ -43,6 +43,24 @@ Besides runs, Claude can make one-off requests about a repository. They show on 
 Commands run in an isolated copy of the latest commit, so they never disturb a run that is building in the same folder, and uncommitted work isn't included. One `run_app` or `run_command` can run per repository at a time. Whoever holds the token can run commands this way, with your permissions, so keep it private.
 
 Repository and screenshot paths must be on this computer: network paths (`\\server\share`, `//server/share`) are refused.
+
+## Plan warnings
+
+When `start_run` is given a plan, Hatchet checks it against the repository before anything is built, and the result's `planWarnings` lists what doesn't match. Each warning has a `kind`, the `step` it is in (counting from 1), the step's title, the skill or path it is about, and a sentence saying what will happen.
+
+| `kind` | Means |
+|---|---|
+| `unknown_skill` | A step names a skill that doesn't exist. Its agents go without it |
+| `file_to_modify_missing` | A file to modify isn't there, and no earlier step creates it |
+| `file_to_read_missing` | A file to read isn't there, and no earlier step creates it |
+| `file_to_create_exists` | A file to create already exists, or an earlier step creates it |
+| `secret_path` | The path looks like a secrets file by its name, so the agents aren't shown it and a new one isn't committed |
+| `ignored_path` | Git ignores the path, so the agents aren't shown it and a change to it isn't committed |
+| `invalid_path` | The path is one Hatchet won't read or write: outside the repository, absolute, or in `.git` |
+
+These are warnings, not errors, and the run starts all the same. A plan with nothing to report returns an empty list. If a warning is a mistake in the plan, cancel the run and start it again with the plan corrected, or pass `reviewPlanInHatchet: true` so the plan can be fixed in Hatchet before it builds. The same warnings are written to the run's log, so whoever approves the plan sees them.
+
+The check reads the working tree as it is when the run is started. If another run is open in the repository, that is the other run's branch, and files it has added or removed can show up as warnings.
 
 ## Choosing the model
 

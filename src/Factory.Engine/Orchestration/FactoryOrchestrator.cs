@@ -257,7 +257,16 @@ public sealed partial class FactoryOrchestrator(
     /// Starts a run. With a <paramref name="plan"/>, for example one worked out with Claude over MCP, Hatchet's own
     /// planner is skipped. Whoever supplied the plan has approved it, so its verification commands may run.
     /// </summary>
-    public async Task<FactoryRun> StartRunAsync(NewRunRequest request, IReadOnlyList<SubtaskEdit>? plan, CancellationToken ct = default)
+    public async Task<FactoryRun> StartRunAsync(NewRunRequest request, IReadOnlyList<SubtaskEdit>? plan, CancellationToken ct = default) =>
+        (await StartPlannedRunAsync(request, plan, ct)).Run;
+
+    /// <summary>
+    /// Starts a run as <see cref="StartRunAsync(NewRunRequest, IReadOnlyList{SubtaskEdit}?, CancellationToken)"/> does, and
+    /// says what in a supplied plan doesn't match the repository: skills that don't exist, files to change that aren't
+    /// there, files to create that are, and paths the agents won't be shown. The run starts whatever is found, and its
+    /// log carries the same warnings for whoever approves the plan.
+    /// </summary>
+    public async Task<(FactoryRun Run, IReadOnlyList<PlanWarning> Warnings)> StartPlannedRunAsync(NewRunRequest request, IReadOnlyList<SubtaskEdit>? plan, CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(request.ArchitectureSpec))
             throw new FactoryValidationException("The architecture spec is empty.");
@@ -269,6 +278,8 @@ public sealed partial class FactoryOrchestrator(
         // A profile that Settings doesn't have is refused here, before there is a run to fail part-way.
         var modelChoice = ModelChoices.Require(await settingsStore.GetAsync(ct), request.ModelChoice);
         await RequireStartableRepositoryAsync(path, ct);
+        // Checked now, against the tree the plan was written for, and before the run's own branch changes it.
+        IReadOnlyList<PlanWarning> warnings = plan is null ? [] : await PlanValidator.ValidateAsync(path, plan, Skills.Load(path), ct);
 
         var task = new FactoryTask
         {
@@ -285,7 +296,9 @@ public sealed partial class FactoryOrchestrator(
         // Once the run is saved it has to be launched, or it would sit queued with no pipeline behind it.
         var run = await store.CreateRunAsync(null, task, CancellationToken.None);
         Launch(run.Id, new QueuedRequest(RequestKind.Start));
-        return run;
+        foreach (var warning in warnings)
+            await LogAsync(run.Id, null, AgentLogKind.Warning, PipelineStage.Decompose, $"Plan step {warning.Step}, \"{warning.StepTitle}\": {warning.Message}", CancellationToken.None);
+        return (run, warnings);
     }
 
     private static List<FactorySubtask> ToSubtasks(int runId, IReadOnlyList<SubtaskEdit> plan) =>

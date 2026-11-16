@@ -2382,6 +2382,28 @@ public class OrchestratorTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task A_supplied_plan_that_does_not_match_the_repository_starts_with_warnings_in_the_result_and_the_log()
+    {
+        _llm.Enqueue(AgentRole.TaskPlanner, Plan("unused"));
+        var (run, warnings) = await _orchestrator.StartPlannedRunAsync(new NewRunRequest(_repo.Path, "# Spec", null, "verify", true),
+            [new SubtaskEdit(null, "alpha", "Build alpha", ["missing.txt"], ["alpha.txt"], [], "", ["made-up"])]);
+        await WaitForAsync(run.Id, RunStatus.AwaitingPlanApproval);
+
+        Assert.Equal([PlanWarningKinds.UnknownSkill, PlanWarningKinds.FileToModifyMissing], warnings.Select(w => w.Kind));
+        var logs = await _store.GetLogsAsync(run.Id);
+        Assert.Contains(logs, l => l is { Kind: AgentLogKind.Warning } && l.Message.StartsWith("Plan step 1, \"alpha\": There is no skill called \"made-up\""));
+        Assert.Contains(logs, l => l is { Kind: AgentLogKind.Warning } && l.Message.StartsWith("Plan step 1, \"alpha\": \"missing.txt\" is listed to modify but doesn't exist"));
+
+        // A plan with nothing wrong, and a run that Hatchet plans itself, have none.
+        using var other = await SecondRepositoryAsync();
+        var clean = await _orchestrator.StartPlannedRunAsync(new NewRunRequest(other.Path, "# Spec", null, "verify", true),
+            [new SubtaskEdit(null, "beta", "Build beta", [], ["beta.txt"], [], "")]);
+        Assert.Empty(clean.Warnings);
+        await WaitForAsync(clean.Run.Id, RunStatus.AwaitingPlanApproval);
+        Assert.DoesNotContain(await _store.GetLogsAsync(clean.Run.Id), l => l.Message.StartsWith("Plan step"));
+    }
+
+    [Fact]
     public void A_profile_run_waits_in_the_pool_its_role_map_puts_it_in()
     {
         Assert.Equal(WorkerPool.Local, FactoryOrchestrator.PoolFor(_settings.Settings, "profile:local"));
