@@ -12,7 +12,9 @@ public sealed record LlmResult(
     int PromptTokens,
     int CompletionTokens,
     string? FinishReason,
-    TimeSpan Duration);
+    TimeSpan Duration,
+    // What the engine says the call cost in US dollars, when it says. Claude Code does. A local server doesn't.
+    double? CostUsd = null);
 
 public interface ILlmClient
 {

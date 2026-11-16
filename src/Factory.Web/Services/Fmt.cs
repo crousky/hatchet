@@ -93,7 +93,28 @@ public static class Fmt
         _ => "sparkle"
     };
 
-    public static string Tokens(int count) => count switch
+    /// <summary>A cost in US dollars: cents for most, and tenths of a cent under ten cents so a small figure doesn't read as nothing.</summary>
+    public static string Usd(double cost) => cost is > 0 and < 0.1 ? $"${cost:0.000}" : $"${cost:0.00}";
+
+    /// <summary>A run's or subtask's tokens in a few words, such as "12.3k local · 4.5k Claude ($0.42)".</summary>
+    public static string Usage(RunUsage usage)
+    {
+        var parts = new List<string>();
+        if (usage.LocalTokens > 0 || usage.ClaudeTokens == 0) parts.Add($"{Tokens(usage.LocalTokens)} local");
+        if (usage.ClaudeTokens > 0) parts.Add($"{Tokens(usage.ClaudeTokens)} Claude" + (usage.ClaudeCostUsd is > 0 ? $" ({Usd(usage.ClaudeCostUsd.Value)})" : ""));
+        return string.Join(" · ", parts);
+    }
+
+    /// <summary>One line for each model, for a tooltip.</summary>
+    public static string UsageDetail(RunUsage usage) =>
+        usage.ByModel.Count == 0
+            ? "No model has been called yet."
+            : string.Join("\n", usage.ByModel.Select(u =>
+                $"{(u.Model is null ? "Local model" : ClaudeCodeOptions.ModelLabel(u.Model))}: {u.PromptTokens:N0} prompt and {u.CompletionTokens:N0} completion tokens in {u.Calls} {(u.Calls == 1 ? "call" : "calls")}"
+                + (u.CostUsd is > 0 ? $", {Usd(u.CostUsd.Value)}" : "")))
+              + (usage.ClaudeCostUsd is > 0 ? "\nThe cost is Claude Code's own figure at API prices. On a subscription it measures use and is not a bill." : "");
+
+    public static string Tokens(long count) => count switch
     {
         < 1000 => count.ToString(),
         < 1_000_000 => $"{count / 1000.0:0.#}k",

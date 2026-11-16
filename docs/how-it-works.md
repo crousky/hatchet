@@ -76,6 +76,12 @@ A local model at low temperature sometimes gets stuck repeating itself. It might
 
 When the window really is too small, the pause says so and tells you how to load the model with a bigger one. Before a call, Hatchet leaves the type definitions out of a prompt that wouldn't leave the model room to answer. The planner and agents are also told never to type out long data from memory, such as registries or lookup tables. Instead they plan a script that fetches the data, plus a small sample.
 
+## Usage and cost
+
+Hatchet records the prompt and completion tokens of every model call, and which model answered. The run page and `get_run` show them split between the local model and Claude, because one costs time and the other money: the run's total, a line for each model, and each subtask's share. For calls on Claude, Hatchet also keeps the cost Claude Code reports for the call, which counts cache reads and writes at their own prices. That figure is what the calls would cost at API prices. On a Claude subscription it measures use and is not a bill. Runs from before this was recorded show their Claude tokens with no cost.
+
+**The token ceiling.** Settings has a token ceiling per subtask, off by default. When it is set, Hatchet adds up what a subtask has used before each fix attempt and each review, and before it starts. Once that reaches the ceiling, the run pauses with the count. **Resume** lets the subtask use as many again, counted from the pause, and you can also restart or skip it. A call under way is never cut off, so a subtask can go over by one call. It is your spending limit, so over MCP a subtask paused here can be skipped but not resumed.
+
 ## Strong subtasks
 
 Each subtask has a tier, `local` or `strong`. A local one, which is every subtask unless something says otherwise, is built by the agents as the run has them. A strong one has its Context Specifier, Code Generator and Bug Fixer moved to the models the `strong` run profile in Settings names for them, and to the profile Hatchet ships with if you removed yours. The planner and the reviewer work for the whole run and stay put.

@@ -11,6 +11,7 @@ Hatchet is for people who want to put a local model (it's built around Qwen 3.8,
 - **A planner you can overrule.** Hatchet splits your spec into ordered subtasks and shows you the plan. Approve, edit or reorder it before anything is built.
 - **Your tests are the judge.** Every subtask must pass your build and test command before a reviewer sees it. Failures go to a fixer, with a budget.
 - **One commit per subtask**, on a `factory/run-N` branch. Nothing merges until you click Merge, and nothing is pushed.
+- **You see what it used.** Tokens are counted apart for the local model and Claude, for the run and for each subtask, with Claude Code's own cost figure. An optional token ceiling pauses a subtask that keeps spending.
 - **Stuck work comes back to you.** When a subtask runs out of attempts, or the model server goes away, the run pauses and asks. You can give guidance, fix it by hand and re-verify, skip it, or cancel.
 - **Claude as a backup, or as the whole crew.** Any agent can run on Claude through the Claude Code CLI, which uses your Claude login, not an API key. By default, fixes the local model can't land escalate to Claude.
 - **Built for small-model failure modes.** It catches runaway repetition, trims prompts that don't fit the context window, feeds agents real type signatures from your repo and its NuGet packages, and keeps fixes from routing around the spec. See [how it works](docs/how-it-works.md).

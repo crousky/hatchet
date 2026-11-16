@@ -245,7 +245,9 @@ internal sealed class ClaudeStreamParser(Action<LlmDelta>? onDelta)
         var usage = _result["usage"];
         var promptTokens = Int(usage?["input_tokens"]) + Int(usage?["cache_creation_input_tokens"]) + Int(usage?["cache_read_input_tokens"]);
         var finishReason = Str(_result["stop_reason"]) == "max_tokens" ? "length" : "stop";
-        return new LlmResult(content, _thinking.ToString(), promptTokens, Int(usage?["output_tokens"]), finishReason, _stopwatch.Elapsed);
+        // Claude Code prices the call itself, cache reads and writes included, which the token counts alone can't give.
+        var cost = _result["total_cost_usd"] is { } price && price.GetValueKind() == JsonValueKind.Number ? price.GetValue<double>() : (double?)null;
+        return new LlmResult(content, _thinking.ToString(), promptTokens, Int(usage?["output_tokens"]), finishReason, _stopwatch.Elapsed, cost);
     }
 
     private static string Explain(string error)

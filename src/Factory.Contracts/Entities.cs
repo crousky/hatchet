@@ -136,6 +136,12 @@ public sealed class FactorySubtask
     /// <summary>The guidance came through MCP from the driving agent, not from the user, so agents treat it as a suggestion.</summary>
     public bool GuidanceFromAgent { get; set; }
 
+    /// <summary>
+    /// The log entry the subtask's token allowance counts from: the pause at which it last ran over the ceiling.
+    /// Zero until then, so everything the subtask has used counts.
+    /// </summary>
+    public long TokenBudgetStart { get; set; }
+
     /// <summary>How many times an MCP client has reset this subtask's fix budgets with retry_fixer. Capped, so an agent can't loop without the user.</summary>
     public int AgentFixerResets { get; set; }
 
@@ -168,6 +174,9 @@ public sealed class AgentLogEntry
     public string? Response { get; set; }
     public int PromptTokens { get; set; }
     public int CompletionTokens { get; set; }
+
+    /// <summary>What Claude Code said the call cost, in US dollars. Null for the local model, which reports no cost.</summary>
+    public double? CostUsd { get; set; }
 
     // LLM calls and commands
     public long DurationMs { get; set; }

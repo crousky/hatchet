@@ -111,6 +111,21 @@ public sealed class EfRunStore(IDbContextFactory<FactoryDbContext> factory) : IR
             .ToDictionaryAsync(w => w.SubtaskId, w => TimeSpan.FromMilliseconds(w.Milliseconds), ct);
     }
 
+    public async Task<IReadOnlyList<UsageRow>> GetUsageAsync(int runId, long afterLogId = 0, CancellationToken ct = default)
+    {
+        await using var db = await factory.CreateDbContextAsync(ct);
+        var rows = await db.AgentLogs.AsNoTracking()
+            .Where(l => l.RunId == runId && l.Kind == AgentLogKind.LlmCall && l.Id > afterLogId)
+            .GroupBy(l => new { l.SubtaskId, l.Model })
+            .Select(g => new
+            {
+                g.Key.SubtaskId, g.Key.Model, Calls = g.Count(),
+                Prompt = g.Sum(l => (long)l.PromptTokens), Completion = g.Sum(l => (long)l.CompletionTokens), Cost = g.Sum(l => l.CostUsd ?? 0)
+            })
+            .ToListAsync(ct);
+        return rows.Select(r => new UsageRow(r.SubtaskId, r.Model, r.Calls, r.Prompt, r.Completion, r.Cost)).ToList();
+    }
+
     public async Task<DiffSnapshot> AddDiffAsync(DiffSnapshot diff, CancellationToken ct = default)
     {
         await using var db = await factory.CreateDbContextAsync(ct);

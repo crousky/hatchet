@@ -688,6 +688,9 @@ public class AdHocTests : IAsyncLifetime
         public Task<IReadOnlyDictionary<int, TimeSpan>> GetWorkBySubtaskAsync(int runId, CancellationToken ct = default) =>
             Task.FromResult<IReadOnlyDictionary<int, TimeSpan>>(new Dictionary<int, TimeSpan>());
 
+        public Task<IReadOnlyList<UsageRow>> GetUsageAsync(int runId, long afterLogId = 0, CancellationToken ct = default) =>
+            Task.FromResult<IReadOnlyList<UsageRow>>([]);
+
         public Task<FactoryRun> CreateRunAsync(int? existingTaskId, FactoryTask? newTask, CancellationToken ct = default) => throw new NotSupportedException();
         public Task<FactoryRun> GetRunAsync(int runId, CancellationToken ct = default) => throw new NotSupportedException();
         public Task UpdateRunAsync(FactoryRun run, CancellationToken ct = default) => throw new NotSupportedException();

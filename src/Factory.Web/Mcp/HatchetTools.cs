@@ -50,10 +50,12 @@ public sealed class GateSpec
 /// <param name="Model">The model choice the run was started with, such as profile:strong, or null when it runs as Settings has it.</param>
 public sealed record RunSummary(int RunId, string Title, string Status, string Project, string Repository, int SubtasksDone, int Subtasks, string? CurrentStep, string? Queue, string? PauseReason, string Url, string? Model = null);
 
-public sealed record SubtaskSummary(int Order, string Title, string Status, int FixAttempts, string Tier = SubtaskTiers.Local);
+/// <param name="ClaudeCostUsd">Claude Code's figure for the subtask's Claude calls, in US dollars. Null when it made none.</param>
+public sealed record SubtaskSummary(int Order, string Title, string Status, int FixAttempts, string Tier = SubtaskTiers.Local,
+    long LocalTokens = 0, long ClaudeTokens = 0, double? ClaudeCostUsd = null);
 
 public sealed record RunDetails(RunSummary Run, string? Branch, string? BaseBranch, bool? FinalCheckPassed, int Tokens, string? WorkLeft, IReadOnlyList<SubtaskSummary> Subtasks, IReadOnlyList<string> RecentEvents, PauseBrief? NeedsFromYou = null, string Note = McpNotes.Data, IReadOnlyList<PlanWarning>? PlanWarnings = null,
-    IReadOnlyList<VerificationGate>? Gates = null);
+    IReadOnlyList<VerificationGate>? Gates = null, RunUsage? Usage = null);
 
 public sealed record RunReportResult(RunReport Report, string Url, string Note = McpNotes.Data);
 
@@ -135,7 +137,7 @@ public sealed class HatchetTools(FactoryOrchestrator orchestrator, IRunStore sto
     }
 
     [McpServerTool(Name = "get_run", ReadOnly = true)]
-    [Description("Shows a run's status, its subtasks, recent events and, once a few subtasks are done, how much working time is likely left. If it is waiting for a person, needsFromYou explains what happened, what is blocking it, what to give the agents as guidance and what each resume_run action needs; use get_subtask for the full failure and diff. " + McpNotes.Data)]
+    [Description("Shows a run's status, its subtasks, recent events and, once a few subtasks are done, how much working time is likely left. usage splits the tokens between the local model and Claude, by model, with Claude Code's own cost figure in US dollars, and each subtask carries its share. If it is waiting for a person, needsFromYou explains what happened, what is blocking it, what to give the agents as guidance and what each resume_run action needs; use get_subtask for the full failure and diff. " + McpNotes.Data)]
     public Task<RunDetails> GetRun([Description("The run's id.")] int runId, CancellationToken ct = default) =>
         DescribeRunAsync(runId, ct);
 
@@ -268,11 +270,15 @@ public sealed class HatchetTools(FactoryOrchestrator orchestrator, IRunStore sto
                 live?.Call.SubtaskId is { } subtaskId ? (subtaskId, DateTime.UtcNow - live.StartedAt) : null)
             : null;
 
+        var usage = await store.GetUsageAsync(runId, 0, ct);
+        var bySubtask = RunUsageBuilder.BySubtask(usage);
         return new RunDetails(Summarize(run, subtasks), run.BranchName, run.BaseBranch, run.IntegrationPassed,
             run.PromptTokens + run.CompletionTokens, estimate is null ? null : Fmt.WorkLeft(estimate),
-            subtasks.OrderBy(s => s.Order).Select(s => new SubtaskSummary(s.Order, s.Title, s.Status.ToString(), s.FixAttempts, SubtaskTiers.Parse(s.Tier) ?? SubtaskTiers.Local)).ToList(),
+            subtasks.OrderBy(s => s.Order).Select(s => new SubtaskSummary(s.Order, s.Title, s.Status.ToString(), s.FixAttempts, SubtaskTiers.Parse(s.Tier) ?? SubtaskTiers.Local,
+                bySubtask.GetValueOrDefault(s.Id)?.LocalTokens ?? 0, bySubtask.GetValueOrDefault(s.Id)?.ClaudeTokens ?? 0, bySubtask.GetValueOrDefault(s.Id)?.ClaudeCostUsd)).ToList(),
             events, PauseBriefBuilder.Build(run, subtasks.FirstOrDefault(s => s.Status == SubtaskStatus.NeedsHuman)),
-            Gates: VerificationGates.Parse(run.Task.GatesJson) is { Count: > 0 } gates ? gates : null);
+            Gates: VerificationGates.Parse(run.Task.GatesJson) is { Count: > 0 } gates ? gates : null,
+            Usage: RunUsageBuilder.ForRun(usage));
     }
 
     private RunSummary Summarize(FactoryRun run, IReadOnlyList<FactorySubtask> subtasks)
