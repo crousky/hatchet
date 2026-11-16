@@ -55,7 +55,7 @@ public sealed record SubtaskSummary(int Order, string Title, string Status, int 
     long LocalTokens = 0, long ClaudeTokens = 0, double? ClaudeCostUsd = null);
 
 public sealed record RunDetails(RunSummary Run, string? Branch, string? BaseBranch, bool? FinalCheckPassed, int Tokens, string? WorkLeft, IReadOnlyList<SubtaskSummary> Subtasks, IReadOnlyList<string> RecentEvents, PauseBrief? NeedsFromYou = null, string Note = McpNotes.Data, IReadOnlyList<PlanWarning>? PlanWarnings = null,
-    IReadOnlyList<VerificationGate>? Gates = null, RunUsage? Usage = null);
+    IReadOnlyList<VerificationGate>? Gates = null, RunUsage? Usage = null, string? PlanAmendment = null);
 
 public sealed record RunReportResult(RunReport Report, string Url, string Note = McpNotes.Data);
 
@@ -190,6 +190,25 @@ public sealed class HatchetTools(FactoryOrchestrator orchestrator, IRunStore sto
         return await DescribeRunAsync(runId, ct);
     }
 
+    [McpServerTool(Name = "amend_plan")]
+    [Description("""
+        Proposes new steps in place of the ones a paused run hasn't started yet: edit them, add to them, drop some or reorder them. Pass the whole list of steps that should remain to be built, in order. Steps that are done, skipped or under way are not touched and are not part of the list.
+        The run must be paused part-way through its steps: pause_run first if it is working. Use it when what the run has learned so far changes what the later steps should be.
+        Nothing changes when you call this. The proposal waits for the user, who reads every step and command in Hatchet and approves, edits or discards it, and the run can't be resumed until they do: tell the user it is waiting. Calling it again replaces your earlier proposal.
+        planWarnings lists what in the proposed steps doesn't match the repository as it stands, as start_run does.
+        """ + " " + McpNotes.Data)]
+    public async Task<RunDetails> AmendPlan(
+        [Description("The run's id.")] int runId,
+        [Description("The steps that should remain to be built, in order. They replace every step that hasn't started.")] List<PlanStep> steps,
+        CancellationToken ct = default)
+    {
+        await RequireRunAsync(runId, ct);
+        var edits = (steps ?? []).Select(step => new SubtaskEdit(null, step.Title ?? "", step.Description ?? "",
+            step.FilesToModify ?? [], step.FilesToCreate ?? [], step.FilesToRead ?? [], step.VerificationCommand ?? "", step.Skills ?? [], step.Tier)).ToList();
+        var warnings = await Do(() => orchestrator.ProposeAmendmentAsync(runId, edits, ct));
+        return await DescribeRunAsync(runId, ct) with { PlanWarnings = warnings };
+    }
+
     [McpServerTool(Name = "pause_run")]
     [Description("Pauses a working run. By default the current step finishes first, so nothing is lost. With immediately=true the current step stops now and runs again on resume. " + McpNotes.Data)]
     public async Task<RunDetails> PauseRun(
@@ -278,7 +297,10 @@ public sealed class HatchetTools(FactoryOrchestrator orchestrator, IRunStore sto
                 bySubtask.GetValueOrDefault(s.Id)?.LocalTokens ?? 0, bySubtask.GetValueOrDefault(s.Id)?.ClaudeTokens ?? 0, bySubtask.GetValueOrDefault(s.Id)?.ClaudeCostUsd)).ToList(),
             events, PauseBriefBuilder.Build(run, subtasks.FirstOrDefault(s => s.Status == SubtaskStatus.NeedsHuman)),
             Gates: VerificationGates.Parse(run.Task.GatesJson) is { Count: > 0 } gates ? gates : null,
-            Usage: RunUsageBuilder.ForRun(usage));
+            Usage: RunUsageBuilder.ForRun(usage),
+            PlanAmendment: FactoryOrchestrator.ProposedAmendment(run) is { } proposed
+                ? $"A change to the steps not started yet ({proposed.Count} proposed) is waiting for the user to approve or discard in Hatchet. The run can't be resumed until they do."
+                : null);
     }
 
     private RunSummary Summarize(FactoryRun run, IReadOnlyList<FactorySubtask> subtasks)

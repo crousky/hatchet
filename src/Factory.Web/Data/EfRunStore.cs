@@ -68,6 +68,16 @@ public sealed class EfRunStore(IDbContextFactory<FactoryDbContext> factory) : IR
         await transaction.CommitAsync(ct);
     }
 
+    public async Task SwapSubtasksAsync(int runId, IReadOnlyCollection<int> removeIds, IReadOnlyList<FactorySubtask> add, CancellationToken ct = default)
+    {
+        await using var db = await factory.CreateDbContextAsync(ct);
+        await using var transaction = await db.Database.BeginTransactionAsync(ct);
+        await db.Subtasks.Where(s => s.RunId == runId && removeIds.Contains(s.Id)).ExecuteDeleteAsync(ct);
+        db.Subtasks.AddRange(add);
+        await db.SaveChangesAsync(ct);
+        await transaction.CommitAsync(ct);
+    }
+
     public async Task<FactorySubtask> AddSubtaskAsync(FactorySubtask subtask, CancellationToken ct = default)
     {
         await using var db = await factory.CreateDbContextAsync(ct);

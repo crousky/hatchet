@@ -1,5 +1,28 @@
 <div class="plan">
-    @if (Editable)
+    @if (Editable && Amending)
+    {
+        <div class="plan-toolbar">
+            <div>
+                <div class="plan-title">@(FromAgent ? "The driving agent proposed these steps" : "Change the steps not started yet")</div>
+                <div class="muted small">
+                    @if (FromAgent)
+                    {
+                        <text>They would replace the @Replaces not started yet. Nothing changes until you approve. Edit anything first, and check the commands: they run on this machine once you do.</text>
+                    }
+                    else
+                    {
+                        <text>Edit, add, remove or reorder them. Steps that are done or under way stay as they are. The commands below run on this machine once you save, so check them.</text>
+                    }
+                </div>
+            </div>
+            <span class="toolbar-spacer"></span>
+            <button class="btn" disabled="@Busy" @onclick="() => OnCancel.InvokeAsync()">@(FromAgent ? "Discard" : "Cancel")</button>
+            <button class="btn btn-primary" disabled="@Busy" @onclick="ApproveAsync">
+                <Icon Name="check" Size="14" /> @(FromAgent ? "Approve changes" : "Save changes")
+            </button>
+        </div>
+    }
+    else if (Editable)
     {
         <div class="plan-toolbar">
             <div>
@@ -10,6 +33,14 @@
             <button class="btn btn-primary" disabled="@(Busy || _items.Count == 0)" @onclick="ApproveAsync">
                 <Icon Name="play" Size="14" /> Approve and build
             </button>
+        </div>
+    }
+
+    @if (!Editable && Amendable)
+    {
+        <div class="plan-amend-bar">
+            <span class="muted small">The run is paused. The steps that haven't started can still be changed.</span>
+            <button class="btn btn-small" disabled="@Busy" @onclick="() => OnStartAmend.InvokeAsync()"><Icon Name="clipboard" Size="13" /> Change the steps not started</button>
         </div>
     }
 
@@ -29,7 +60,7 @@
             }
             else
             {
-                <div class="empty-title">No subtasks</div>
+                <div class="empty-title">@(Amending ? "No steps left to build" : "No subtasks")</div>
                 @if (Editable)
                 {
                     <button class="btn" @onclick="AddItem"><Icon Name="plus" Size="14" /> Add a subtask</button>
@@ -46,7 +77,7 @@
             @if (Editable)
             {
                 <div class="plan-card-head">
-                    <span class="plan-number">@(index + 1)</span>
+                    <span class="plan-number">@(NumberOffset + index + 1)</span>
                     <input autocomplete="off" data-1p-ignore data-lpignore="true" class="plan-input-title" placeholder="Subtask title" @bind="item.Title" />
                     <button class="icon-button" title="Move up" disabled="@(index == 0)" @onclick="@(() => Move(index, -1))"><Icon Name="arrow-up" Size="14" /></button>
                     <button class="icon-button" title="Move down" disabled="@(index == _items.Count - 1)" @onclick="@(() => Move(index, 1))"><Icon Name="arrow-down" Size="14" /></button>
@@ -83,7 +114,7 @@
                         <span>Verify with</span>
                         @if (item.Proposed)
                         {
-                            <span class="plan-command-proposed">proposed by the model</span>
+                            <span class="plan-command-proposed">@(FromAgent ? "proposed by the driving agent" : "proposed by the model")</span>
                         }
                         <textarea autocomplete="off" data-1p-ignore data-lpignore="true" class="plan-command-input" rows="3" spellcheck="false" wrap="soft" placeholder="@(string.IsNullOrEmpty(DefaultCommand) ? "Detect from the repository" : DefaultCommand)" value="@item.Command" @oninput="@(e => OnCommandInput(item, e.Value?.ToString() ?? ""))"></textarea>
                     </label>
@@ -137,10 +168,13 @@
     {
         <div class="plan-footer">
             <button class="btn" @onclick="AddItem"><Icon Name="plus" Size="14" /> Add subtask</button>
-            <div class="plan-regenerate">
-                <input autocomplete="off" data-1p-ignore data-lpignore="true" placeholder="What should the planner change? (optional)" @bind="_feedback" />
-                <button class="btn" disabled="@Busy" @onclick="() => OnRegenerate.InvokeAsync(_feedback)"><Icon Name="refresh" Size="14" /> Plan again</button>
-            </div>
+            @if (!Amending)
+            {
+                <div class="plan-regenerate">
+                    <input autocomplete="off" data-1p-ignore data-lpignore="true" placeholder="What should the planner change? (optional)" @bind="_feedback" />
+                    <button class="btn" disabled="@Busy" @onclick="() => OnRegenerate.InvokeAsync(_feedback)"><Icon Name="refresh" Size="14" /> Plan again</button>
+                </div>
+            }
         </div>
     }
 </div>
@@ -161,6 +195,26 @@
     private string StrongHint => "A strong subtask's Context Specifier, Code Generator and Bug Fixer run on the strong run profile's models"
         + (StrongModels.Length > 0 ? $": {StrongModels}." : ".") + " Every other subtask is built on the run's own.";
     [Parameter] public EventCallback<IReadOnlyList<SubtaskEdit>> OnApprove { get; set; }
+
+    /// <summary>The editor holds only the steps of a paused run that haven't started, and saving replaces those.</summary>
+    [Parameter] public bool Amending { get; set; }
+
+    /// <summary>The steps being amended are an MCP client's proposal, waiting for the user's approval.</summary>
+    [Parameter] public bool FromAgent { get; set; }
+
+    /// <summary>How many steps the amendment replaces, in words, such as "2 steps".</summary>
+    [Parameter] public string Replaces { get; set; } = "";
+
+    /// <summary>How many steps come before the ones shown, so the numbers match the run's.</summary>
+    [Parameter] public int NumberOffset { get; set; }
+
+    /// <summary>Changes when the steps to load change though their ids don't, as with a new proposal.</summary>
+    [Parameter] public string Version { get; set; } = "";
+
+    /// <summary>The plan is read-only here, and the run is paused with steps that could be amended.</summary>
+    [Parameter] public bool Amendable { get; set; }
+    [Parameter] public EventCallback OnStartAmend { get; set; }
+    [Parameter] public EventCallback OnCancel { get; set; }
     [Parameter] public EventCallback<string?> OnRegenerate { get; set; }
 
     private sealed class PlanItem
@@ -209,7 +263,7 @@
     protected override void OnParametersSet()
     {
         // Only a new plan from the server replaces the form, so periodic refreshes don't discard edits.
-        var signature = string.Join(',', Subtasks.Select(s => s.Id)) + $"|{Editable}";
+        var signature = string.Join(',', Subtasks.Select(s => s.Id)) + $"|{Editable}|{Amending}|{Version}";
         if (signature == _loadedSignature) return;
         _loadedSignature = signature;
         _items = Subtasks.Select(s => new PlanItem

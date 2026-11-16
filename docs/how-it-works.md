@@ -76,6 +76,14 @@ A local model at low temperature sometimes gets stuck repeating itself. It might
 
 When the window really is too small, the pause says so and tells you how to load the model with a bigger one. Before a call, Hatchet leaves the type definitions out of a prompt that wouldn't leave the model room to answer. The planner and agents are also told never to type out long data from memory, such as registries or lookup tables. Instead they plan a script that fetches the data, plus a small sample.
 
+## Changing the steps of a paused run
+
+A plan is fixed once it is approved, with one exception: while a run is paused part-way through its steps, the steps that haven't started can still be changed. On the Plan tab, **Change the steps not started** opens them in the plan editor, where you can edit, add, remove and reorder them, and **Save changes** replaces them. Steps that are done, skipped or under way stay as they are, with their commits and history, and the new steps are numbered after them. Then resume the run as usual.
+
+An MCP client can ask for the same change with `amend_plan`, but it can't make it. Its proposal opens in the same editor, marked as the driving agent's, and nothing changes until you choose **Approve changes**. Each command it proposes has a **Run this command** box that starts unticked. **Discard** drops the proposal. The run can't be resumed, by you or by the agent, until you have chosen, so a proposal is never passed over without being read.
+
+Steps can't be changed this way before the plan is approved, where the whole plan is open anyway, or at the final check, when no step is left.
+
 ## Usage and cost
 
 Hatchet records the prompt and completion tokens of every model call, and which model answered. The run page and `get_run` show them split between the local model and Claude, because one costs time and the other money: the run's total, a line for each model, and each subtask's share. For calls on Claude, Hatchet also keeps the cost Claude Code reports for the call, which counts cache reads and writes at their own prices. That figure is what the calls would cost at API prices. On a Claude subscription it measures use and is not a bill. Runs from before this was recorded show their Claude tokens with no cost.

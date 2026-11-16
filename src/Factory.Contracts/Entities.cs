@@ -62,6 +62,12 @@ public sealed class FactoryRun
     public bool PlanHeldForUser { get; set; }
 
     /// <summary>
+    /// The steps an MCP client proposed in place of the ones not started yet, as JSON <see cref="SubtaskEdit"/>s. They
+    /// change nothing until the user approves them in Hatchet. Null when no proposal is waiting.
+    /// </summary>
+    public string? ProposedAmendmentJson { get; set; }
+
+    /// <summary>
     /// What the run does when its turn in line for a worker comes, such as a resume with the user's decision. Kept so
     /// the run can join the line again after Hatchet restarts. Null while it isn't waiting.
     /// </summary>

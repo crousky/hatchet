@@ -78,7 +78,7 @@ Once three subtasks are done, the run header shows a likely range for the workin
 
 Retries are automatic. Before it asks you, Hatchet makes one last fix on Claude Opus once the normal attempts are used (unless the Bug Fixer is already on Opus, or Claude fixes are switched off). It also stops early when two fixes in a row end in the same error, because that usually means the cause is outside the code, such as a missing download. Fixes the spec guard refuses don't use up attempts, though a run of them still stops the subtask.
 
-If a subtask runs out of attempts, or the model server goes away, the run pauses and asks you what to do. You can retry with your own guidance, re-verify after fixing it by hand, restart the subtask, skip it, or cancel the run. Your guidance goes to every agent that works on the subtask from then on. Runs interrupted by a restart pause the same way and can be resumed.
+If a subtask runs out of attempts, or the model server goes away, the run pauses and asks you what to do. While it is paused you can also change the steps that haven't started, on the Plan tab. You can retry with your own guidance, re-verify after fixing it by hand, restart the subtask, skip it, or cancel the run. Your guidance goes to every agent that works on the subtask from then on. Runs interrupted by a restart pause the same way and can be resumed.
 
 ## Ad hoc requests
 

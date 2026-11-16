@@ -22,7 +22,8 @@ Then plan a change with Claude in conversation and ask it to hand the plan to Ha
 | `get_subtask` | One subtask in full: last failure, fix history, review verdict, diff |
 | `get_run_report` | What a run did: each step's summary and commit, the steps skipped or not finished, the files the branch changes, and the reviewer's suggestions nothing acted on. See [The run report](#the-run-report) |
 | `approve_plan` | Approves the plan of a run you started with `reviewPlanInHatchet: true`, without the commands Hatchet's planner proposed. It refuses every other plan: one you didn't ask to review, one for a defect or change report, and one longer than Hatchet builds unattended (40 subtasks by default). Those are approved by you, in Hatchet |
-| `pause_run`, `resume_run` | Pause now or after the current step; resume, retry the fixer with guidance, re-verify, restart or skip. Guidance sent this way reaches the agents labelled as the driving agent's, and not the reviewer. `retry_fixer` works three times per subtask over MCP, and after that it has to be done in Hatchet. `resume` and `reverify` are refused at the two pauses only the user can clear: a changed check command, and a file too long to review in full. At a pause on the user's token ceiling, only `skip_subtask` works |
+| `amend_plan` | Proposes new steps in place of the ones a paused run hasn't started. Nothing changes until the user approves it in Hatchet. See [Amending a paused run](#amending-a-paused-run) |
+| `pause_run`, `resume_run` | Pause now or after the current step; resume, retry the fixer with guidance, re-verify, restart or skip. Guidance sent this way reaches the agents labelled as the driving agent's, and not the reviewer. `retry_fixer` works three times per subtask over MCP, and after that it has to be done in Hatchet. `resume` and `reverify` are refused at the two pauses only the user can clear: a changed check command, and a file too long to review in full. At a pause on the user's token ceiling, only `skip_subtask` works. While an `amend_plan` proposal waits for the user, nothing works |
 | `hand_over_call` | Stops the call an agent is making and makes it again on the local model or a Claude model |
 | `cancel_run` | Abandons a run |
 
@@ -79,6 +80,14 @@ A gate runs after the main check, and only for a step that changed a file matchi
 If the program a gate's command starts with isn't installed on the user's machine, `start_run` is refused and the message names it. Tell the user what is missing. Starting the run without the gate gets past the refusal, but it also leaves those files unchecked, so that is for the user to decide.
 
 See [What gets verified and reviewed](how-it-works.md#what-gets-verified-and-reviewed) for how patterns match.
+
+## Amending a paused run
+
+What a run learns part-way can change what its later steps should be. While a run is paused in the middle of its steps, `amend_plan` proposes the steps that should remain to be built, in order, in place of every step that hasn't started. Steps can be edited, added, dropped and reordered. Steps that are done, skipped or under way are not part of the list and are not touched. If the run is working, `pause_run` first.
+
+The proposal changes nothing by itself. It waits for the user, who sees every step and command on the run's Plan tab and can edit them, approve or discard. A proposed command runs only if the user ticks it. Until they decide, `resume_run` is refused for everyone and `get_run` says so under `planAmendment`, so tell the user it is waiting. Calling `amend_plan` again replaces the earlier proposal.
+
+`amend_plan` returns `planWarnings` for the proposed steps, as `start_run` does. It is refused when the run isn't paused, when its whole plan is still waiting for approval (change the plan there), and when it is paused at the final check with every step done.
 
 ## The run report
 
