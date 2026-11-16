@@ -76,6 +76,12 @@ A local model at low temperature sometimes gets stuck repeating itself. It might
 
 When the window really is too small, the pause says so and tells you how to load the model with a bigger one. Before a call, Hatchet leaves the type definitions out of a prompt that wouldn't leave the model room to answer. The planner and agents are also told never to type out long data from memory, such as registries or lookup tables. Instead they plan a script that fetches the data, plus a small sample.
 
+## Strong subtasks
+
+Each subtask has a tier, `local` or `strong`. A local one, which is every subtask unless something says otherwise, is built by the agents as the run has them. A strong one has its Context Specifier, Code Generator and Bug Fixer moved to the models the `strong` run profile in Settings names for them, and to the profile Hatchet ships with if you removed yours. The planner and the reviewer work for the whole run and stay put.
+
+The tier comes from the plan: `tier` on a step handed over through MCP, or the **Built on** choice in the plan editor, which you can change before approving. Hatchet's own planner doesn't set it, so its plans are local until you change them. The fix budget and the last-resort attempt follow the subtask's models, so with the built-in profile a strong subtask's last automatic fix goes to Claude Opus. The run's log says when a subtask is strong and shows the model behind each call. A strong subtask doesn't change which line the run waits in.
+
 ## Projects and the queue
 
 The runs list groups runs by project, which is the repository they build in. You can start as many runs as you like, and the ones past the limit wait in line:

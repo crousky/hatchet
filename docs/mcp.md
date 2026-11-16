@@ -17,7 +17,7 @@ Then plan a change with Claude in conversation and ask it to hand the plan to Ha
 | Tool | Does |
 |---|---|
 | `probe_repository` | Checks a folder is a clean Git repository and how it would be verified |
-| `start_run` | Starts a run from a spec, with a ready-made plan or with Hatchet's planner, and a `model` if you want one. See [Choosing the model](#choosing-the-model). A plan is checked against the repository first: see [Plan warnings](#plan-warnings). `gates` adds checks for particular files: see [Extra checks](#extra-checks) |
+| `start_run` | Starts a run from a spec, with a ready-made plan or with Hatchet's planner, and a `model` if you want one. See [Choosing the model](#choosing-the-model). A plan is checked against the repository first: see [Plan warnings](#plan-warnings). `gates` adds checks for particular files: see [Extra checks](#extra-checks). A step can be marked `strong`: see [Strong steps](#strong-steps) |
 | `list_runs`, `get_run` | Status, project, place in line, progress, subtasks, recent events and working time left. When a run needs a person, `get_run` also returns `needsFromYou`: what happened, what is blocking it, what guidance to give and what each `resume_run` action needs from you |
 | `get_subtask` | One subtask in full: last failure, fix history, review verdict, diff |
 | `approve_plan` | Approves the plan of a run you started with `reviewPlanInHatchet: true`, without the commands Hatchet's planner proposed. It refuses every other plan: one you didn't ask to review, one for a defect or change report, and one longer than Hatchet builds unattended (40 subtasks by default). Those are approved by you, in Hatchet |
@@ -78,6 +78,12 @@ A gate runs after the main check, and only for a step that changed a file matchi
 If the program a gate's command starts with isn't installed on the user's machine, `start_run` is refused and the message names it. Tell the user what is missing. Starting the run without the gate gets past the refusal, but it also leaves those files unchecked, so that is for the user to decide.
 
 See [What gets verified and reviewed](how-it-works.md#what-gets-verified-and-reviewed) for how patterns match.
+
+## Strong steps
+
+A step in a plan can carry `tier`, which is `local` or `strong`. Leave it out for `local`, where the step is built by the agents as the run has them. A `strong` step has its Context Specifier, Code Generator and Bug Fixer moved to the models the user's `strong` run profile names for them, which is Claude Sonnet unless they changed it. The planner and the reviewer work for the whole run, so a tier doesn't move them.
+
+Use it for the steps the local model is likely to fail, such as a long edit to a large file, and leave the rest local: a strong step spends the user's Claude usage. Any other value for `tier` is refused. `get_run` shows each subtask's tier, the run's log shows which model answered each call, and the user can change a step's tier in Hatchet's plan editor before the plan is approved.
 
 ## Choosing the model
 

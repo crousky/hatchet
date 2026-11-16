@@ -187,6 +187,7 @@ else
                                             Queued="@(_spot is not null)"
                                             Busy="_busy"
                                             DefaultCommand="@_run.Task.VerificationCommand"
+                                            StrongModels="@_strongModels"
                                             OnApprove="ApprovePlanAsync"
                                             OnRegenerate="RegeneratePlanAsync" />
                                 break;
@@ -317,6 +318,7 @@ else
     }
 
     private string _modelDetail = "";
+    private string _strongModels = "";
     private IReadOnlyList<VerificationGate> _gates = [];
     private string _gatesDetail = "";
 
@@ -336,6 +338,7 @@ else
         _modelDetail = ModelChoices.ProfileNameOf(_run.Task.ModelChoice) is null
             ? "Chosen when the work was started. Every agent in this run uses it, whatever Settings say."
             : $"Run profile, chosen when the work was started and kept until the run finishes. {ModelChoices.Explain(await SettingsStore.GetAsync(), _run.Task.ModelChoice)}";
+        _strongModels = ModelChoices.DescribeTier(await SettingsStore.GetAsync());
         _gates = VerificationGates.Parse(_run.Task.GatesJson);
         _gatesDetail = "Run after the main check, for a subtask that changed matching files:\n" + string.Join("\n", _gates.Select(g => $"{g.Paths}  →  {g.Command}"));
         _subtasks = await Store.GetSubtasksAsync(RunId);

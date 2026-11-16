@@ -47,6 +47,14 @@ else
             </div>
         }
 
+        @if (SubtaskTiers.IsStrong(Subtask.Tier))
+        {
+            <div class="details-row">
+                <span class="details-label">Built on</span>
+                <span>The strong run profile's models, for its Context Specifier, Code Generator and Bug Fixer</span>
+            </div>
+        }
+
         <div class="details-row">
             <span class="details-label">Verify with</span>
             <code class="command-line">@EffectiveCommand</code>

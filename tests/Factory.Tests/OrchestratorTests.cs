@@ -435,6 +435,65 @@ public class OrchestratorTests : IAsyncLifetime
         Assert.True(File.Exists(_repo.File("alpha.txt")));
     }
 
+    [Fact]
+    public async Task A_strong_subtask_is_built_and_fixed_on_claude_and_a_local_one_on_the_local_model()
+    {
+        // Every agent starts on the local model, so what runs on Claude is the tier's doing.
+        _settings.Settings.ProfileOverrides = Enum.GetValues<AgentRole>().Select(role => new AgentProfileOverride { Role = role, Engine = AgentEngine.Local }).ToList();
+        _llm.Enqueue(AgentRole.ContextSpecifier, Refined(), Refined());
+        _llm.Enqueue(AgentRole.CodeGenerator, Patch("hard.txt", "broken"), Patch("easy.txt"));
+        _llm.Enqueue(AgentRole.BugFixer, Patch("hard.txt", "fixed"));
+        _llm.Enqueue(AgentRole.StaticReviewer, Verdict(true), Verdict(true));
+        _commands.Results.Enqueue((1, "CS1002: ; expected"));
+
+        var started = await _orchestrator.StartRunAsync(new NewRunRequest(_repo.Path, "# Spec", null, "verify", false),
+        [
+            new SubtaskEdit(null, "hard", "Build hard", [], ["hard.txt"], [], "", Tier: "Strong"),
+            new SubtaskEdit(null, "easy", "Build easy", [], ["easy.txt"], [], "")
+        ]);
+        var run = await WaitForAsync(started.Id, RunStatus.ReadyToMerge);
+
+        var subtasks = (await _store.GetSubtasksAsync(run.Id)).OrderBy(s => s.Order).ToList();
+        Assert.Equal([SubtaskTiers.Strong, SubtaskTiers.Local], subtasks.Select(s => s.Tier));
+        string[] Engines(AgentRole role) => _llm.Engines.Where(e => e.Role == role).Select(e => e.OnClaude ? e.ClaudeModel : "local").ToArray();
+        Assert.Equal(["sonnet", "local"], Engines(AgentRole.ContextSpecifier));
+        Assert.Equal(["sonnet", "local"], Engines(AgentRole.CodeGenerator));
+        Assert.Equal(["sonnet"], Engines(AgentRole.BugFixer));
+        // The reviewer works for the whole run, so the tier leaves it be.
+        Assert.Equal(["local", "local"], Engines(AgentRole.StaticReviewer));
+
+        // The log shows which model answered each call, and says why once.
+        var logs = await _store.GetLogsAsync(run.Id);
+        Assert.All(logs.Where(l => l.Kind == AgentLogKind.LlmCall && l.Role != AgentRole.StaticReviewer),
+            l => Assert.Equal(l.SubtaskId == subtasks[0].Id ? "sonnet" : null, l.Model));
+        Assert.Single(logs, l => l.SubtaskId == subtasks[0].Id && l.Message.StartsWith("This subtask is marked strong"));
+        Assert.DoesNotContain(logs, l => l.SubtaskId == subtasks[1].Id && l.Message.Contains("marked strong"));
+    }
+
+    [Fact]
+    public async Task A_tier_that_is_neither_local_nor_strong_is_refused_and_the_plan_editor_can_change_one()
+    {
+        var refused = await Assert.ThrowsAsync<FactoryValidationException>(() => _orchestrator.StartRunAsync(new NewRunRequest(_repo.Path, "# Spec", null, "verify", true),
+            [new SubtaskEdit(null, "alpha", "Build alpha", [], ["alpha.txt"], [], "", Tier: "opus")]));
+        Assert.Contains("A tier is local or strong", refused.Message);
+        Assert.Empty(await _store.ListRunsAsync());
+
+        var run = await _orchestrator.StartRunAsync(new NewRunRequest(_repo.Path, "# Spec", null, "verify", true),
+            [new SubtaskEdit(null, "alpha", "Build alpha", [], ["alpha.txt"], [], "")]);
+        await WaitForAsync(run.Id, RunStatus.AwaitingPlanApproval);
+        Assert.Equal(SubtaskTiers.Local, (await _store.GetSubtasksAsync(run.Id)).Single().Tier);
+
+        // Approving with the tier changed, as the plan editor does, is what the subtask is built with.
+        _llm.Enqueue(AgentRole.ContextSpecifier, Refined());
+        _llm.Enqueue(AgentRole.CodeGenerator, Patch("alpha.txt"));
+        _llm.Enqueue(AgentRole.StaticReviewer, Verdict(true));
+        await _orchestrator.ApprovePlanAsync(run.Id, [new SubtaskEdit(null, "alpha", "Build alpha", [], ["alpha.txt"], [], "", Tier: SubtaskTiers.Strong)]);
+        await WaitForAsync(run.Id, RunStatus.ReadyToMerge);
+
+        Assert.Equal(SubtaskTiers.Strong, (await _store.GetSubtasksAsync(run.Id)).Single().Tier);
+        Assert.True(_llm.Engines.Single(e => e.Role == AgentRole.CodeGenerator).OnClaude);
+    }
+
     private FactoryOrchestrator WithTools(Func<string, bool> installed) =>
         new(_store, _settings, _llm, _commands, new FactoryEventBus(), NullLogger<FactoryOrchestrator>.Instance, toolInstalled: installed);
 
@@ -2679,7 +2738,7 @@ public class OrchestratorTests : IAsyncLifetime
         {
             Id = s.Id, RunId = s.RunId, Order = s.Order, Title = s.Title, Description = s.Description,
             TargetFilesToModify = s.TargetFilesToModify, TargetFilesToCreate = s.TargetFilesToCreate, ContextFilesToRead = s.ContextFilesToRead,
-            Skills = [.. s.Skills], VerificationCommand = s.VerificationCommand, CommandApproved = s.CommandApproved, Status = s.Status, IsIntegrationFix = s.IsIntegrationFix,
+            Skills = [.. s.Skills], VerificationCommand = s.VerificationCommand, CommandApproved = s.CommandApproved, Tier = s.Tier, Status = s.Status, IsIntegrationFix = s.IsIntegrationFix,
             FixAttempts = s.FixAttempts, ReviewFixAttempts = s.ReviewFixAttempts,
             LastFailure = s.LastFailure, FixHistory = [.. s.FixHistory], HumanGuidance = s.HumanGuidance, GuidanceFromAgent = s.GuidanceFromAgent, ReviewGapAccepted = s.ReviewGapAccepted, AgentFixerResets = s.AgentFixerResets, RefinedSpecJson = s.RefinedSpecJson,
             SummaryOfChanges = s.SummaryOfChanges, ReviewJson = s.ReviewJson, CommitSha = s.CommitSha

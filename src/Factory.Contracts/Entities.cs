@@ -103,6 +103,12 @@ public sealed class FactorySubtask
     public string VerificationCommand { get; set; } = "";
     public bool CommandApproved { get; set; }
 
+    /// <summary>
+    /// One of <see cref="SubtaskTiers"/>. A strong subtask's Context Specifier, Code Generator and Bug Fixer run on the
+    /// models of the "strong" run profile. Anything else, a subtask from before tiers included, is local.
+    /// </summary>
+    public string Tier { get; set; } = SubtaskTiers.Local;
+
     public SubtaskStatus Status { get; set; } = SubtaskStatus.Pending;
 
     /// <summary>

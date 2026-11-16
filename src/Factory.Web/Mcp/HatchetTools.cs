@@ -32,6 +32,9 @@ public sealed class PlanStep
 
     [Description("Names of Hatchet skills whose instructions this step's agents should get, from the repository's .hatchet/skills or .claude/skills folders or the user's own. Leave empty for none. A skill marked always: true goes to every step without being named, and the Static Reviewer gets the skills whose roles name it, as rules to check the diff against.")]
     public List<string>? Skills { get; set; }
+
+    [Description("local or strong. Leave empty for local, where the step is built by the agents as the run has them. strong moves this step's Context Specifier, Code Generator and Bug Fixer to the models of the user's \"strong\" run profile, Claude unless they changed it, which costs the user Claude usage: use it for a step the local model is likely to fail, such as a long edit to a large file, and not for every step.")]
+    public string? Tier { get; set; }
 }
 
 /// <summary>An extra check for a run, as an MCP client writes it.</summary>
@@ -47,7 +50,7 @@ public sealed class GateSpec
 /// <param name="Model">The model choice the run was started with, such as profile:strong, or null when it runs as Settings has it.</param>
 public sealed record RunSummary(int RunId, string Title, string Status, string Project, string Repository, int SubtasksDone, int Subtasks, string? CurrentStep, string? Queue, string? PauseReason, string Url, string? Model = null);
 
-public sealed record SubtaskSummary(int Order, string Title, string Status, int FixAttempts);
+public sealed record SubtaskSummary(int Order, string Title, string Status, int FixAttempts, string Tier = SubtaskTiers.Local);
 
 public sealed record RunDetails(RunSummary Run, string? Branch, string? BaseBranch, bool? FinalCheckPassed, int Tokens, string? WorkLeft, IReadOnlyList<SubtaskSummary> Subtasks, IReadOnlyList<string> RecentEvents, PauseBrief? NeedsFromYou = null, string Note = McpNotes.Data, IReadOnlyList<PlanWarning>? PlanWarnings = null,
     IReadOnlyList<VerificationGate>? Gates = null);
@@ -108,7 +111,7 @@ public sealed class HatchetTools(FactoryOrchestrator orchestrator, IRunStore sto
         PathGuard.RejectNetworkPath(repositoryPath, nameof(repositoryPath));
         // A client may send null for a list or field it leaves empty.
         var edits = plan?.Select(step => new SubtaskEdit(null, step.Title ?? "", step.Description ?? "",
-            step.FilesToModify ?? [], step.FilesToCreate ?? [], step.FilesToRead ?? [], step.VerificationCommand ?? "", step.Skills ?? [])).ToList();
+            step.FilesToModify ?? [], step.FilesToCreate ?? [], step.FilesToRead ?? [], step.VerificationCommand ?? "", step.Skills ?? [], step.Tier)).ToList();
         var extra = gates?.Select(g => new VerificationGate(g.Paths ?? "", g.Command ?? "")).ToList();
         var (run, warnings) = await Do(() => orchestrator.StartPlannedRunAsync(
             new NewRunRequest(repositoryPath, spec, title, verificationCommand, reviewPlanInHatchet, model, PlanReviewByUser: false, Gates: extra), edits, ct));
@@ -164,7 +167,7 @@ public sealed class HatchetTools(FactoryOrchestrator orchestrator, IRunStore sto
         var plan = (await store.GetSubtasksAsync(runId, ct))
             .OrderBy(s => s.Order)
             .Select(s => new SubtaskEdit(s.Id, s.Title, s.Description, s.TargetFilesToModify, s.TargetFilesToCreate, s.ContextFilesToRead,
-                s.CommandApproved ? s.VerificationCommand : "", s.Skills))
+                s.CommandApproved ? s.VerificationCommand : "", s.Skills, s.Tier))
             .ToList();
         await Do(() => orchestrator.ApprovePlanAsDrivingAgentAsync(runId, plan, ct));
         return await DescribeRunAsync(runId, ct);
@@ -252,7 +255,7 @@ public sealed class HatchetTools(FactoryOrchestrator orchestrator, IRunStore sto
 
         return new RunDetails(Summarize(run, subtasks), run.BranchName, run.BaseBranch, run.IntegrationPassed,
             run.PromptTokens + run.CompletionTokens, estimate is null ? null : Fmt.WorkLeft(estimate),
-            subtasks.OrderBy(s => s.Order).Select(s => new SubtaskSummary(s.Order, s.Title, s.Status.ToString(), s.FixAttempts)).ToList(),
+            subtasks.OrderBy(s => s.Order).Select(s => new SubtaskSummary(s.Order, s.Title, s.Status.ToString(), s.FixAttempts, SubtaskTiers.Parse(s.Tier) ?? SubtaskTiers.Local)).ToList(),
             events, PauseBriefBuilder.Build(run, subtasks.FirstOrDefault(s => s.Status == SubtaskStatus.NeedsHuman)),
             Gates: VerificationGates.Parse(run.Task.GatesJson) is { Count: > 0 } gates ? gates : null);
     }

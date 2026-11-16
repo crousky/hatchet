@@ -116,14 +116,7 @@ public static class ModelChoices
         var copy = settings.Clone();
         if (normalized.StartsWith(ProfilePrefix, StringComparison.Ordinal))
         {
-            foreach (var route in FindProfile(settings, normalized[ProfilePrefix.Length..]).Roles)
-            {
-                var profileOverride = OverrideFor(copy, settings, route.Role);
-                profileOverride.Engine = route.Engine;
-                if (route.Engine != AgentEngine.ClaudeCode) continue;
-                profileOverride.ClaudeModel = route.ClaudeModel;
-                profileOverride.ClaudeEffort = route.ClaudeEffort;
-            }
+            foreach (var route in FindProfile(settings, normalized[ProfilePrefix.Length..]).Roles) Route(copy, settings, route);
             return copy;
         }
 
@@ -138,6 +131,52 @@ public static class ModelChoices
             if (onClaude) profileOverride.ClaudeModel = model;
         }
         return copy;
+    }
+
+    /// <summary>The run profile a strong subtask takes its models from.</summary>
+    public const string StrongProfileName = "strong";
+
+    /// <summary>The agents that build a subtask, which are the ones its tier moves. The planner and the reviewer work for the whole run.</summary>
+    public static readonly IReadOnlyList<AgentRole> TieredRoles = [AgentRole.ContextSpecifier, AgentRole.CodeGenerator, AgentRole.BugFixer];
+
+    /// <summary>
+    /// The "strong" profile as Settings has it, so the user decides what strong means. If they removed it, the one
+    /// Hatchet ships with is used: a plan that marks a step strong was written expecting it to exist.
+    /// </summary>
+    public static RunProfile StrongProfile(FactorySettings settings) =>
+        settings.RunProfiles.FirstOrDefault(p => p.Name.Equals(StrongProfileName, StringComparison.OrdinalIgnoreCase))
+        ?? RunProfile.BuiltIn().First(p => p.Name == StrongProfileName);
+
+    /// <summary>
+    /// The settings one subtask is built with: the run's, and for a strong subtask its building agents moved to where
+    /// the "strong" profile puts them. The run's settings are left as they were.
+    /// </summary>
+    public static FactorySettings ApplyTier(FactorySettings settings, string? tier)
+    {
+        if (!SubtaskTiers.IsStrong(tier)) return settings;
+
+        var copy = settings.Clone();
+        foreach (var route in StrongProfile(settings).Roles.Where(r => TieredRoles.Contains(r.Role))) Route(copy, settings, route);
+        return copy;
+    }
+
+    /// <summary>Where a strong subtask's building agents run, such as "Context Specifier, Code Generator, Bug Fixer: Claude Sonnet".</summary>
+    public static string DescribeTier(FactorySettings settings)
+    {
+        var applied = ApplyTier(settings, SubtaskTiers.Strong);
+        return string.Join(" · ", TieredRoles
+            .Select(role => AgentProfiles.Resolve(applied, role))
+            .GroupBy(p => p.UsesClaude ? ClaudeCodeOptions.ModelLabel(p.ClaudeModel) : "local model")
+            .Select(g => $"{string.Join(", ", g.Select(p => p.DisplayName))}: {g.Key}"));
+    }
+
+    private static void Route(FactorySettings copy, FactorySettings settings, RunProfileRole route)
+    {
+        var profileOverride = OverrideFor(copy, settings, route.Role);
+        profileOverride.Engine = route.Engine;
+        if (route.Engine != AgentEngine.ClaudeCode) return;
+        profileOverride.ClaudeModel = route.ClaudeModel;
+        profileOverride.ClaudeEffort = route.ClaudeEffort;
     }
 
     /// <summary>The role's override in the copy, added with the role's settings as they stand if it had none.</summary>

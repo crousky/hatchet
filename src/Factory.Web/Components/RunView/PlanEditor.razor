@@ -70,6 +70,13 @@
                         <span>Skills</span>
                         <input autocomplete="off" data-1p-ignore data-lpignore="true" class="mono" spellcheck="false" placeholder="comma separated" @bind="item.Skills" />
                     </label>
+                    <label title="@StrongHint">
+                        <span>Built on</span>
+                        <select @bind="item.Tier">
+                            <option value="@SubtaskTiers.Local">The run's models (local tier)</option>
+                            <option value="@SubtaskTiers.Strong">The strong profile's models (strong tier)</option>
+                        </select>
+                    </label>
                 </div>
                 <div class="plan-command">
                     <label>
@@ -98,6 +105,10 @@
                 <div class="plan-card-head">
                     <span class="plan-number">@(index + 1)</span>
                     <span class="plan-readonly-title">@item.Title</span>
+                    @if (SubtaskTiers.IsStrong(item.Tier))
+                    {
+                        <span class="file-chip file-skill" title="@StrongHint">strong</span>
+                    }
                 </div>
                 <div class="plan-readonly-body">@item.Description</div>
                 <div class="plan-chips">
@@ -143,6 +154,12 @@
     [Parameter] public bool Queued { get; set; }
     [Parameter] public bool Busy { get; set; }
     [Parameter] public string DefaultCommand { get; set; } = "";
+
+    /// <summary>Where a strong subtask's building agents run, as Settings has the strong profile now.</summary>
+    [Parameter] public string StrongModels { get; set; } = "";
+
+    private string StrongHint => "A strong subtask's Context Specifier, Code Generator and Bug Fixer run on the strong run profile's models"
+        + (StrongModels.Length > 0 ? $": {StrongModels}." : ".") + " Every other subtask is built on the run's own.";
     [Parameter] public EventCallback<IReadOnlyList<SubtaskEdit>> OnApprove { get; set; }
     [Parameter] public EventCallback<string?> OnRegenerate { get; set; }
 
@@ -154,6 +171,7 @@
         public string Create { get; set; } = "";
         public string Context { get; set; } = "";
         public string Skills { get; set; } = "";
+        public string Tier { get; set; } = SubtaskTiers.Local;
         public string Command { get; set; } = "";
 
         /// <summary>The command as loaded from the plan.</summary>
@@ -202,6 +220,7 @@
             Create = string.Join(", ", s.TargetFilesToCreate),
             Context = string.Join(", ", s.ContextFilesToRead),
             Skills = string.Join(", ", s.Skills),
+            Tier = SubtaskTiers.Parse(s.Tier) ?? SubtaskTiers.Local,
             Command = s.VerificationCommand,
             OriginalCommand = s.VerificationCommand,
             Proposed = !string.IsNullOrEmpty(s.VerificationCommand) && !s.CommandApproved
@@ -221,6 +240,6 @@
         files.Split([',', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
 
     private Task ApproveAsync() => OnApprove.InvokeAsync(_items
-        .Select(i => new SubtaskEdit(null, i.Title, i.Description, Split(i.Modify), Split(i.Create), Split(i.Context), i.Proposed && !i.RunProposed ? "" : i.Command, Split(i.Skills)))
+        .Select(i => new SubtaskEdit(null, i.Title, i.Description, Split(i.Modify), Split(i.Create), Split(i.Context), i.Proposed && !i.RunProposed ? "" : i.Command, Split(i.Skills), i.Tier))
         .ToList());
 }
