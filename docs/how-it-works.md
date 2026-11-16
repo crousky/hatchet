@@ -38,7 +38,7 @@ The Bug Fixer gets one automatic try, so a fix that doesn't hold ends with you r
 
 **The check command is pinned.** When no command was set for the run, Hatchet detects one from the repository and records it at the start. Before each check it detects again. If the answer is different, for example because a model-written `package.json` now makes it an npm project, Hatchet doesn't run the new command. The run pauses and shows both, and **Re-verify** (or **Resume**, at the final check) accepts the new one. If nothing could be detected at the start, the first command that appears is recorded and run. A command you set yourself is not re-detected.
 
-**Reviews cover the whole diff.** Everything staged is committed, so everything staged has to be seen. A staged diff longer than the review limit (`MaxDiffChars`, 60,000 characters by default) is split by file into parts, each reviewed in its own call, and the change passes only if every part does. A single file bigger than the limit is cut short for the reviewer, so a pass isn't enough: the run pauses with the file named, and **Resume** commits it as it is once you've read it. Lock files and generated files (`package-lock.json`, `*.Designer.cs` and the like) are committed with a note in the log instead. A verdict that says `passed` and also lists blocking issues is counted as a rejection.
+**Reviews cover the whole diff.** Everything staged is committed, so everything staged has to be seen. A staged diff longer than the review limit (`MaxDiffChars`, 60,000 characters by default) is split by file into parts, each reviewed in its own call, and the change passes only if every part does. A single file bigger than the limit is cut short for the reviewer, so a pass isn't enough: the run pauses with the file named, and **Resume** commits it as it is once you've read it. Package lock files (`package-lock.json`, `packages.lock.json`, `yarn.lock` and the like) are committed with a note in the log instead. Generated files get no such pass: a name like `*.Designer.cs` is one a model could choose to get a file past the review. A verdict that says `passed` and also lists blocking issues is counted as a rejection.
 
 **Git runs with less trust.** Every call turns off `core.fsmonitor` and `safe.bareRepository`, and diffs use no external diff or text conversion program, so opening or diffing an untrusted repository doesn't start its programs. Hooks are ignored for read-only calls, and still run for the calls that change the repository, such as Hatchet's own commits. Each call has a timeout and an output cap, and refs that start with `-` are refused.
 
@@ -58,6 +58,8 @@ Before each call, Hatchet finds the types the subtask, its files and its errors 
 
 - **The repository's own types.** It adds the source files that declare them.
 - **Types from packages.** For .NET projects that have been restored, it adds the public signatures of the package types they name, such as a UI library's components with their namespace and parameters. They're read from the compile assemblies listed in each project's `obj/project.assets.json`. Only names that read as code are looked up, such as `FluentSelect` or `IToastService`, so capitalised words in prose don't pull in types.
+
+Two kinds of type are not looked up yet. Types from the .NET shared framework, such as `UserManager` or `NavigationManager`, aren't in a NuGet package, so their signatures aren't added. Razor components in the repository (`.razor` files) aren't indexed as types, so naming one doesn't add its parameters.
 
 ## Runaway answers
 
