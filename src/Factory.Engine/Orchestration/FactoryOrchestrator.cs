@@ -157,7 +157,7 @@ public sealed partial class FactoryOrchestrator(
         }
     }
 
-    private sealed record HandOver(AgentEngine Engine, string ClaudeModel);
+    private sealed record HandOver(AgentEngine Engine, string Model);
 
     /// <summary>The model call a run is making, if any.</summary>
     public LiveCallInfo? GetLiveCall(int runId) => _active.TryGetValue(runId, out var active) ? active.LiveCall : null;
@@ -223,9 +223,9 @@ public sealed partial class FactoryOrchestrator(
         }
     }
 
-    /// <summary>Runs that use the local model for any agent share its workers, and runs entirely on Claude share Claude's.</summary>
+    /// <summary>Runs that use the local model for any agent share its workers, and runs entirely on cloud models (Claude or Gemini) share Claude's.</summary>
     internal static WorkerPool PoolFor(FactorySettings settings) =>
-        Enum.GetValues<AgentRole>().All(role => AgentProfiles.Resolve(settings, role).UsesClaude) ? WorkerPool.Claude : WorkerPool.Local;
+        Enum.GetValues<AgentRole>().All(role => !AgentProfiles.Resolve(settings, role).IsLocal) ? WorkerPool.Claude : WorkerPool.Local;
 
     /// <summary>
     /// The pool for a run with its own model choice. A run whose profile has since been taken out of Settings waits with
@@ -659,18 +659,18 @@ public sealed partial class FactoryOrchestrator(
     }
 
     /// <summary>
-    /// Stops the model call a run is making and makes it again on another model: the local one, or a Claude model
-    /// through Claude Code. The call starts over and doesn't use up an attempt. Later calls keep their configured model.
+    /// Stops the model call a run is making and makes it again on another model: the local one, a Claude model
+    /// through Claude Code, or a Gemini model through Antigravity. The call starts over and doesn't use up an attempt. Later calls keep their configured model.
     /// </summary>
-    public Task HandOverCallAsync(int runId, AgentEngine engine, string? claudeModel = null)
+    public Task HandOverCallAsync(int runId, AgentEngine engine, string? model = null)
     {
-        var handOver = new HandOver(engine, claudeModel ?? ClaudeCodeOptions.DefaultModel);
+        var handOver = new HandOver(engine, model ?? (engine == AgentEngine.Antigravity ? AntigravityOptions.DefaultModel : ClaudeCodeOptions.DefaultModel));
         if (!_active.TryGetValue(runId, out var active) || active.LiveCall is not { } live)
             throw new FactoryValidationException("This run isn't waiting on a model right now.");
         // Making the same call again on the same model would only throw away what it has done so far.
-        var target = engine == AgentEngine.Local ? null : handOver.ClaudeModel;
+        var target = engine == AgentEngine.Local ? null : handOver.Model;
         if (live.Call.Model == target)
-            throw new FactoryValidationException($"The call is already running on {(target is null ? "the local model" : ClaudeCodeOptions.ModelLabel(target))}.");
+            throw new FactoryValidationException($"The call is already running on {(target is null ? "the local model" : engine == AgentEngine.Antigravity ? AntigravityOptions.ModelLabel(target) : ClaudeCodeOptions.ModelLabel(target))}.");
         if (!active.RequestHandOver(handOver))
             throw new FactoryValidationException("This run isn't waiting on a model right now.");
         return Task.CompletedTask;
@@ -679,13 +679,20 @@ public sealed partial class FactoryOrchestrator(
     /// <summary>Names the local model as a hand-over target. Claude models are named as in <see cref="ClaudeCodeOptions.Models"/>.</summary>
     public const string LocalHandOverTarget = "local";
 
-    /// <summary>Hands the current call to <see cref="LocalHandOverTarget"/> or a Claude model such as "opus".</summary>
+    /// <summary>Hands the current call to <see cref="LocalHandOverTarget"/>, a Claude model such as "opus" or a Gemini model id.</summary>
     public Task HandOverCallAsync(int runId, string target)
     {
         var name = target.Trim().ToLowerInvariant();
         if (name == LocalHandOverTarget) return HandOverCallAsync(runId, AgentEngine.Local);
+        if (name.StartsWith("claude:", StringComparison.Ordinal)) name = name["claude:".Length..].Trim();
         if (ClaudeCodeOptions.Models.Contains(name)) return HandOverCallAsync(runId, AgentEngine.ClaudeCode, name);
-        throw new FactoryValidationException($"Unknown model \"{target}\". Use {LocalHandOverTarget}, {string.Join(", ", ClaudeCodeOptions.Models)}.");
+        if (name.StartsWith("agy:", StringComparison.Ordinal))
+        {
+            var agyModel = name["agy:".Length..].Trim();
+            if (AntigravityOptions.IsValidModelId(agyModel)) return HandOverCallAsync(runId, AgentEngine.Antigravity, agyModel);
+        }
+        if (AntigravityOptions.Models.Contains(name)) return HandOverCallAsync(runId, AgentEngine.Antigravity, name);
+        throw new FactoryValidationException($"Unknown model \"{target}\". Use {LocalHandOverTarget}, {string.Join(", ", ClaudeCodeOptions.Models)}, {string.Join(", ", AntigravityOptions.Models)}.");
     }
 
     /// <summary>Called between steps: stops the pipeline here if the user asked it to pause.</summary>
@@ -1651,7 +1658,7 @@ public sealed partial class FactoryOrchestrator(
 
     /// <summary>True when a fix on the local model can be handed to Claude.</summary>
     private static bool CanEscalateFixes(FactorySettings settings) =>
-        settings.EscalateFixesToClaudeAfter > 0 && !AgentProfiles.Resolve(settings, AgentRole.BugFixer).UsesClaude;
+        settings.EscalateFixesToClaudeAfter > 0 && AgentProfiles.Resolve(settings, AgentRole.BugFixer).IsLocal;
 
     /// <summary>True once enough local fixes have failed that this attempt should go to Claude.</summary>
     internal static bool ShouldEscalateFix(FactorySettings settings, int failedLocalFixes) =>
@@ -1690,7 +1697,7 @@ public sealed partial class FactoryOrchestrator(
     internal static string? LastResortModel(FactorySettings settings)
     {
         var profile = AgentProfiles.Resolve(settings, AgentRole.BugFixer);
-        var canUseClaude = profile.UsesClaude || settings.EscalateFixesToClaudeAfter > 0;
+        var canUseClaude = profile.UsesClaude || profile.IsLocal && settings.EscalateFixesToClaudeAfter > 0;
         return settings.MaxFixRetries > 0 && canUseClaude && !profile.ClaudeModel.Equals(ClaudeCodeOptions.StrongestModel, StringComparison.OrdinalIgnoreCase)
             ? ClaudeCodeOptions.StrongestModel
             : null;
@@ -1738,7 +1745,7 @@ public sealed partial class FactoryOrchestrator(
     private async Task<bool> ClaudeHasTriedAsync(PipelineContext context, FactorySubtask subtask, CancellationToken ct)
     {
         var profile = AgentProfiles.Resolve(context.Settings, AgentRole.BugFixer);
-        if (!profile.UsesClaude && context.Settings.EscalateFixesToClaudeAfter <= 0) return true;
+        if (!profile.UsesClaude && (!profile.IsLocal || context.Settings.EscalateFixesToClaudeAfter <= 0)) return true;
         var calls = (await store.GetLogsAsync(context.Run.Id, ct: ct))
             .Where(l => l is { Kind: AgentLogKind.LlmCall, Succeeded: true } && l.SubtaskId == subtask.Id)
             .ToList();
@@ -2236,11 +2243,11 @@ public sealed partial class FactoryOrchestrator(
 
             var callId = Guid.NewGuid();
             LlmResult? result = null;
-            // Only the local model is shared. Claude calls from separate runs can overlap.
-            var gate = profile.UsesClaude ? null : _modelGate;
+            // Only the local model is shared. Cloud calls from separate runs can overlap.
+            var gate = profile.IsLocal ? _modelGate : null;
             if (gate is not null) await gate.WaitAsync(ct);
             using var call = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            if (deadline is { } end && !profile.UsesClaude)
+            if (deadline is { } end && profile.IsLocal)
             {
                 var left = end - DateTime.UtcNow;
                 call.CancelAfter(left > TimeSpan.Zero ? left : TimeSpan.Zero);
@@ -2275,7 +2282,12 @@ public sealed partial class FactoryOrchestrator(
             catch (OperationCanceledException) when (!ct.IsCancellationRequested && active?.CallEnded() is { } handOver)
             {
                 var from = profile;
-                profile = profile with { Engine = handOver.Engine, ClaudeModel = handOver.ClaudeModel };
+                profile = handOver.Engine switch
+                {
+                    AgentEngine.ClaudeCode => profile with { Engine = handOver.Engine, ClaudeModel = handOver.Model },
+                    AgentEngine.Antigravity => profile with { Engine = handOver.Engine, AntigravityModel = handOver.Model },
+                    _ => profile with { Engine = handOver.Engine }
+                };
                 await AppendLlmLogAsync(from, run.Id, subtaskId, attemptPrompt, null, false,
                     $"You handed the {profile.DisplayName} from {ModelName(from)} to {ModelName(profile)}, so it starts over.", ct, elapsed.Elapsed);
                 bus.Publish(new LlmCallFinished(run.Id, callId));
@@ -2336,14 +2348,14 @@ public sealed partial class FactoryOrchestrator(
                 runaways.Add(runaway);
                 attempt--; // Each step down the ladder changes the call, so it isn't one of the repeated attempts.
                 attemptPrompt = PromptBuilder.AfterRunaway(prompt, runaway);
-                if (!profile.UsesClaude && runaways.Count == 1)
+                if (profile.IsLocal && runaways.Count == 1)
                 {
                     profile = profile with { Temperature = RetryTemperature(profile.Temperature) };
                     await LogAsync(run.Id, subtaskId, AgentLogKind.Warning, profile.Stage,
                         $"{runaway} Trying once more at temperature {profile.Temperature:0.0#}, with a note on what went wrong.", ct);
                     continue;
                 }
-                if (!profile.UsesClaude && settings.EscalateRunawaysToClaude)
+                if (profile.IsLocal && settings.EscalateRunawaysToClaude)
                 {
                     profile = profile with { Engine = AgentEngine.ClaudeCode };
                     await LogAsync(run.Id, subtaskId, AgentLogKind.Warning, profile.Stage,
@@ -2384,7 +2396,7 @@ public sealed partial class FactoryOrchestrator(
             2 => " Another try with more varied sampling went the same way.",
             _ => " Another try with more varied sampling, then one on Claude, went the same way."
         };
-        var claude = profile.UsesClaude
+        var claude = !profile.IsLocal
             ? ""
             : settings.EscalateRunawaysToClaude
                 ? $", or set the {profile.DisplayName} to run on Claude in Settings"
@@ -2392,11 +2404,16 @@ public sealed partial class FactoryOrchestrator(
         return $"{runaways[^1]}{tried} A bigger context window won't help with this. Resume with guidance that narrows the job, such as keeping data files to a few rows{claude}.";
     }
 
-    private static string EffortOf(AgentProfile profile) => profile.UsesClaude ? profile.ClaudeEffort : profile.ReasoningEffort;
+    private static string EffortOf(AgentProfile profile) =>
+        profile.UsesClaude ? profile.ClaudeEffort : profile.UsesAntigravity ? "Set by Gemini" : profile.ReasoningEffort;
 
-    private static string ModelName(AgentProfile profile) => profile.UsesClaude ? ClaudeCodeOptions.ModelLabel(profile.ClaudeModel) : "the local model";
+    private static string ModelName(AgentProfile profile) =>
+        profile.UsesClaude ? ClaudeCodeOptions.ModelLabel(profile.ClaudeModel)
+        : profile.UsesAntigravity ? AntigravityOptions.ModelLabel(profile.AntigravityModel)
+        : "the local model";
 
-    private static string? ModelOf(AgentProfile profile) => profile.UsesClaude ? profile.ClaudeModel : null;
+    private static string? ModelOf(AgentProfile profile) =>
+        profile.UsesClaude ? profile.ClaudeModel : profile.UsesAntigravity ? profile.AntigravityModel : null;
 
     /// <summary>
     /// Says how an answer filled the context window, when another try could help: the window was already big enough,
@@ -2405,6 +2422,8 @@ public sealed partial class FactoryOrchestrator(
     /// </summary>
     private async Task<string> DescribeFullWindowAsync(AgentProfile profile, FactorySettings settings, LlmResult result, CancellationToken ct)
     {
+        if (profile.UsesAntigravity)
+            throw new LlmException($"{profile.DisplayName} reached Gemini's output limit before the answer was finished. Try a different Gemini model for this agent in Settings, then resume the run.");
         if (profile.UsesClaude)
             throw new LlmException($"{profile.DisplayName} reached Claude's output limit before the answer was finished. Try a lower effort for this agent in Settings, then resume the run.");
 
@@ -2438,7 +2457,7 @@ public sealed partial class FactoryOrchestrator(
         string Render(IEnumerable<Skill> chosen) => SkillLibrary.Render(chosen, settings.MaxFileChars);
 
         var prompt = build(definitions, Render(skills));
-        var window = (definitions.Length > 0 || skills.Count > 0) && !profile.UsesClaude
+        var window = (definitions.Length > 0 || skills.Count > 0) && profile.IsLocal
             ? await llm.GetContextLengthAsync(settings.BaseUrl, settings.ModelId, ct)
             : null;
         if (window is { } size)

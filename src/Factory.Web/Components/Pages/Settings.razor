@@ -116,7 +116,7 @@
 
             <section class="settings-section">
                 <h2>Agent profiles</h2>
-                <div class="hint">Each agent runs on the local model, or on Claude through Claude Code, which uses your Claude login rather than an API key. Claude only answers: its patches still go through Hatchet's checks, git and plan approval. A run started with a run profile or a model of its own uses that in place of the "Runs on" column.</div>
+                <div class="hint">Each agent runs on the local model, on Claude through Claude Code, or on Gemini through the Antigravity CLI (<code>agy</code>). Claude and Gemini use your own login rather than an API key. They only answer: their patches still go through Hatchet's checks, git and plan approval. A run started with a run profile or a model of its own uses that in place of the "Runs on" column.</div>
                 <table class="profiles-table">
                     <thead>
                         <tr>
@@ -136,16 +136,18 @@
                             var resolved = profile with { ReasoningEffort = edit.ReasoningEffort, Temperature = edit.Temperature };
                             var isDefault = edit.ReasoningEffort == profile.ReasoningEffort && Math.Abs(edit.Temperature - profile.Temperature) < 0.0001
                                             && edit.Engine == profile.Engine && edit.ClaudeModel == profile.ClaudeModel && edit.ClaudeEffort == profile.ClaudeEffort
-                                            && edit.SystemPrompt is null;
+                                            && edit.AntigravityModel == profile.AntigravityModel && edit.SystemPrompt is null;
                             var promptOpen = _openPrompts.Contains(profile.Role);
                             var onClaude = edit.Engine == AgentEngine.ClaudeCode;
+                            var onAntigravity = edit.Engine == AgentEngine.Antigravity;
                             <tr>
                                 <td><Icon Name="@Fmt.Icon(profile.Role)" Size="14" Class="muted" /> @profile.DisplayName</td>
                                 <td class="muted">@profile.Stage</td>
                                 <td class="engine-cell">
-                                    <select @bind="edit.Engine" @bind:after="CheckClaudeIfUsedAsync" aria-label="Runs on">
+                                    <select @bind="edit.Engine" @bind:after="CheckCloudIfUsedAsync" aria-label="Runs on">
                                         <option value="@AgentEngine.Local">Local model</option>
                                         <option value="@AgentEngine.ClaudeCode">Claude Code</option>
+                                        <option value="@AgentEngine.Antigravity">Gemini (Antigravity)</option>
                                     </select>
                                     @if (onClaude)
                                     {
@@ -153,6 +155,15 @@
                                             @foreach (var model in ClaudeCodeOptions.Models)
                                             {
                                                 <option value="@model">@ClaudeCodeOptions.ModelLabel(model)</option>
+                                            }
+                                        </select>
+                                    }
+                                    @if (onAntigravity)
+                                    {
+                                        <select @bind="edit.AntigravityModel" aria-label="Antigravity model">
+                                            @foreach (var model in Fmt.AntigravityChoices(edit.AntigravityModel, _agyModels))
+                                            {
+                                                <option value="@model.Value">@model.Label</option>
                                             }
                                         </select>
                                     }
@@ -167,6 +178,10 @@
                                             }
                                         </select>
                                     }
+                                    else if (onAntigravity)
+                                    {
+                                        <span class="muted">Set by Gemini</span>
+                                    }
                                     else
                                     {
                                         <select @bind="edit.ReasoningEffort" aria-label="Reasoning effort">
@@ -177,9 +192,9 @@
                                         </select>
                                     }
                                 </td>
-                                @if (onClaude)
+                                @if (onClaude || onAntigravity)
                                 {
-                                    <td class="muted" colspan="2">Set by Claude</td>
+                                    <td class="muted" colspan="2">@(onAntigravity ? "Set by Gemini" : "Set by Claude")</td>
                                 }
                                 else
                                 {
@@ -264,9 +279,45 @@
                 {
                     <div class="probe probe-good"><Icon Name="check" Size="13" /> Claude Code @_claude.Version is logged in@(_claude.Account is { } account ? $" ({account})" : "").</div>
                 }
+
+                <div class="claude-code-row">
+                    <div class="field claude-code-path">
+                        <label for="antigravity-path">Antigravity executable</label>
+                        <input autocomplete="off" data-1p-ignore data-lpignore="true" id="antigravity-path" class="mono" spellcheck="false" @bind="_settings.AntigravityPath" @bind:after="CheckAntigravityAsync" />
+                    </div>
+                    <button class="btn align-end" disabled="@_checkingAntigravity" @onclick="CheckAntigravityAsync">
+                        @if (_checkingAntigravity)
+                        {
+                            <span class="spinner"></span>
+                        }
+                        else
+                        {
+                            <Icon Name="refresh" Size="13" />
+                        }
+                        Check
+                    </button>
+                </div>
+                @if (_antigravity is { Installed: false })
+                {
+                    <div class="probe @(UsesAntigravity ? "probe-bad" : "probe-muted")"><Icon Name="x" Size="13" /> @_antigravity.Error</div>
+                }
+                else if (_antigravity is { LoggedIn: false })
+                {
+                    <div class="probe @(UsesAntigravity ? "probe-warn" : "probe-muted")">
+                        <Icon Name="alert" Size="13" /> Antigravity @_antigravity.Version is installed but not signed in. Run <code>agy</code> in a terminal to sign in, then check again.
+                    </div>
+                }
+                else if (_antigravity is not null)
+                {
+                    <div class="probe probe-good"><Icon Name="check" Size="13" /> Antigravity @_antigravity.Version is signed in@(_antigravity.Account is { } agyAccount ? $" ({agyAccount})" : "").@(_agyModels.Count > 0 ? $" {_agyModels.Count} models available." : "")</div>
+                    @if (_agyQuota is not null)
+                    {
+                        <div class="probe probe-muted"><Icon Name="sparkle" Size="13" /> Quota: @_agyQuota</div>
+                    }
+                }
             </section>
 
-            <RunProfilesSettings Profiles="_settings.RunProfiles" />
+            <RunProfilesSettings Profiles="_settings.RunProfiles" AntigravityModels="_agyModels" />
 
             <SkillsSettings />
 
@@ -298,9 +349,9 @@
                         <div class="hint">For runs where any agent uses the local model. It answers one request at a time, so more runs only take turns. Others wait in line.</div>
                     </div>
                     <div class="field">
-                        <label for="claude-runs">Runs at once on Claude</label>
+                        <label for="claude-runs">Runs at once on Claude or Gemini</label>
                         <input autocomplete="off" data-1p-ignore data-lpignore="true" id="claude-runs" type="number" min="1" max="16" @bind="_settings.MaxParallelClaudeRuns" />
-                        <div class="hint">For runs where every agent is set to Claude. Others wait in line. Runs in the same repository always go one at a time.</div>
+                        <div class="hint">For runs where every agent is set to Claude or Gemini. Others wait in line. Runs in the same repository always go one at a time.</div>
                     </div>
                     <div class="field">
                         <label for="retries">Fix attempts per subtask</label>
@@ -382,10 +433,12 @@
             {
                 Role = p.Role, ReasoningEffort = resolved.ReasoningEffort, Temperature = resolved.Temperature,
                 Engine = resolved.Engine, ClaudeModel = resolved.ClaudeModel, ClaudeEffort = resolved.ClaudeEffort,
+                AntigravityModel = resolved.AntigravityModel,
                 SystemPrompt = resolved.SystemPrompt == p.SystemPrompt ? null : resolved.SystemPrompt
             };
         });
         _ = CheckClaudeAsync();
+        _ = CheckAntigravityAsync();
         await TestAsync();
         Health.Changed += OnHealthChanged;
     }
@@ -440,6 +493,39 @@
 
     private Task CheckClaudeIfUsedAsync() => _claude is null && UsesClaude ? CheckClaudeAsync() : Task.CompletedTask;
 
+    private AntigravityStatus? _antigravity;
+    private int _antigravityVersion;
+    private bool _checkingAntigravity;
+
+    // What `agy models` and `/usage` reported at the last check.
+    private IReadOnlyList<(string Value, string Label)> _agyModels = [];
+    private string? _agyQuota;
+
+    private bool UsesAntigravity => _profiles.Values.Any(p => p.Engine == AgentEngine.Antigravity);
+
+    private async Task CheckAntigravityAsync()
+    {
+        var version = ++_antigravityVersion;
+        _checkingAntigravity = true;
+        StateHasChanged();
+        var path = _settings!.AntigravityPath;
+        var statusTask = AntigravityLlmClient.CheckAsync(path);
+        var modelsTask = AntigravityCatalog.ModelsAsync(path, refresh: true);
+        var status = await statusTask;
+        var models = status.Installed ? await modelsTask : [];
+        var quota = status.Quota ?? (status is { Installed: true, LoggedIn: true } ? await AntigravityCatalog.QuotaAsync(path) : null);
+        if (version != _antigravityVersion) return;
+        _antigravity = status;
+        _agyModels = models;
+        _agyQuota = quota;
+        _checkingAntigravity = false;
+        StateHasChanged();
+    }
+
+    private Task CheckAntigravityIfUsedAsync() => _antigravity is null && UsesAntigravity ? CheckAntigravityAsync() : Task.CompletedTask;
+
+    private Task CheckCloudIfUsedAsync() => Task.WhenAll(CheckClaudeIfUsedAsync(), CheckAntigravityIfUsedAsync());
+
     private static string ProviderLabel(LlmProvider provider) => provider switch
     {
         LlmProvider.LmStudio => "LM Studio",
@@ -472,6 +558,7 @@
         _profiles[profile.Role].Engine = profile.Engine;
         _profiles[profile.Role].ClaudeModel = profile.ClaudeModel;
         _profiles[profile.Role].ClaudeEffort = profile.ClaudeEffort;
+        _profiles[profile.Role].AntigravityModel = profile.AntigravityModel;
         _profiles[profile.Role].SystemPrompt = null;
     }
 

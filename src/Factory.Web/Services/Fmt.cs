@@ -7,10 +7,13 @@ namespace Factory.Web.Services;
 /// <summary>Display text and tones shared across the UI.</summary>
 public static class Fmt
 {
-    /// <summary>"Claude Opus · high" for Claude calls, "xhigh · T 0.6" for the local model.</summary>
-    public static string CallParams(string? model, string? effort, double? temperature) => model is not null
-        ? $"{ClaudeCodeOptions.ModelLabel(model)} · {effort}"
-        : $"{effort} · T {temperature?.ToString("0.0")}";
+    /// <summary>"Claude Opus · high" for Claude calls, "Gemini 4 Argon · high" for Antigravity, "xhigh · T 0.6" for the local model.</summary>
+    public static string CallParams(string? model, string? effort, double? temperature)
+    {
+        if (model is null) return $"{effort} · T {temperature?.ToString("0.0")}";
+        if (!ClaudeCodeOptions.Models.Contains(model)) return ModelLabel(model);
+        return $"{ClaudeCodeOptions.ModelLabel(model)} · {effort}";
+    }
 
     public static string Label(RunStatus status) => status switch
     {
@@ -110,7 +113,7 @@ public static class Fmt
         usage.ByModel.Count == 0
             ? "No model has been called yet."
             : string.Join("\n", usage.ByModel.Select(u =>
-                $"{(u.Model is null ? "Local model" : ClaudeCodeOptions.ModelLabel(u.Model))}: {u.PromptTokens:N0} prompt and {u.CompletionTokens:N0} completion tokens in {u.Calls} {(u.Calls == 1 ? "call" : "calls")}"
+                $"{(u.Model is null ? "Local model" : ClaudeCodeOptions.Models.Contains(u.Model) ? ClaudeCodeOptions.ModelLabel(u.Model) : ModelLabel(u.Model))}: {u.PromptTokens:N0} prompt and {u.CompletionTokens:N0} completion tokens in {u.Calls} {(u.Calls == 1 ? "call" : "calls")}"
                 + (u.CostUsd is > 0 ? $", {Usd(u.CostUsd.Value)}" : "")))
               + (usage.ClaudeCostUsd is > 0 ? "\nThe cost is Claude Code's own figure at API prices. On a subscription it measures use and is not a bill." : "");
 
@@ -162,7 +165,7 @@ public static class Fmt
     /// <summary>"2nd in line for a local-model worker", or the run whose turn it waits for.</summary>
     public static string Queue(QueueSpot spot) => spot.BlockedByRunId is { } blocker
         ? $"Waiting for run #{blocker} to finish, as it has this repository checked out"
-        : $"{Ordinal(spot.Position)} in line for a {(spot.Pool == WorkerPool.Claude ? "Claude" : "local-model")} worker";
+        : $"{Ordinal(spot.Position)} in line for a {(spot.Pool == WorkerPool.Claude ? "cloud" : "local-model")} worker";
 
     public static string Ordinal(int n) => (n % 100) switch
     {
@@ -191,4 +194,22 @@ public static class Fmt
     /// <summary>Live views only need the end of a long stream, which keeps each render small.</summary>
     public static string Tail(string text, int maxChars) =>
         text.Length <= maxChars ? text : "…" + text[^maxChars..];
+
+    /// <summary>Antigravity model ids used only when <c>agy models</c> can't be read.</summary>
+    public static readonly IReadOnlyList<(string Value, string Label)> AntigravityModels =
+        AntigravityOptions.Models.Select(m => (m, ModelLabel(m))).ToList();
+
+    /// <summary>
+    /// The Antigravity models to offer: the ones agy reported when there are any, otherwise the built-in list.
+    /// Always includes the one currently chosen.
+    /// </summary>
+    public static IReadOnlyList<(string Value, string Label)> AntigravityChoices(string? current, IReadOnlyList<(string Value, string Label)>? discovered = null)
+    {
+        var baseList = discovered is { Count: > 0 } ? discovered : AntigravityModels;
+        if (string.IsNullOrWhiteSpace(current) || baseList.Any(m => m.Value == current)) return baseList;
+        return [.. baseList, (current, ModelLabel(current))];
+    }
+
+    /// <summary>Label for an Antigravity model id: "gemini-4-argon-high" reads "Gemini 4 Argon · high".</summary>
+    public static string ModelLabel(string model) => AntigravityOptions.ModelLabel(model);
 }

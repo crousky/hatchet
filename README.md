@@ -23,7 +23,8 @@ You need:
 
 - The [.NET SDK](https://dotnet.microsoft.com/download) (9 or 10) and Git. The web app carries its own ASP.NET Core 9 runtime, so nothing else needs installing.
 - A model served over an OpenAI-compatible API. See step 1 below.
-- Optional: the [Claude Code](https://claude.com/claude-code) CLI, if you want any agent to run on Claude.
+- **Optional:** the [Claude Code](https://claude.com/claude-code) CLI, if you want any agent to run on Claude.
+- **Optional:** the Antigravity CLI (`agy`), if you want any agent to run on Gemini.
 
 1. **Serve the model.**
    - **LM Studio:** load Qwen 3.8 and start the local server (`http://localhost:1234/v1`).

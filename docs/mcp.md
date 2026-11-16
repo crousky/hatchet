@@ -24,7 +24,7 @@ Then plan a change with Claude in conversation and ask it to hand the plan to Ha
 | `approve_plan` | Approves the plan of a run you started with `reviewPlanInHatchet: true`, without the commands Hatchet's planner proposed. It refuses every other plan: one you didn't ask to review, one for a defect or change report, and one longer than Hatchet builds unattended (40 subtasks by default). Those are approved by you, in Hatchet |
 | `amend_plan` | Proposes new steps in place of the ones a paused run hasn't started. Nothing changes until the user approves it in Hatchet. See [Amending a paused run](#amending-a-paused-run) |
 | `pause_run`, `resume_run` | Pause now or after the current step; resume, retry the fixer with guidance, re-verify, restart or skip. Guidance sent this way reaches the agents labelled as the driving agent's, and not the reviewer. `retry_fixer` works three times per subtask over MCP, and after that it has to be done in Hatchet. `resume` and `reverify` are refused at the two pauses only the user can clear: a changed check command, and a file too long to review in full. At a pause on the user's token ceiling, only `skip_subtask` works. While an `amend_plan` proposal waits for the user, nothing works |
-| `hand_over_call` | Stops the call an agent is making and makes it again on the local model or a Claude model |
+| `hand_over_call` | Stops the call an agent is making and makes it again on the local model, a Claude model (`opus`, `sonnet`, `haiku`) or an Antigravity model (`agy:<model id>`, such as `agy:gemini-3.8-flash-high`; needs the optional `agy` CLI, signed in) |
 | `cancel_run` | Abandons a run |
 
 ## Ad hoc requests
@@ -141,7 +141,7 @@ Hatchet's side of the same rule: it never treats what an MCP client says as the 
 2. Hatchet starts a run from that spec, in the repository's usual way. The run pauses for you to approve its plan before anything is built, so you can trim or reject what it proposes. If another run is open in the repository, the new one waits in line. With no run open, the repository must be clean, and Hatchet says so before spending time on the screenshots.
 3. If Claude concludes that nothing in the project should change, for example because a missing DLL points to a bad install, no run starts. The write-up says what to do instead, and **Start a run anyway** on the request's page starts one from it if you disagree.
 
-Pick the model when you file one, as described under [Choosing the model](#choosing-the-model). A Claude model also does Claude's reading of the screenshots, because the local model can't see pictures. With a profile or a local model, that reading uses Claude's default model.
+Pick the model when you file one, as described under [Choosing the model](#choosing-the-model); `agy:<model id>` runs it on a Gemini model through the Antigravity CLI. A Claude model also does Claude's reading of the screenshots, because the local model can't see pictures. With a profile or a local model, that reading uses Claude's default model.
 
 Screenshots must be PNG, JPEG, GIF or WebP files, up to 10 MB each and 8 per report, and Hatchet checks the file's contents, not its name. They are kept in the `attachments` folder next to the database, so they never touch the repository, and are removed when you delete the request. The run Hatchet started is kept.
 

@@ -20,9 +20,16 @@ public sealed class ModelHealthService(EfSettingsStore settingsStore, ILlmClient
 
     public ClaudeCodeStatus? ClaudeCode { get; private set; }
 
+    /// <summary>The agents set to run on Antigravity, and whether it can serve them. Null status until checked.</summary>
+    public IReadOnlyList<string> AntigravityAgents { get; private set; } = [];
+
+    public AntigravityStatus? Antigravity { get; private set; }
+
     // Starting Claude Code takes a moment, so its login is checked less often than the model server.
     private static readonly TimeSpan ClaudeCheckInterval = TimeSpan.FromMinutes(1);
+    private static readonly TimeSpan AntigravityCheckInterval = TimeSpan.FromMinutes(1);
     private DateTime _claudeCheckedAt = DateTime.MinValue;
+    private DateTime _antigravityCheckedAt = DateTime.MinValue;
 
     /// <summary>True while LM Studio is reloading the model with a bigger context window.</summary>
     public bool Reloading { get; private set; }
@@ -98,6 +105,21 @@ public sealed class ModelHealthService(EfSettingsStore settingsStore, ILlmClient
             ClaudeCode = await ClaudeCodeLlmClient.CheckAsync(settings.ClaudeCodePath, ct);
             _claudeCheckedAt = DateTime.UtcNow;
         }
+
+        AntigravityAgents = AgentProfiles.Defaults
+            .Select(p => AgentProfiles.Resolve(settings, p.Role))
+            .Where(p => p.UsesAntigravity)
+            .Select(p => p.DisplayName)
+            .ToList();
+        if (AntigravityAgents.Count == 0)
+        {
+            Antigravity = null;
+        }
+        else if (DateTime.UtcNow - _antigravityCheckedAt > AntigravityCheckInterval)
+        {
+            Antigravity = await AntigravityLlmClient.CheckAsync(settings.AntigravityPath, ct);
+            _antigravityCheckedAt = DateTime.UtcNow;
+        }
         Changed?.Invoke();
     }
 
@@ -132,6 +154,7 @@ public sealed class ModelHealthService(EfSettingsStore settingsStore, ILlmClient
     private void OnSettingsChanged()
     {
         _claudeCheckedAt = DateTime.MinValue;
+        _antigravityCheckedAt = DateTime.MinValue;
         _ = RefreshAsync();
     }
 }

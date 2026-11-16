@@ -2,7 +2,7 @@ namespace Factory.Contracts;
 
 /// <summary>
 /// One role in the pipeline. Roles differ by system prompt, schema, temperature and reasoning effort,
-/// and each runs on the single local model unless it is routed to Claude through Claude Code.
+/// and each runs on the single local model unless it is routed to Claude through Claude Code or Gemini through Antigravity.
 /// </summary>
 public sealed record AgentProfile(
     AgentRole Role,
@@ -13,14 +13,19 @@ public sealed record AgentProfile(
     string SystemPrompt,
     AgentEngine Engine = AgentEngine.Local,
     string ClaudeModel = ClaudeCodeOptions.DefaultModel,
-    string ClaudeEffort = ClaudeCodeOptions.DefaultEffort)
+    string ClaudeEffort = ClaudeCodeOptions.DefaultEffort,
+    string AntigravityModel = AntigravityOptions.DefaultModel)
 {
     public bool UsesClaude => Engine == AgentEngine.ClaudeCode;
+    public bool UsesAntigravity => Engine == AgentEngine.Antigravity;
+    public bool IsLocal => !UsesClaude && !UsesAntigravity;
 
     /// <summary>What answers this role and how hard it thinks, for the agent feed.</summary>
     public string Describe() => UsesClaude
         ? $"{ClaudeCodeOptions.ModelLabel(ClaudeModel)} · {ClaudeEffort}"
-        : $"{ReasoningEffort} · T {Temperature:0.0}";
+        : UsesAntigravity
+            ? AntigravityOptions.ModelLabel(AntigravityModel)
+            : $"{ReasoningEffort} · T {Temperature:0.0}";
 
     public bool ThinkingActive => ReasoningEffort != ReasoningEfforts.Low;
 
