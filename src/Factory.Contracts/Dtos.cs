@@ -57,6 +57,23 @@ public sealed record SubtaskEdit(
     string VerificationCommand,
     List<string>? Skills = null);
 
+/// <summary>Something in a supplied plan that doesn't match the repository. The run starts all the same.</summary>
+/// <param name="Kind">One of <see cref="PlanWarningKinds"/>.</param>
+/// <param name="Step">The step's position in the plan, starting at 1.</param>
+/// <param name="Subject">The skill name or path the warning is about.</param>
+public sealed record PlanWarning(string Kind, int Step, string StepTitle, string Subject, string Message);
+
+public static class PlanWarningKinds
+{
+    public const string UnknownSkill = "unknown_skill";
+    public const string FileToModifyMissing = "file_to_modify_missing";
+    public const string FileToReadMissing = "file_to_read_missing";
+    public const string FileToCreateExists = "file_to_create_exists";
+    public const string SecretPath = "secret_path";
+    public const string IgnoredPath = "ignored_path";
+    public const string InvalidPath = "invalid_path";
+}
+
 public sealed record RepositoryProbe(
     bool Exists,
     bool IsGitRepository,

@@ -38,7 +38,7 @@ public sealed record RunSummary(int RunId, string Title, string Status, string P
 
 public sealed record SubtaskSummary(int Order, string Title, string Status, int FixAttempts);
 
-public sealed record RunDetails(RunSummary Run, string? Branch, string? BaseBranch, bool? FinalCheckPassed, int Tokens, string? WorkLeft, IReadOnlyList<SubtaskSummary> Subtasks, IReadOnlyList<string> RecentEvents, PauseBrief? NeedsFromYou = null, string Note = McpNotes.Data);
+public sealed record RunDetails(RunSummary Run, string? Branch, string? BaseBranch, bool? FinalCheckPassed, int Tokens, string? WorkLeft, IReadOnlyList<SubtaskSummary> Subtasks, IReadOnlyList<string> RecentEvents, PauseBrief? NeedsFromYou = null, string Note = McpNotes.Data, IReadOnlyList<PlanWarning>? PlanWarnings = null);
 
 public sealed record SubtaskDetails(
     int Order, string Title, string Status, string Description, int FixAttempts,
@@ -79,6 +79,7 @@ public sealed class HatchetTools(FactoryOrchestrator orchestrator, IRunStore sto
         Pass the plan you worked out with the user to skip Hatchet's own planner. Without a plan, Hatchet plans from the spec itself, which is slower.
         The working tree must be clean. The run continues in the background: follow it with get_run.
         If the user's limit of runs at once is reached, or another open run has the repository, the run waits in line and starts by itself; queue says why.
+        A plan you pass is checked against the repository, and planWarnings lists what doesn't match: unknown_skill, file_to_modify_missing, file_to_read_missing, file_to_create_exists, secret_path, ignored_path or invalid_path, each with its step. The run starts anyway, so if a warning is a mistake, cancel_run and start again with the plan corrected, or set reviewPlanInHatchet so the user can fix it first.
         """ + " " + McpNotes.Data)]
     public async Task<RunDetails> StartRun(
         [Description("Absolute path of the repository.")] string repositoryPath,
@@ -94,8 +95,8 @@ public sealed class HatchetTools(FactoryOrchestrator orchestrator, IRunStore sto
         // A client may send null for a list or field it leaves empty.
         var edits = plan?.Select(step => new SubtaskEdit(null, step.Title ?? "", step.Description ?? "",
             step.FilesToModify ?? [], step.FilesToCreate ?? [], step.FilesToRead ?? [], step.VerificationCommand ?? "", step.Skills ?? [])).ToList();
-        var run = await Do(() => orchestrator.StartRunAsync(new NewRunRequest(repositoryPath, spec, title, verificationCommand, reviewPlanInHatchet, model, PlanReviewByUser: false), edits, ct));
-        return await DescribeRunAsync(run.Id, ct);
+        var (run, warnings) = await Do(() => orchestrator.StartPlannedRunAsync(new NewRunRequest(repositoryPath, spec, title, verificationCommand, reviewPlanInHatchet, model, PlanReviewByUser: false), edits, ct));
+        return await DescribeRunAsync(run.Id, ct) with { PlanWarnings = edits is null ? null : warnings };
     }
 
     [McpServerTool(Name = "list_runs", ReadOnly = true)]
