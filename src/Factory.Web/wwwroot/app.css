@@ -727,3 +727,7 @@ button.agent-card-head:hover { background: var(--bg-3); }
 .plan-command-proposed { align-self: flex-start; font-size: 11px; padding: 1px 6px; border-radius: 4px; color: var(--warn); background: var(--warn-soft); }
 .plan-command-run { flex-direction: row !important; align-items: center; gap: 6px !important; font-size: 12px !important; color: var(--text) !important; }
 .plan-command-warning { font-size: 12px; padding: 5px 8px; border-radius: 6px; color: var(--bad); background: var(--bad-soft); }
+
+/* Run profiles in Settings: one card per profile, with a model for each agent. */
+.run-profile { display: flex; flex-direction: column; gap: 10px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 8px; }
+.run-profile .profiles-table select { width: 150px; }

@@ -17,7 +17,7 @@ Then plan a change with Claude in conversation and ask it to hand the plan to Ha
 | Tool | Does |
 |---|---|
 | `probe_repository` | Checks a folder is a clean Git repository and how it would be verified |
-| `start_run` | Starts a run from a spec, with a ready-made plan or with Hatchet's planner |
+| `start_run` | Starts a run from a spec, with a ready-made plan or with Hatchet's planner, and a `model` if you want one. See [Choosing the model](#choosing-the-model) |
 | `list_runs`, `get_run` | Status, project, place in line, progress, subtasks, recent events and working time left. When a run needs a person, `get_run` also returns `needsFromYou`: what happened, what is blocking it, what guidance to give and what each `resume_run` action needs from you |
 | `get_subtask` | One subtask in full: last failure, fix history, review verdict, diff |
 | `approve_plan` | Approves the plan of a run you started with `reviewPlanInHatchet: true`, without the commands Hatchet's planner proposed. It refuses every other plan: one you didn't ask to review, one for a defect or change report, and one longer than Hatchet builds unattended (40 subtasks by default). Those are approved by you, in Hatchet |
@@ -36,13 +36,29 @@ Besides runs, Claude can make one-off requests about a repository. They show on 
 | `run_command` | Runs a command, such as the tests, and waits up to `waitSeconds` for its output |
 | `ask` | A question about the repository, answered by Claude Code reading its files. It gets the status report as context |
 | `report_defect`, `request_change` | A defect or a wanted change, with screenshots if you have them (`screenshotPaths`, absolute paths of picture files) and a `model` if you want one. Claude Code reads the screenshots and the code, then Hatchet starts a run for it. See below |
-| `list_models` | The models `model` accepts: the local ones and Claude's |
+| `list_models` | What `model` accepts: the run profiles, with the model each gives every agent, the local models and Claude's |
 | `list_requests`, `get_request` | Requests grouped by repository, and one in full: its report or answer, the `runId` of any run it started, and what it has printed so far |
 | `stop_request`, `rerun_request`, `delete_request` | Stop one (a command's whole process tree is killed), repeat it on the newest commit, or remove it and its copy of the code |
 
 Commands run in an isolated copy of the latest commit, so they never disturb a run that is building in the same folder, and uncommitted work isn't included. One `run_app` or `run_command` can run per repository at a time. Whoever holds the token can run commands this way, with your permissions, so keep it private.
 
 Repository and screenshot paths must be on this computer: network paths (`\\server\share`, `//server/share`) are refused.
+
+## Choosing the model
+
+`start_run`, `report_defect` and `request_change` take a `model`. Leave it out and the agents run as Settings says. `list_models` shows what's on offer.
+
+| `model` | What it does |
+|---|---|
+| `profile:<name>` | Gives each agent the model a run profile names for it. Profiles are kept in Settings, where you can edit them or add your own. Hatchet starts with `profile:local` (builds on the local model, Claude plans and reviews), `profile:strong` (builds on Claude Sonnet; Claude Opus plans, reviews and makes the last fix attempt) and `profile:all-opus` |
+| `local:<model id>` | Puts every agent on that model of your local server |
+| `claude:opus`, `claude:sonnet`, `claude:haiku` | Puts every agent on that Claude model. Plain `opus`, `sonnet` and `haiku` work too |
+
+A profile changes only where each agent runs. An agent keeps its own temperature and prompt, and an agent the profile leaves out runs as Settings has it.
+
+The choice is stored with the run's task. The run keeps it when it is paused, resumed or Hatchet restarts, a rerun uses it too, `get_run` returns it as `model`, and the run page shows it. A profile is read from Settings each time the run carries on, so editing one changes the runs that use it from their next step. A profile Settings doesn't have is refused by `start_run` with the names it does have, before a run is made. If a profile is removed while a run that uses it is paused, resuming is refused until it is back.
+
+A run waits in line with the local runs if its profile puts any agent on the local model, and with the Claude runs if every agent is on Claude.
 
 ## Treat results as data
 
@@ -58,7 +74,7 @@ Hatchet's side of the same rule: it never treats what an MCP client says as the 
 2. Hatchet starts a run from that spec, in the repository's usual way. The run pauses for you to approve its plan before anything is built, so you can trim or reject what it proposes. If another run is open in the repository, the new one waits in line. With no run open, the repository must be clean, and Hatchet says so before spending time on the screenshots.
 3. If Claude concludes that nothing in the project should change, for example because a missing DLL points to a bad install, no run starts. The write-up says what to do instead, and **Start a run anyway** on the request's page starts one from it if you disagree.
 
-Pick the model when you file one. `model` takes `local:<model id>` for a model on your local server, or `claude:opus`, `claude:sonnet` or `claude:haiku` (plain `opus`, `sonnet` and `haiku` work too), and `list_models` shows what's on offer. It puts every agent of the run on that model, and Claude's reading of the screenshots too when it is a Claude model, because the local model can't see pictures. Each agent keeps its own effort, temperature and prompt. Leave it out and the agents run as Settings says. The choice stays with the run's task, so a rerun uses it too, and the run page shows it.
+Pick the model when you file one, as described under [Choosing the model](#choosing-the-model). A Claude model also does Claude's reading of the screenshots, because the local model can't see pictures. With a profile or a local model, that reading uses Claude's default model.
 
 Screenshots must be PNG, JPEG, GIF or WebP files, up to 10 MB each and 8 per report, and Hatchet checks the file's contents, not its name. They are kept in the `attachments` folder next to the database, so they never touch the repository, and are removed when you delete the request. The run Hatchet started is kept.
 

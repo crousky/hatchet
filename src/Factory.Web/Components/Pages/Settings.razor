@@ -21,6 +21,11 @@
             </button>
         </header>
 
+        @if (_saveError is not null)
+        {
+            <div class="notice notice-bad"><Icon Name="alert" Size="16" /><div class="notice-body">Not saved. @_saveError</div></div>
+        }
+
         @if (_settings is not null)
         {
             <section class="settings-section">
@@ -111,7 +116,7 @@
 
             <section class="settings-section">
                 <h2>Agent profiles</h2>
-                <div class="hint">Each agent runs on the local model, or on Claude through Claude Code, which uses your Claude login rather than an API key. Claude only answers: its patches still go through Hatchet's checks, git and plan approval.</div>
+                <div class="hint">Each agent runs on the local model, or on Claude through Claude Code, which uses your Claude login rather than an API key. Claude only answers: its patches still go through Hatchet's checks, git and plan approval. A run started with a run profile or a model of its own uses that in place of the "Runs on" column.</div>
                 <table class="profiles-table">
                     <thead>
                         <tr>
@@ -260,6 +265,8 @@
                     <div class="probe probe-good"><Icon Name="check" Size="13" /> Claude Code @_claude.Version is logged in@(_claude.Account is { } account ? $" ({account})" : "").</div>
                 }
             </section>
+
+            <RunProfilesSettings Profiles="_settings.RunProfiles" />
 
             <SkillsSettings />
 
@@ -411,7 +418,8 @@
     private int _claudeVersion;
     private bool _checkingClaude;
 
-    private bool UsesClaude => _profiles.Values.Any(p => p.Engine == AgentEngine.ClaudeCode);
+    private bool UsesClaude => _profiles.Values.Any(p => p.Engine == AgentEngine.ClaudeCode)
+                               || _settings?.RunProfiles.Any(p => p.Roles.Any(r => r.Engine == AgentEngine.ClaudeCode)) == true;
 
     private async Task CheckClaudeAsync()
     {
@@ -474,9 +482,16 @@
         _checking = false;
     }
 
+    private string? _saveError;
+
     private async Task SaveAsync()
     {
-        _settings!.ProfileOverrides = _profiles.Values.ToList();
+        // A run names its profile as profile:<name>, so a name that can't be written that way, or that two profiles share, isn't saved.
+        _saveError = _settings!.RunProfiles.Select(p => RunProfile.NameProblem(p, _settings.RunProfiles)).FirstOrDefault(p => p is not null);
+        if (_saveError is not null) return;
+        foreach (var profile in _settings.RunProfiles) profile.Name = profile.Name.Trim();
+
+        _settings.ProfileOverrides = _profiles.Values.ToList();
         await SettingsStore.SaveAsync(_settings);
         _saved = true;
         // A higher limit may let queued runs start now.

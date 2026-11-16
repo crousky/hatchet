@@ -33,7 +33,8 @@ public sealed class PlanStep
     public List<string>? Skills { get; set; }
 }
 
-public sealed record RunSummary(int RunId, string Title, string Status, string Project, string Repository, int SubtasksDone, int Subtasks, string? CurrentStep, string? Queue, string? PauseReason, string Url);
+/// <param name="Model">The model choice the run was started with, such as profile:strong, or null when it runs as Settings has it.</param>
+public sealed record RunSummary(int RunId, string Title, string Status, string Project, string Repository, int SubtasksDone, int Subtasks, string? CurrentStep, string? Queue, string? PauseReason, string Url, string? Model = null);
 
 public sealed record SubtaskSummary(int Order, string Title, string Status, int FixAttempts);
 
@@ -74,7 +75,7 @@ public sealed class HatchetTools(FactoryOrchestrator orchestrator, IRunStore sto
 
     [McpServerTool(Name = "start_run")]
     [Description("""
-        Starts a Hatchet run on a local Git repository. Hatchet makes a factory/run-N branch, then builds, verifies, reviews and commits each subtask in order, fixing failures as it goes, on the user's local model.
+        Starts a Hatchet run on a local Git repository. Hatchet makes a factory/run-N branch, then builds, verifies, reviews and commits each subtask in order, fixing failures as it goes, on the user's local model unless model says otherwise.
         Pass the plan you worked out with the user to skip Hatchet's own planner. Without a plan, Hatchet plans from the spec itself, which is slower.
         The working tree must be clean. The run continues in the background: follow it with get_run.
         If the user's limit of runs at once is reached, or another open run has the repository, the run waits in line and starts by itself; queue says why.
@@ -86,13 +87,14 @@ public sealed class HatchetTools(FactoryOrchestrator orchestrator, IRunStore sto
         [Description("Short title for the run. Taken from the spec if omitted.")] string? title = null,
         [Description("Command that verifies the whole repository. Omit to let Hatchet detect it (dotnet, npm, cargo and others).")] string? verificationCommand = null,
         [Description("True to stop after planning so the user can review or edit the plan in Hatchet's UI before building.")] bool reviewPlanInHatchet = false,
+        [Description(McpNotes.ModelParameter + " The run keeps its choice when it is paused, resumed or Hatchet restarts. A profile Settings doesn't have is refused.")] string? model = null,
         CancellationToken ct = default)
     {
         PathGuard.RejectNetworkPath(repositoryPath, nameof(repositoryPath));
         // A client may send null for a list or field it leaves empty.
         var edits = plan?.Select(step => new SubtaskEdit(null, step.Title ?? "", step.Description ?? "",
             step.FilesToModify ?? [], step.FilesToCreate ?? [], step.FilesToRead ?? [], step.VerificationCommand ?? "", step.Skills ?? [])).ToList();
-        var run = await Do(() => orchestrator.StartRunAsync(new NewRunRequest(repositoryPath, spec, title, verificationCommand, reviewPlanInHatchet, PlanReviewByUser: false), edits, ct));
+        var run = await Do(() => orchestrator.StartRunAsync(new NewRunRequest(repositoryPath, spec, title, verificationCommand, reviewPlanInHatchet, model, PlanReviewByUser: false), edits, ct));
         return await DescribeRunAsync(run.Id, ct);
     }
 
@@ -248,7 +250,7 @@ public sealed class HatchetTools(FactoryOrchestrator orchestrator, IRunStore sto
         return new RunSummary(run.Id, run.Task.Title, status, Fmt.FolderName(run.Task.RepositoryPath), run.Task.RepositoryPath,
             subtasks.Count(s => SubtaskStateMachine.IsFinished(s.Status) && s.Status != SubtaskStatus.Cancelled), subtasks.Count,
             spot is null && RunStateMachine.IsUnderway(run.Status) ? step : null, spot is null ? null : Fmt.Queue(spot),
-            spot is null ? run.PauseReason : null, $"{Program.BaseUrl(configuration)}/runs/{run.Id}");
+            spot is null ? run.PauseReason : null, $"{Program.BaseUrl(configuration)}/runs/{run.Id}", run.Task.ModelChoice);
     }
 
     private async Task<FactoryRun> RequireRunAsync(int runId, CancellationToken ct)

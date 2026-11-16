@@ -93,7 +93,7 @@ public sealed class AdHocTools(AdHocManager manager, IConfiguration configuratio
         [Description("Absolute path of the repository.")] string repositoryPath,
         [Description("What went wrong and what was expected, and how to make it happen. The first line becomes the title.")] string description,
         [Description("Absolute paths of screenshot files on this computer (PNG, JPEG, GIF or WebP, up to 10 MB and 8 files).")] string[]? screenshotPaths = null,
-        [Description("Which model does the work: local:<model id> or claude:opus, claude:sonnet or claude:haiku (plain opus, sonnet and haiku work too). It runs every agent of the run, and Claude's reading of the screenshots when it is a Claude model. Leave it out to use Settings. list_models shows what is available.")] string? model = null,
+        [Description(McpNotes.ModelParameter + " A Claude model also does Claude's reading of the screenshots.")] string? model = null,
         [Description("How long to wait for the run to start before returning.")] int waitSeconds = 90,
         CancellationToken ct = default) =>
         await FileReportAsync(RequestKind.Defect, repositoryPath, description, screenshotPaths, model, waitSeconds, ct);
@@ -107,13 +107,13 @@ public sealed class AdHocTools(AdHocManager manager, IConfiguration configuratio
         [Description("Absolute path of the repository.")] string repositoryPath,
         [Description("What should change. The first line becomes the title.")] string description,
         [Description("Absolute paths of screenshot files on this computer (PNG, JPEG, GIF or WebP, up to 10 MB and 8 files).")] string[]? screenshotPaths = null,
-        [Description("Which model does the work: local:<model id> or claude:opus, claude:sonnet or claude:haiku (plain opus, sonnet and haiku work too). It runs every agent of the run, and Claude's reading of the screenshots when it is a Claude model. Leave it out to use Settings. list_models shows what is available.")] string? model = null,
+        [Description(McpNotes.ModelParameter + " A Claude model also does Claude's reading of the screenshots.")] string? model = null,
         [Description("How long to wait for the run to start before returning.")] int waitSeconds = 90,
         CancellationToken ct = default) =>
         await FileReportAsync(RequestKind.Change, repositoryPath, description, screenshotPaths, model, waitSeconds, ct);
 
     [McpServerTool(Name = "list_models", ReadOnly = true)]
-    [Description("Lists the models that can be chosen for report_defect and request_change: the local models (the configured one and whatever else the model server has) and Claude's. The empty value means as set in Settings.")]
+    [Description("Lists what the model parameter of start_run, report_defect and request_change accepts: the run profiles from Settings (profile:<name>, with the model each one gives every agent), the local models (the configured one and whatever else the model server has) and Claude's. The empty value means as set in Settings.")]
     public async Task<IReadOnlyList<ModelOption>> ListModels(CancellationToken ct = default)
     {
         var settings = await settingsStore.GetAsync(ct);

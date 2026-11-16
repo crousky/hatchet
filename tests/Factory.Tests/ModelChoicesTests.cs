@@ -17,6 +17,8 @@ public class ModelChoicesTests
     [InlineData("CLAUDE:Opus", "claude:opus")]
     [InlineData("local:qwen3.8", "local:qwen3.8")]
     [InlineData("local: my model ", "local:my model")]
+    [InlineData("profile:strong", "profile:strong")]
+    [InlineData(" Profile: All-Opus ", "profile:all-opus")]
     public void Choices_are_read_in_their_short_and_long_forms(string? given, string? expected) =>
         Assert.Equal(expected, ModelChoices.Normalize(given));
 
@@ -24,11 +26,145 @@ public class ModelChoicesTests
     [InlineData("gpt-9")]
     [InlineData("claude:gpt")]
     [InlineData("local:")]
+    [InlineData("profile:")]
+    [InlineData("profile:two words")]
+    [InlineData("profile:-x")]
     public void Choices_that_make_no_sense_are_refused_with_the_ways_to_write_one(string given)
     {
         var error = Assert.Throws<FactoryValidationException>(() => ModelChoices.Normalize(given));
 
-        Assert.True(error.Message.Contains("local:") || error.Message.Contains("claude:"));
+        Assert.True(error.Message.Contains("local:") || error.Message.Contains("claude:") || error.Message.Contains("profile:"));
+    }
+
+    [Fact]
+    public void A_profile_settings_does_not_have_is_refused_by_name_with_the_ones_it_has()
+    {
+        var settings = new FactorySettings();
+
+        Assert.Equal("profile:strong", ModelChoices.Require(settings, "profile:Strong"));
+        Assert.Equal("claude:opus", ModelChoices.Require(settings, "opus"));
+        Assert.Null(ModelChoices.Require(settings, null));
+        var error = Assert.Throws<FactoryValidationException>(() => ModelChoices.Require(settings, "profile:stronk"));
+        Assert.Contains("called \"stronk\"", error.Message);
+        Assert.Contains("local, strong, all-opus", error.Message);
+        Assert.Throws<FactoryValidationException>(() => ModelChoices.Apply(settings, "profile:stronk"));
+    }
+
+    [Fact]
+    public void The_built_in_profiles_route_each_agent_as_their_names_say()
+    {
+        var settings = new FactorySettings();
+        (bool OnClaude, string Model) RouteOf(string profile, AgentRole role)
+        {
+            var agent = AgentProfiles.Resolve(ModelChoices.Apply(settings, $"profile:{profile}"), role);
+            return (agent.UsesClaude, agent.UsesClaude ? agent.ClaudeModel : "");
+        }
+
+        Assert.Equal((true, "opus"), RouteOf("local", AgentRole.TaskPlanner));
+        Assert.Equal((false, ""), RouteOf("local", AgentRole.ContextSpecifier));
+        Assert.Equal((false, ""), RouteOf("local", AgentRole.CodeGenerator));
+        Assert.Equal((false, ""), RouteOf("local", AgentRole.BugFixer));
+        Assert.Equal((true, "sonnet"), RouteOf("local", AgentRole.StaticReviewer));
+
+        Assert.Equal((true, "opus"), RouteOf("strong", AgentRole.TaskPlanner));
+        Assert.Equal((true, "sonnet"), RouteOf("strong", AgentRole.ContextSpecifier));
+        Assert.Equal((true, "sonnet"), RouteOf("strong", AgentRole.CodeGenerator));
+        Assert.Equal((true, "sonnet"), RouteOf("strong", AgentRole.BugFixer));
+        Assert.Equal((true, "opus"), RouteOf("strong", AgentRole.StaticReviewer));
+        // The last automatic fix attempt of a strong run goes to the strongest model.
+        Assert.Equal("opus", FactoryOrchestrator.LastResortModel(ModelChoices.Apply(settings, "profile:strong")));
+
+        Assert.All(Enum.GetValues<AgentRole>(), role => Assert.Equal((true, "opus"), RouteOf("all-opus", role)));
+    }
+
+    [Fact]
+    public void A_profile_changes_where_an_agent_runs_and_nothing_else_and_leaves_out_roles_as_settings_has_them()
+    {
+        var settings = new FactorySettings();
+        settings.ProfileOverrides.Add(new AgentProfileOverride { Role = AgentRole.BugFixer, ReasoningEffort = "low", Temperature = 0.7, SystemPrompt = "Fix it my way." });
+        settings.ProfileOverrides.Add(new AgentProfileOverride { Role = AgentRole.TaskPlanner, Engine = AgentEngine.ClaudeCode, ClaudeModel = "haiku", ClaudeEffort = "low" });
+        settings.RunProfiles =
+        [
+            new RunProfile
+            {
+                Name = "review-only",
+                Roles =
+                [
+                    new RunProfileRole { Role = AgentRole.StaticReviewer, Engine = AgentEngine.ClaudeCode, ClaudeModel = "sonnet", ClaudeEffort = "max" },
+                    new RunProfileRole { Role = AgentRole.BugFixer, Engine = AgentEngine.ClaudeCode, ClaudeModel = "opus" }
+                ]
+            }
+        ];
+
+        var applied = ModelChoices.Apply(settings, "profile:review-only");
+
+        var reviewer = AgentProfiles.Resolve(applied, AgentRole.StaticReviewer);
+        Assert.Equal((true, "sonnet", "max"), (reviewer.UsesClaude, reviewer.ClaudeModel, reviewer.ClaudeEffort));
+        var fixer = AgentProfiles.Resolve(applied, AgentRole.BugFixer);
+        Assert.Equal((true, "opus", "low", 0.7, "Fix it my way."), (fixer.UsesClaude, fixer.ClaudeModel, fixer.ReasoningEffort, fixer.Temperature, fixer.SystemPrompt));
+        var planner = AgentProfiles.Resolve(applied, AgentRole.TaskPlanner);
+        Assert.Equal((true, "haiku", "low"), (planner.UsesClaude, planner.ClaudeModel, planner.ClaudeEffort)); // Not in the profile, so as Settings has it.
+        Assert.False(AgentProfiles.Resolve(applied, AgentRole.CodeGenerator).UsesClaude);
+        Assert.Equal(2, settings.ProfileOverrides.Count); // The shared settings are untouched.
+        Assert.False(AgentProfiles.Resolve(settings, AgentRole.StaticReviewer).UsesClaude);
+    }
+
+    [Fact]
+    public void A_profile_is_described_by_name_and_explained_by_what_each_agent_runs_on()
+    {
+        var settings = new FactorySettings();
+
+        Assert.Equal("strong profile", ModelChoices.Describe("profile:strong"));
+        Assert.Equal("strong", ModelChoices.ProfileNameOf("Profile:Strong"));
+        Assert.Null(ModelChoices.ProfileNameOf("claude:opus"));
+        Assert.Null(ModelChoices.ClaudeModelOf("profile:strong"));
+        Assert.Equal("Task Planner, Static Reviewer: Claude Opus · Context Specifier, Code Generator, Bug Fixer: Claude Sonnet.", ModelChoices.Explain(settings, "profile:strong"));
+        Assert.Equal("Task Planner: Claude Opus · Context Specifier, Code Generator, Bug Fixer: local model · Static Reviewer: Claude Sonnet.", ModelChoices.Explain(settings, "profile:local"));
+        Assert.Equal("Every agent in the run uses Claude Haiku.", ModelChoices.Explain(settings, "haiku"));
+        Assert.Equal("Settings has no run profile called gone.", ModelChoices.Explain(settings, "profile:gone"));
+        Assert.Null(ModelChoices.Explain(settings, ""));
+    }
+
+    [Fact]
+    public void Settings_saved_before_run_profiles_existed_get_the_built_in_ones_and_saved_profiles_are_kept_as_they_are()
+    {
+        var old = System.Text.Json.JsonSerializer.Deserialize<FactorySettings>("""{"ModelId":"qwen3.8","ProfileOverrides":[]}""")!;
+        Assert.Equal(["local", "strong", "all-opus"], old.RunProfiles.Select(p => p.Name));
+
+        var edited = new FactorySettings();
+        edited.RunProfiles.RemoveAll(p => p.Name != "strong");
+        edited.RunProfiles[0].Roles.RemoveAll(r => r.Role == AgentRole.TaskPlanner);
+        var saved = System.Text.Json.JsonSerializer.Deserialize<FactorySettings>(System.Text.Json.JsonSerializer.Serialize(edited))!;
+        Assert.Equal("strong", Assert.Single(saved.RunProfiles).Name);
+        Assert.Equal(4, saved.RunProfiles[0].Roles.Count);
+
+        var clone = edited.Clone();
+        clone.RunProfiles[0].Roles[0].ClaudeModel = "haiku";
+        Assert.NotEqual("haiku", edited.RunProfiles[0].Roles[0].ClaudeModel);
+    }
+
+    [Theory]
+    [InlineData("strong", true)]
+    [InlineData("phase-5", true)]
+    [InlineData("Strong", false)]
+    [InlineData("", false)]
+    [InlineData("two words", false)]
+    [InlineData("-lead", false)]
+    [InlineData("a:b", false)]
+    public void Profile_names_are_lowercase_letters_digits_and_hyphens(string name, bool valid)
+    {
+        Assert.Equal(valid, RunProfile.IsValidName(name));
+        var profile = new RunProfile { Name = name };
+        Assert.Equal(valid, RunProfile.NameProblem(profile, [profile]) is null);
+    }
+
+    [Fact]
+    public void Two_profiles_may_not_share_a_name()
+    {
+        var first = new RunProfile { Name = "strong" };
+        var second = new RunProfile { Name = " strong " };
+
+        Assert.Contains("Two run profiles", RunProfile.NameProblem(second, [first, second]));
     }
 
     [Fact]
@@ -95,8 +231,9 @@ public class ModelChoicesTests
     {
         var options = ModelChoices.Options(new FactorySettings { ModelId = "qwen3.8" }, ["qwen3.8", "llama-3", "", "llama-3", "text-embedding-nomic-embed-text-v1.5"]);
 
-        Assert.Equal(["", "local:qwen3.8", "local:llama-3", "claude:opus", "claude:sonnet", "claude:haiku"], options.Select(o => o.Value));
+        Assert.Equal(["", "profile:local", "profile:strong", "profile:all-opus", "local:qwen3.8", "local:llama-3", "claude:opus", "claude:sonnet", "claude:haiku"], options.Select(o => o.Value));
         Assert.Equal("As set in Settings", options[0].Label);
+        Assert.Equal("all-opus (Task Planner, Context Specifier, Code Generator, Static Reviewer, Bug Fixer: Claude Opus)", options[3].Label);
         Assert.All(options.Skip(1), o => Assert.Equal(o.Value, ModelChoices.Normalize(o.Value)));
     }
 }

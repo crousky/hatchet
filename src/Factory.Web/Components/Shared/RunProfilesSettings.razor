@@ -1,0 +1,123 @@
+@* Edits the settings' run profiles in place. The Settings page saves them with everything else. *@
+<section class="settings-section">
+    <h2>Run profiles</h2>
+    <div class="hint">
+        A run profile names a model for each agent, so one run can build on the local model and the next on Claude without changing the table above in between.
+        Pick one on the New run page, or over MCP as <code>profile:&lt;name&gt;</code> in <code>start_run</code>. The run keeps its profile when it is paused, resumed or Hatchet restarts,
+        and reads it from here each time it carries on, so an edit reaches runs that are already open. An agent left "as set in Settings" follows the table above.
+    </div>
+
+    @foreach (var profile in Profiles)
+    {
+        <div class="run-profile" @key="profile">
+            <div class="field-row">
+                <div class="field">
+                    <label>Name</label>
+                    <input autocomplete="off" data-1p-ignore data-lpignore="true" class="mono" spellcheck="false" aria-label="Profile name" @bind="profile.Name" />
+                </div>
+                <div class="field grow">
+                    <label>Description</label>
+                    <input autocomplete="off" data-1p-ignore data-lpignore="true" aria-label="Profile description" @bind="profile.Description" />
+                </div>
+                <button class="btn btn-ghost align-end" title="Remove this profile" @onclick="@(() => Profiles.Remove(profile))"><Icon Name="x" Size="13" /> Remove</button>
+            </div>
+            @if (RunProfile.NameProblem(profile, Profiles) is { } problem)
+            {
+                <div class="probe probe-bad"><Icon Name="x" Size="13" /> @problem</div>
+            }
+            <table class="profiles-table">
+                <thead>
+                    <tr>
+                        <th>Agent</th>
+                        <th>Runs on</th>
+                        <th>Claude effort</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var agent in AgentProfiles.Defaults)
+                    {
+                        var route = profile.Roles.FirstOrDefault(r => r.Role == agent.Role);
+                        var onClaude = route is { Engine: AgentEngine.ClaudeCode };
+                        <tr>
+                            <td><Icon Name="@Fmt.Icon(agent.Role)" Size="14" Class="muted" /> @agent.DisplayName</td>
+                            <td class="engine-cell">
+                                <select value="@RouteValue(route)" aria-label="Runs on" @onchange="@(e => SetRoute(profile, agent.Role, e.Value?.ToString()))">
+                                    <option value="@AsSettings" selected="@(route is null)">As set in Settings</option>
+                                    <option value="@OnLocal" selected="@(route is { Engine: AgentEngine.Local })">Local model</option>
+                                    <option value="@OnClaude" selected="@onClaude">Claude Code</option>
+                                </select>
+                                @if (onClaude)
+                                {
+                                    <select @bind="route!.ClaudeModel" aria-label="Claude model">
+                                        @foreach (var model in ClaudeCodeOptions.Models)
+                                        {
+                                            <option value="@model">@ClaudeCodeOptions.ModelLabel(model)</option>
+                                        }
+                                    </select>
+                                }
+                            </td>
+                            <td>
+                                @if (onClaude)
+                                {
+                                    <select @bind="route!.ClaudeEffort" aria-label="Claude effort">
+                                        @foreach (var effort in ClaudeCodeOptions.Efforts)
+                                        {
+                                            <option value="@effort">@effort</option>
+                                        }
+                                    </select>
+                                }
+                                else
+                                {
+                                    <span class="muted">@(route is null ? "As set in Settings" : "Set in the table above")</span>
+                                }
+                            </td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    }
+
+    <div class="action-row">
+        <button class="btn" @onclick="Add"><Icon Name="plus" Size="13" /> Add a profile</button>
+        @if (MissingBuiltIns.Count > 0)
+        {
+            <button class="link-button" title="Adds back @string.Join(", ", MissingBuiltIns.Select(p => p.Name))" @onclick="RestoreBuiltIns">Restore the built-in profiles</button>
+        }
+    </div>
+</section>
+
+@code {
+    private const string AsSettings = "settings";
+    private const string OnLocal = "local";
+    private const string OnClaude = "claude";
+
+    [Parameter, EditorRequired] public List<RunProfile> Profiles { get; set; } = [];
+
+    private List<RunProfile> MissingBuiltIns =>
+        RunProfile.BuiltIn().Where(b => !Profiles.Any(p => p.Name.Trim().Equals(b.Name, StringComparison.OrdinalIgnoreCase))).ToList();
+
+    private static string RouteValue(RunProfileRole? route) =>
+        route is null ? AsSettings : route.Engine == AgentEngine.ClaudeCode ? OnClaude : OnLocal;
+
+    private static void SetRoute(RunProfile profile, AgentRole role, string? value)
+    {
+        var route = profile.Roles.FirstOrDefault(r => r.Role == role);
+        if (value == AsSettings)
+        {
+            if (route is not null) profile.Roles.Remove(route);
+            return;
+        }
+        if (route is null) profile.Roles.Add(route = new RunProfileRole { Role = role });
+        route.Engine = value == OnClaude ? AgentEngine.ClaudeCode : AgentEngine.Local;
+    }
+
+    private void Add()
+    {
+        var name = "profile";
+        for (var n = 2; Profiles.Any(p => p.Name.Equals(name, StringComparison.OrdinalIgnoreCase)); n++) name = $"profile-{n}";
+        Profiles.Add(new RunProfile { Name = name });
+    }
+
+    private void RestoreBuiltIns() => Profiles.AddRange(MissingBuiltIns);
+}

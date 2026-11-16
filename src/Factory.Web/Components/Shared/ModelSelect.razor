@@ -1,0 +1,32 @@
+@* The model choices for a piece of work, grouped: as set in Settings, the run profiles, the local models and Claude's. *@
+<select id="@Id" disabled="@Disabled" value="@Value" @onchange="OnChangeAsync">
+    @foreach (var group in Options.GroupBy(o => o.Group))
+    {
+        @if (group.Key.Length == 0)
+        {
+            @foreach (var option in group)
+            {
+                <option value="@option.Value" selected="@(option.Value == Value)">@option.Label</option>
+            }
+        }
+        else
+        {
+            <optgroup label="@group.Key">
+                @foreach (var option in group)
+                {
+                    <option value="@option.Value" selected="@(option.Value == Value)">@option.Label</option>
+                }
+            </optgroup>
+        }
+    }
+</select>
+
+@code {
+    [Parameter, EditorRequired] public string Id { get; set; } = "";
+    [Parameter] public string Value { get; set; } = "";
+    [Parameter] public EventCallback<string> ValueChanged { get; set; }
+    [Parameter] public IReadOnlyList<ModelOption> Options { get; set; } = [];
+    [Parameter] public bool Disabled { get; set; }
+
+    private Task OnChangeAsync(ChangeEventArgs e) => ValueChanged.InvokeAsync(e.Value?.ToString() ?? "");
+}
