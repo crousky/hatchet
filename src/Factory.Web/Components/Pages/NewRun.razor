@@ -3,6 +3,8 @@
 @inject FactoryOrchestrator Orchestrator
 @inject IRunStore Store
 @inject NavigationManager Nav
+@inject ISettingsStore SettingsStore
+@inject ModelHealthService ModelHealth
 
 <DocumentTitle Value="New run · Hatchet" />
 
@@ -95,6 +97,12 @@
             <input autocomplete="off" data-1p-ignore data-lpignore="true" id="title" placeholder="Taken from the spec's first heading" @bind="_title" />
         </div>
 
+        <div class="field">
+            <label for="run-model">Model</label>
+            <ModelSelect Id="run-model" Disabled="_starting" Options="_options" @bind-Value="_model" />
+            <div class="hint">@(ModelChoices.Explain(_settings, _model) is { } explained ? $"{explained} The run keeps this choice until it finishes." : "Each agent uses the model Settings gives it, as Settings stand each time the run carries on.")</div>
+        </div>
+
         <label class="toggle-row">
             <input autocomplete="off" data-1p-ignore data-lpignore="true" type="checkbox" class="toggle" @bind="_reviewPlan" />
             <div>
@@ -145,6 +153,9 @@
     private List<string> _recent = [];
     private bool _customCommand;
     private bool _picking;
+    private FactorySettings _settings = new();
+    private IReadOnlyList<ModelOption> _options = [new("", "As set in Settings", "")];
+    private string _model = "";
     private CancellationTokenSource? _probeDelay;
 
     private bool RepositoryReady => _probe is { IsGitRepository: true } && (_openRun is not null || _probe is { IsClean: true, CurrentBranch: not null });
@@ -158,6 +169,8 @@
 
     protected override async Task OnInitializedAsync()
     {
+        _settings = await SettingsStore.GetAsync();
+        _options = ModelChoices.Options(_settings, ModelHealth.Current?.AvailableModels ?? []);
         var runs = await Store.ListRunsAsync();
         _recent = runs.Select(r => r.Task.RepositoryPath).Distinct(StringComparer.OrdinalIgnoreCase).Take(5).ToList();
     }
@@ -233,7 +246,7 @@
         _error = null;
         try
         {
-            var run = await Orchestrator.StartRunAsync(new NewRunRequest(_path, _spec, _title, _customCommand ? _command : null, _reviewPlan));
+            var run = await Orchestrator.StartRunAsync(new NewRunRequest(_path, _spec, _title, _customCommand ? _command : null, _reviewPlan, _model));
             Nav.NavigateTo($"/runs/{run.Id}");
         }
         catch (FactoryValidationException ex)

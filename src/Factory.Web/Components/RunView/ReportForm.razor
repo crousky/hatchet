@@ -37,27 +37,7 @@
 
     <div class="field report-model">
         <label for="report-model">Model</label>
-        <select id="report-model" disabled="@_busy" @bind="_model">
-            @foreach (var group in _options.GroupBy(o => o.Group))
-            {
-                @if (group.Key.Length == 0)
-                {
-                    @foreach (var option in group)
-                    {
-                        <option value="@option.Value">@option.Label</option>
-                    }
-                }
-                else
-                {
-                    <optgroup label="@group.Key">
-                        @foreach (var option in group)
-                        {
-                            <option value="@option.Value">@option.Label</option>
-                        }
-                    </optgroup>
-                }
-            }
-        </select>
+        <ModelSelect Id="report-model" Disabled="_busy" Options="_options" @bind-Value="_model" />
         <span class="hint">@ModelHint</span>
     </div>
 
@@ -98,15 +78,19 @@
     private string? _error;
     private bool _busy;
 
-    protected override async Task OnInitializedAsync() =>
-        _options = ModelChoices.Options(await SettingsStore.GetAsync(), ModelHealth.Current?.AvailableModels ?? []);
+    private FactorySettings _settings = new();
+
+    protected override async Task OnInitializedAsync()
+    {
+        _settings = await SettingsStore.GetAsync();
+        _options = ModelChoices.Options(_settings, ModelHealth.Current?.AvailableModels ?? []);
+    }
 
     private string ModelHint
     {
         get
         {
-            if (ModelChoices.Describe(_model) is not { } name) return "Each agent uses the model Settings gives it. Claude reads any screenshots.";
-            var hint = $"Every agent in the run uses {name}.";
+            if (ModelChoices.Explain(_settings, _model) is not { } hint) return "Each agent uses the model Settings gives it. Claude reads any screenshots.";
             if (ModelChoices.ClaudeModelOf(_model) is null && _images.Count > 0) hint += " Claude still reads the screenshots, since the local model can't see them.";
             return hint;
         }

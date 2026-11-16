@@ -4,6 +4,7 @@
 @inject FactoryOrchestrator Orchestrator
 @inject FactoryEventBus Bus
 @inject NavigationManager Nav
+@inject ISettingsStore SettingsStore
 
 <DocumentTitle Value="@($"{(_run is null ? "Run" : $"#{_run.Id} {_run.Task.Title}")} · Hatchet")" />
 
@@ -37,7 +38,7 @@ else
                     <span class="meta-item" title="@_run.Task.RepositoryPath"><Icon Name="folder" Size="12" /> @Fmt.FolderName(_run.Task.RepositoryPath)</span>
                     @if (ModelChoices.Describe(_run.Task.ModelChoice) is { } chosenModel)
                     {
-                        <span class="meta-item" title="Chosen when the work was started. Every agent in this run uses it, whatever Settings say."><Icon Name="sparkle" Size="12" /> @chosenModel</span>
+                        <span class="meta-item" title="@_modelDetail"><Icon Name="sparkle" Size="12" /> @chosenModel</span>
                     }
                     @if (_run.BranchName is not null)
                     {
@@ -311,6 +312,8 @@ else
         };
     }
 
+    private string _modelDetail = "";
+
     private async Task ReloadAsync()
     {
         try
@@ -324,6 +327,9 @@ else
         }
 
         _spot = Orchestrator.GetQueueSpot(RunId);
+        _modelDetail = ModelChoices.ProfileNameOf(_run.Task.ModelChoice) is null
+            ? "Chosen when the work was started. Every agent in this run uses it, whatever Settings say."
+            : $"Run profile, chosen when the work was started and kept until the run finishes. {ModelChoices.Explain(await SettingsStore.GetAsync(), _run.Task.ModelChoice)}";
         _subtasks = await Store.GetSubtasksAsync(RunId);
         _diffs = await Store.GetDiffsAsync(RunId);
         _logs.AddRange(await Store.GetLogsAsync(RunId, _logs.LastOrDefault()?.Id ?? 0));

@@ -204,7 +204,7 @@ public sealed partial class FactoryOrchestrator(
                 .GroupBy(r => RepositoryKey(r.Task.RepositoryPath), StringComparer.OrdinalIgnoreCase)
                 .ToDictionary(g => g.Key, g => (IReadOnlySet<int>)g.Select(r => r.Id).ToHashSet(), StringComparer.OrdinalIgnoreCase);
             // Waiting runs haven't read their settings yet, so they go by the agents' models as they are now, or as the run's own choice has them.
-            var pools = openRuns.ToDictionary(r => r.Id, r => PoolFor(ModelChoices.Apply(settings, r.Task.ModelChoice)));
+            var pools = openRuns.ToDictionary(r => r.Id, r => PoolFor(settings, r.Task.ModelChoice));
             var touched = _queue.Admit(pool => pool == WorkerPool.Claude ? settings.MaxParallelClaudeRuns : settings.MaxParallelLocalRuns,
                 holders, runId => pools.GetValueOrDefault(runId, PoolFor(settings)));
             foreach (var runId in touched) bus.Publish(new QueueChanged(runId));
@@ -222,6 +222,23 @@ public sealed partial class FactoryOrchestrator(
     /// <summary>Runs that use the local model for any agent share its workers, and runs entirely on Claude share Claude's.</summary>
     internal static WorkerPool PoolFor(FactorySettings settings) =>
         Enum.GetValues<AgentRole>().All(role => AgentProfiles.Resolve(settings, role).UsesClaude) ? WorkerPool.Claude : WorkerPool.Local;
+
+    /// <summary>
+    /// The pool for a run with its own model choice. A run whose profile has since been taken out of Settings waits with
+    /// the local runs: it pauses to say so once its turn comes, and one run's missing profile mustn't stop the line.
+    /// </summary>
+    internal static WorkerPool PoolFor(FactorySettings settings, string? modelChoice)
+    {
+        try { return PoolFor(ModelChoices.Apply(settings, modelChoice)); }
+        catch (FactoryValidationException) { return WorkerPool.Local; }
+    }
+
+    /// <summary>
+    /// Refuses to carry a run on when the run profile it was started with is no longer in Settings, so the user hears
+    /// about it from the button they pressed and not from a pause.
+    /// </summary>
+    private async Task RequireModelChoiceAsync(FactoryRun run, CancellationToken ct) =>
+        ModelChoices.Require(await settingsStore.GetAsync(ct), run.Task.ModelChoice);
 
     /// <summary>The repository a path names, in one spelling, so runs in the same repository are grouped and queued together.</summary>
     public static string RepositoryKey(string path) => Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
@@ -249,7 +266,8 @@ public sealed partial class FactoryOrchestrator(
 
         var command = request.VerificationCommand?.Trim() ?? "";
         var path = Path.GetFullPath(request.RepositoryPath.Trim());
-        var modelChoice = ModelChoices.Normalize(request.ModelChoice);
+        // A profile that Settings doesn't have is refused here, before there is a run to fail part-way.
+        var modelChoice = ModelChoices.Require(await settingsStore.GetAsync(ct), request.ModelChoice);
         await RequireStartableRepositoryAsync(path, ct);
 
         var task = new FactoryTask
@@ -289,6 +307,7 @@ public sealed partial class FactoryOrchestrator(
     public async Task<FactoryRun> RerunAsync(int runId, CancellationToken ct = default)
     {
         var previous = await store.GetRunAsync(runId, ct);
+        await RequireModelChoiceAsync(previous, ct);
         await RequireStartableRepositoryAsync(previous.Task.RepositoryPath, ct);
         var run = await store.CreateRunAsync(previous.TaskId, null, ct);
         Launch(run.Id, new QueuedRequest(RequestKind.Start));
@@ -300,6 +319,7 @@ public sealed partial class FactoryOrchestrator(
         var run = await store.GetRunAsync(runId, ct);
         RequireStatus(run, RunStatus.AwaitingPlanApproval);
         if (plan.Count == 0) throw new FactoryValidationException("The plan has no subtasks.");
+        await RequireModelChoiceAsync(run, ct);
 
         await store.ReplaceSubtasksAsync(runId, ToSubtasks(runId, plan), ct);
         bus.Publish(new PlanChanged(runId));
@@ -326,6 +346,7 @@ public sealed partial class FactoryOrchestrator(
     {
         var run = await store.GetRunAsync(runId, ct);
         RequireStatus(run, RunStatus.AwaitingPlanApproval);
+        await RequireModelChoiceAsync(run, ct);
         Launch(runId, new QueuedRequest(RequestKind.Regenerate, Text: feedback));
     }
 
@@ -346,6 +367,7 @@ public sealed partial class FactoryOrchestrator(
     {
         var run = await store.GetRunAsync(runId, ct);
         RequireStatus(run, RunStatus.NeedsHuman);
+        await RequireModelChoiceAsync(run, ct);
         if (fromDrivingAgent && decision == HumanDecision.RetryFixer) await CountAgentFixerResetAsync(run, ct);
         if (fromDrivingAgent && AcceptsGate(run, decision))
             throw new FactoryValidationException("This pause asks a person to approve a changed check command or a file the reviewer could not read in full. "
@@ -725,7 +747,7 @@ public sealed partial class FactoryOrchestrator(
             await store.UpdateRunAsync(run, ct);
         }
 
-        var pool = PoolFor(ModelChoices.Apply(await settingsStore.GetAsync(ct), run.Task.ModelChoice));
+        var pool = PoolFor(await settingsStore.GetAsync(ct), run.Task.ModelChoice);
         while (true)
         {
             var wait = _queue.WaitAsync(runId, repository, pool, ct);
@@ -740,7 +762,7 @@ public sealed partial class FactoryOrchestrator(
             // The line moves runs to the pool their agents use as settings change, so this differs only if they
             // changed again just as it was let in. Then it waits for a worker in the right pool.
             var settings = await settingsStore.GetAsync(ct);
-            pool = PoolFor(ModelChoices.Apply(settings, run.Task.ModelChoice));
+            pool = PoolFor(settings, run.Task.ModelChoice);
             if (_queue.WorkingPool(runId) == pool) return settings;
             _queue.Release(runId);
         }

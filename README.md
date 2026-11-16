@@ -64,6 +64,13 @@ Roles differ by system prompt, JSON schema, temperature and `reasoning_effort`, 
 
 Each role runs on the local model by default, or on Claude through the Claude Code CLI. When a fix fails on the local model, the next attempt goes to Claude, and so does a local fix still running after 90 minutes. While any agent is working, you can stop its call and hand it to another model from its card in the agent pane.
 
+A run can also bring its own choice, picked under **Model** on the New run page or as `model` in `start_run`:
+
+- **A run profile** (`profile:<name>`) gives each agent its own model. Hatchet starts with three, and you can edit them or add your own in Settings: `local` builds on the local model with Claude planning and reviewing, `strong` builds on Claude Sonnet with Claude Opus planning, reviewing and making the last fix attempt, and `all-opus` puts every agent on Claude Opus.
+- **One model** (`local:<model id>`, `claude:opus`, `claude:sonnet` or `claude:haiku`) puts every agent on it.
+
+The run keeps its choice when it is paused, resumed or Hatchet restarts, and other runs keep theirs, so a run that needs Claude throughout and one built locally can be open at once without changing Settings in between. The run page shows the choice.
+
 Once three subtasks are done, the run header shows a likely range for the working time left. It's based on how long the finished subtasks took, and time paused doesn't count. It narrows as more subtasks finish.
 
 Retries are automatic. Before it asks you, Hatchet makes one last fix on Claude Opus once the normal attempts are used (unless the Bug Fixer is already on Opus, or Claude fixes are switched off). It also stops early when two fixes in a row end in the same error, because that usually means the cause is outside the code, such as a missing download. Fixes the spec guard refuses don't use up attempts, though a run of them still stops the subtask.

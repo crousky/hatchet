@@ -2233,6 +2233,71 @@ public class OrchestratorTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task A_run_started_with_a_profile_keeps_its_role_map_across_a_pause_a_settings_change_and_a_restart()
+    {
+        _llm.Enqueue(AgentRole.ContextSpecifier, Refined());
+        _llm.Enqueue(AgentRole.CodeGenerator, Patch("alpha.txt"));
+        _llm.Enqueue(AgentRole.StaticReviewer, Verdict(true));
+        _llm.Offline = AgentRole.CodeGenerator;
+        var run = await _orchestrator.StartRunAsync(new NewRunRequest(_repo.Path, "# Spec", null, "verify", false, "profile:Strong"),
+            [new SubtaskEdit(null, "alpha", "Build alpha", [], ["alpha.txt"], [], "")]);
+        await WaitForAsync(run.Id, RunStatus.NeedsHuman);
+        Assert.Equal("profile:strong", (await _store.GetRunAsync(run.Id)).Task.ModelChoice);
+
+        // Settings now route every agent to the local model, as another run might need, and Hatchet restarts.
+        foreach (var role in Enum.GetValues<AgentRole>())
+            _settings.Settings.ProfileOverrides.Add(new AgentProfileOverride { Role = role, Engine = AgentEngine.Local });
+        _llm.Offline = null;
+        var restarted = new FactoryOrchestrator(_store, _settings, _llm, _commands, new FactoryEventBus(), NullLogger<FactoryOrchestrator>.Instance);
+        await restarted.ResumeAsync(run.Id, HumanDecision.Resume, null);
+        var deadline = DateTime.UtcNow.AddSeconds(30);
+        while ((await _store.GetRunAsync(run.Id)).Status != RunStatus.ReadyToMerge || restarted.IsActive(run.Id))
+        {
+            Assert.True(DateTime.UtcNow < deadline, $"The run stayed {(await _store.GetRunAsync(run.Id)).Status}.");
+            await Task.Delay(10);
+        }
+
+        Assert.Equal(
+            [(AgentRole.ContextSpecifier, true, "sonnet"), (AgentRole.CodeGenerator, true, "sonnet"), (AgentRole.StaticReviewer, true, "opus")],
+            _llm.Engines);
+    }
+
+    [Fact]
+    public async Task A_profile_settings_does_not_have_is_refused_when_the_run_is_started_and_starts_nothing()
+    {
+        var error = await Assert.ThrowsAsync<FactoryValidationException>(() => StartAsync(model: "profile:stronk"));
+
+        Assert.Contains("called \"stronk\"", error.Message);
+        Assert.Empty(await _store.ListRunsAsync());
+    }
+
+    [Fact]
+    public async Task A_run_whose_profile_was_taken_out_of_settings_says_so_when_it_is_carried_on_and_stays_where_it_was()
+    {
+        _llm.Enqueue(AgentRole.TaskPlanner, Plan("alpha"));
+        var run = await WaitForAsync((await StartAsync(approval: true, model: "profile:all-opus")).Id, RunStatus.AwaitingPlanApproval);
+        _settings.Settings.RunProfiles.RemoveAll(p => p.Name == "all-opus");
+
+        var error = await Assert.ThrowsAsync<FactoryValidationException>(() =>
+            _orchestrator.ApprovePlanAsync(run.Id, [new SubtaskEdit(null, "alpha", "Build alpha", [], ["alpha.txt"], [], "")]));
+
+        Assert.Contains("called \"all-opus\"", error.Message);
+        Assert.Equal(RunStatus.AwaitingPlanApproval, (await _store.GetRunAsync(run.Id)).Status);
+        Assert.False(_orchestrator.IsActive(run.Id));
+        // One run's missing profile doesn't stop the line for the others.
+        Assert.Equal(WorkerPool.Local, FactoryOrchestrator.PoolFor(_settings.Settings, "profile:all-opus"));
+    }
+
+    [Fact]
+    public void A_profile_run_waits_in_the_pool_its_role_map_puts_it_in()
+    {
+        Assert.Equal(WorkerPool.Local, FactoryOrchestrator.PoolFor(_settings.Settings, "profile:local"));
+        Assert.Equal(WorkerPool.Claude, FactoryOrchestrator.PoolFor(_settings.Settings, "profile:strong"));
+        Assert.Equal(WorkerPool.Claude, FactoryOrchestrator.PoolFor(_settings.Settings, "profile:all-opus"));
+        Assert.Equal(WorkerPool.Local, FactoryOrchestrator.PoolFor(_settings.Settings, null));
+    }
+
+    [Fact]
     public void A_run_counts_as_a_claude_run_only_when_every_agent_runs_on_claude()
     {
         _settings.Settings.ProfileOverrides.Add(new AgentProfileOverride { Role = AgentRole.StaticReviewer, Engine = AgentEngine.ClaudeCode });

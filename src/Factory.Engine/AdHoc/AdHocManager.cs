@@ -175,7 +175,7 @@ public sealed class AdHocManager(
     /// read-only, and writes a brief the local model can use. That becomes the spec of a new run in the repository, which asks for
     /// plan approval before anything is built. Without screenshots the description goes straight into the spec.
     /// <paramref name="modelChoice"/> puts every agent of the run on one model, and Claude's reading of the screenshots too when it is
-    /// a Claude model; null leaves it to Settings.
+    /// a Claude model, or gives each agent the model a run profile names; null leaves it to Settings.
     /// </summary>
     public async Task<AdHocRequest> RequestReportAsync(RequestKind kind, string repositoryPath, string description, IReadOnlyList<ReportImage>? images = null, string? modelChoice = null, CancellationToken ct = default)
     {
@@ -183,7 +183,7 @@ public sealed class AdHocManager(
         if (string.IsNullOrWhiteSpace(description)) throw new FactoryValidationException(kind == RequestKind.Defect ? "Describe the defect." : "Describe the change you want.");
         var starter = runStarter ?? throw new InvalidOperationException("Reports need a run starter.");
         var prepared = ReportBuilder.Prepare(images ?? []);
-        var choice = ModelChoices.Normalize(modelChoice);
+        var choice = ModelChoices.Require(await settings.GetAsync(ct), modelChoice);
         var repository = await RequireRepositoryAsync(repositoryPath, ct);
         // Checked first, so a dirty tree is found now and not after Claude has spent a minute on the screenshots.
         await starter.EnsureCanStartAsync(repository, ct);

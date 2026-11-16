@@ -74,7 +74,7 @@ When the window really is too small, the pause says so and tells you how to load
 
 The runs list groups runs by project, which is the repository they build in. You can start as many runs as you like, and the ones past the limit wait in line:
 
-- **Runs at once.** A run counts as a local run if any of its agents uses the local model. Local runs go one at a time by default, because the model answers one request at a time. Runs whose agents are all set to Claude go up to 4 at a time. Both limits are in Settings.
+- **Runs at once.** A run counts as a local run if any of its agents uses the local model. Local runs go one at a time by default, because the model answers one request at a time. Runs whose agents are all set to Claude go up to 4 at a time. Both limits are in Settings. A run started with a run profile or a model of its own is counted by that, not by Settings: a `profile:strong` run is a Claude run even while Settings route every agent to the local model.
 - **One run per project.** Runs in the same repository go one at a time, because they share its working tree. A run waits until the one before it in that project is merged, closed or cancelled. A run waiting for its project doesn't hold up runs in other projects.
 
 Resuming a paused run, approving its plan or asking for a new plan also waits for a worker, and what you asked for happens when the run's turn comes. A queued run starts by itself then. Stop waiting takes it out of the line without doing what it was waiting to do, and Resume puts it back at the end. Runs still in line when Hatchet stops join it again when Hatchet starts.

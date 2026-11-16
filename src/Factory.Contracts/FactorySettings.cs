@@ -57,6 +57,12 @@ public sealed class FactorySettings
 
     public List<AgentProfileOverride> ProfileOverrides { get; set; } = [];
 
+    /// <summary>
+    /// Named choices of model for each agent, which a run picks as <c>profile:&lt;name&gt;</c> in place of the routing
+    /// above. Settings saved before run profiles existed have none stored, and so get the built-in ones.
+    /// </summary>
+    public List<RunProfile> RunProfiles { get; set; } = RunProfile.BuiltIn();
+
     /// <summary>The Claude Code executable, for roles routed to Claude. A bare name is looked up on PATH.</summary>
     public string ClaudeCodePath { get; set; } = "claude";
 
@@ -65,8 +71,90 @@ public sealed class FactorySettings
     {
         var copy = (FactorySettings)MemberwiseClone();
         copy.ProfileOverrides = ProfileOverrides.Select(o => o.Clone()).ToList();
+        copy.RunProfiles = RunProfiles.Select(p => p.Clone()).ToList();
         return copy;
     }
+}
+
+/// <summary>
+/// Which model each agent runs on, under a name, so one run can be built locally and the next on Claude without
+/// changing Settings in between. A role the profile leaves out runs as Settings has it. Everything else about an
+/// agent, such as its temperature and its prompt, stays as configured.
+/// </summary>
+public sealed class RunProfile
+{
+    /// <summary>Lowercase letters, digits and hyphens, as it is written after <c>profile:</c>.</summary>
+    public string Name { get; set; } = "";
+
+    public string Description { get; set; } = "";
+
+    public List<RunProfileRole> Roles { get; set; } = [];
+
+    public RunProfile Clone() => new() { Name = Name, Description = Description, Roles = Roles.Select(r => r.Clone()).ToList() };
+
+    /// <summary>True for a name that can follow <c>profile:</c>: lowercase letters, digits and hyphens, starting with a letter or digit.</summary>
+    public static bool IsValidName(string name) =>
+        name.Length is > 0 and <= 40 && name[0] != '-' && name.All(c => c is >= 'a' and <= 'z' or >= '0' and <= '9' or '-');
+
+    /// <summary>What stops a profile being saved under its name, or null when the name is fine.</summary>
+    public static string? NameProblem(RunProfile profile, IReadOnlyList<RunProfile> all)
+    {
+        var name = profile.Name.Trim();
+        if (!IsValidName(name))
+            return name.Length == 0
+                ? "A run profile needs a name."
+                : $"\"{name}\" can't be a run profile's name. Use lowercase letters, digits and hyphens, starting with a letter or digit, and at most 40 characters.";
+        return all.Any(other => !ReferenceEquals(other, profile) && other.Name.Trim().Equals(name, StringComparison.OrdinalIgnoreCase))
+            ? $"Two run profiles are called \"{name}\". Give each its own name."
+            : null;
+    }
+
+    /// <summary>The profiles a new install starts with. They can be edited or removed in Settings like any other.</summary>
+    public static List<RunProfile> BuiltIn() =>
+    [
+        new()
+        {
+            Name = "local",
+            Description = "Builds on the local model. Claude plans and reviews.",
+            Roles =
+            [
+                OnClaude(AgentRole.TaskPlanner, "opus"), Local(AgentRole.ContextSpecifier), Local(AgentRole.CodeGenerator),
+                OnClaude(AgentRole.StaticReviewer, "sonnet"), Local(AgentRole.BugFixer)
+            ]
+        },
+        new()
+        {
+            // With the Bug Fixer on Sonnet, the last automatic fix attempt goes to Opus by itself.
+            Name = "strong",
+            Description = "Builds on Claude Sonnet. Claude Opus plans, reviews and makes the last fix attempt.",
+            Roles =
+            [
+                OnClaude(AgentRole.TaskPlanner, "opus"), OnClaude(AgentRole.ContextSpecifier, "sonnet"), OnClaude(AgentRole.CodeGenerator, "sonnet"),
+                OnClaude(AgentRole.StaticReviewer, "opus"), OnClaude(AgentRole.BugFixer, "sonnet")
+            ]
+        },
+        new()
+        {
+            Name = "all-opus",
+            Description = "Every agent on Claude Opus.",
+            Roles = Enum.GetValues<AgentRole>().Select(role => OnClaude(role, "opus")).ToList()
+        }
+    ];
+
+    private static RunProfileRole Local(AgentRole role) => new() { Role = role, Engine = AgentEngine.Local };
+
+    private static RunProfileRole OnClaude(AgentRole role, string model) => new() { Role = role, Engine = AgentEngine.ClaudeCode, ClaudeModel = model };
+}
+
+/// <summary>Where one agent runs under a <see cref="RunProfile"/>.</summary>
+public sealed class RunProfileRole
+{
+    public AgentRole Role { get; set; }
+    public AgentEngine Engine { get; set; }
+    public string ClaudeModel { get; set; } = ClaudeCodeOptions.DefaultModel;
+    public string ClaudeEffort { get; set; } = ClaudeCodeOptions.DefaultEffort;
+
+    public RunProfileRole Clone() => (RunProfileRole)MemberwiseClone();
 }
 
 public sealed class AgentProfileOverride
