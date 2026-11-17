@@ -109,3 +109,18 @@ The runs list groups runs by project, which is the repository they build in. You
 Resuming a paused run, approving its plan or asking for a new plan also waits for a worker, and what you asked for happens when the run's turn comes. A queued run starts by itself then. Stop waiting takes it out of the line without doing what it was waiting to do, and Resume puts it back at the end. Runs still in line when Hatchet stops join it again when Hatchet starts.
 
 When a run's turn comes, Hatchet checks the working tree. If it has uncommitted changes, or no branch is checked out, the run pauses so you can tidy the tree and resume it.
+
+## Antigravity engine
+
+Besides the local model and Claude, an agent can run on Gemini through the Antigravity engine. It runs the `agy` command-line tool (the Antigravity CLI) as a child process in print mode, the same way the Claude Code engine runs `claude`. It uses the Google account `agy` is signed in with, so no API key is needed. Run `agy` once in a terminal to sign in first.
+
+The engine is chosen per agent. Agents that don't use it keep running on the local model or on Claude. It is optional: if you never set an agent to Antigravity, `agy` doesn't need to be installed.
+
+A few things differ from the other engines:
+
+- **Models.** Each agent picks a model id that `agy models` lists, such as `gemini-3.8-flash-high` or `gemini-4-argon-high`. The id carries the reasoning effort, so Hatchet doesn't set effort or temperature for these agents.
+- **No streaming of thoughts.** `agy` doesn't show its thinking, and the answer arrives when the call is done, so a call can look quiet for a while.
+- **No tools.** Agents get only the means to return their JSON answer. They can't read or write files or run commands, and Hatchet applies their patches itself.
+- **Quota.** Gemini models draw on the quota of your Antigravity plan.
+
+You can also hand a running call to an Antigravity model, with `agy:<model id>` as the target of `hand_over_call` over MCP. See [mcp.md](mcp.md).

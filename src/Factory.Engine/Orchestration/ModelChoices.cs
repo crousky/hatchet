@@ -8,20 +8,23 @@ public sealed record ModelOption(string Value, string Label, string Group);
 /// <summary>
 /// Which model does a piece of work, picked when it starts instead of in Settings: <c>local:&lt;model id&gt;</c> puts every agent
 /// on that model of the local server, <c>claude:&lt;opus|sonnet|haiku&gt;</c> puts every agent on that Claude model through Claude
-/// Code, and <c>profile:&lt;name&gt;</c> gives each agent the model a run profile from Settings names for it. No choice means the
-/// agents run as Settings says. Everything else about each agent, such as its temperature and its prompt, stays as configured.
+/// Code, <c>agy:&lt;model id&gt;</c> puts every agent on that model through the Antigravity CLI, and <c>profile:&lt;name&gt;</c>
+/// gives each agent the model a run profile from Settings names for it. No choice means the agents run as Settings says.
+/// Everything else about each agent, such as its effort, its temperature and its prompt, stays as configured.
 /// </summary>
 public static class ModelChoices
 {
     private const string LocalPrefix = "local:";
     private const string ClaudePrefix = "claude:";
     private const string ProfilePrefix = "profile:";
+    private const string AgyPrefix = "agy:";
 
     public static string Local(string modelId) => LocalPrefix + modelId;
 
     public static string Claude(string alias) => ClaudePrefix + alias;
 
     public static string Profile(string name) => ProfilePrefix + name;
+    public static string Antigravity(string modelId) => AgyPrefix + modelId;
 
     /// <summary>
     /// The canonical form of a choice, or null for "as set in Settings". Plain Claude names such as "opus" are accepted as a shorthand.
@@ -47,10 +50,22 @@ public static class ModelChoices
                 : throw new FactoryValidationException("Say which run profile, as profile:<name>. A name is lowercase letters, digits and hyphens.");
         }
 
+        if (text.StartsWith(AgyPrefix, StringComparison.OrdinalIgnoreCase))
+        {
+            var id = text[AgyPrefix.Length..].Trim().ToLowerInvariant();
+            if (id.Length == 0) throw new FactoryValidationException("Say which Antigravity model, as agy:<model id>.");
+            return AntigravityOptions.IsValidModelId(id)
+                ? Antigravity(id)
+                : throw new FactoryValidationException($"\"{choice}\" isn't a valid Antigravity model id.");
+        }
+
+        if (AntigravityOptions.Models.Contains(text.ToLowerInvariant()))
+            return Antigravity(text.ToLowerInvariant());
+
         var alias = (text.StartsWith(ClaudePrefix, StringComparison.OrdinalIgnoreCase) ? text[ClaudePrefix.Length..] : text).Trim().ToLowerInvariant();
         return ClaudeCodeOptions.Models.Contains(alias)
             ? Claude(alias)
-            : throw new FactoryValidationException($"\"{choice}\" isn't a model choice. Use local:<model id>, or claude:{string.Join(", claude:", ClaudeCodeOptions.Models)}, or profile:<name> for a run profile from Settings, or leave it out to use Settings.");
+            : throw new FactoryValidationException($"\"{choice}\" isn't a model choice. Use local:<model id>, or claude:{string.Join(", claude:", ClaudeCodeOptions.Models)}, or agy:<model id>, or profile:<name> for a run profile from Settings, or leave it out to use Settings.");
     }
 
     /// <summary>
@@ -64,9 +79,13 @@ public static class ModelChoices
         return normalized;
     }
 
-    /// <summary>The Claude model a choice names, or null when the choice is Settings, a local model or a profile.</summary>
+    /// <summary>The Claude model a choice names, or null when the choice is Settings, a local model, Antigravity or a profile.</summary>
     public static string? ClaudeModelOf(string? choice) =>
         Normalize(choice) is { } normalized && normalized.StartsWith(ClaudePrefix, StringComparison.Ordinal) ? normalized[ClaudePrefix.Length..] : null;
+
+    /// <summary>The Antigravity model a choice names, or null when the choice is Settings, a local model, Claude or a profile.</summary>
+    public static string? AntigravityModelOf(string? choice) =>
+        Normalize(choice) is { } normalized && normalized.StartsWith(AgyPrefix, StringComparison.Ordinal) ? normalized[AgyPrefix.Length..] : null;
 
     /// <summary>The run profile a choice names, or null when it names none.</summary>
     public static string? ProfileNameOf(string? choice) =>
@@ -77,9 +96,11 @@ public static class ModelChoices
     {
         if (Normalize(choice) is not { } normalized) return null;
         if (normalized.StartsWith(ProfilePrefix, StringComparison.Ordinal)) return $"{normalized[ProfilePrefix.Length..]} profile";
-        return normalized.StartsWith(ClaudePrefix, StringComparison.Ordinal)
-            ? ClaudeCodeOptions.ModelLabel(normalized[ClaudePrefix.Length..])
-            : $"{normalized[LocalPrefix.Length..]} (local)";
+        if (normalized.StartsWith(ClaudePrefix, StringComparison.Ordinal))
+            return ClaudeCodeOptions.ModelLabel(normalized[ClaudePrefix.Length..]);
+        if (normalized.StartsWith(AgyPrefix, StringComparison.Ordinal))
+            return AntigravityOptions.ModelLabel(normalized[AgyPrefix.Length..]);
+        return $"{normalized[LocalPrefix.Length..]} (local)";
     }
 
     /// <summary>
@@ -99,7 +120,13 @@ public static class ModelChoices
     {
         var groups = AgentProfiles.Defaults
             .Select(agent => (agent.DisplayName, Route: profile.Roles.FirstOrDefault(r => r.Role == agent.Role)))
-            .GroupBy(a => a.Route is null ? "as set in Settings" : a.Route.Engine == AgentEngine.ClaudeCode ? ClaudeCodeOptions.ModelLabel(a.Route.ClaudeModel) : "local model")
+            .GroupBy(a => a.Route is null
+                ? "as set in Settings"
+                : a.Route.Engine == AgentEngine.ClaudeCode
+                    ? ClaudeCodeOptions.ModelLabel(a.Route.ClaudeModel)
+                    : a.Route.Engine == AgentEngine.Antigravity
+                        ? AntigravityOptions.ModelLabel(a.Route.AntigravityModel)
+                        : "local model")
             .Select(g => $"{string.Join(", ", g.Select(a => a.DisplayName))}: {g.Key}");
         return string.Join(" · ", groups);
     }
@@ -121,14 +148,17 @@ public static class ModelChoices
         }
 
         var onClaude = normalized.StartsWith(ClaudePrefix, StringComparison.Ordinal);
-        var model = normalized[(onClaude ? ClaudePrefix : LocalPrefix).Length..];
-        if (!onClaude) copy.ModelId = model;
+        var onAgy = normalized.StartsWith(AgyPrefix, StringComparison.Ordinal);
+        var prefix = onClaude ? ClaudePrefix : onAgy ? AgyPrefix : LocalPrefix;
+        var model = normalized[prefix.Length..];
+        if (!onClaude && !onAgy) copy.ModelId = model;
 
         foreach (var role in Enum.GetValues<AgentRole>())
         {
             var profileOverride = OverrideFor(copy, settings, role);
-            profileOverride.Engine = onClaude ? AgentEngine.ClaudeCode : AgentEngine.Local;
+            profileOverride.Engine = onClaude ? AgentEngine.ClaudeCode : onAgy ? AgentEngine.Antigravity : AgentEngine.Local;
             if (onClaude) profileOverride.ClaudeModel = model;
+            if (onAgy) profileOverride.AntigravityModel = model;
         }
         return copy;
     }
@@ -166,7 +196,7 @@ public static class ModelChoices
         var applied = ApplyTier(settings, SubtaskTiers.Strong);
         return string.Join(" · ", TieredRoles
             .Select(role => AgentProfiles.Resolve(applied, role))
-            .GroupBy(p => p.UsesClaude ? ClaudeCodeOptions.ModelLabel(p.ClaudeModel) : "local model")
+            .GroupBy(p => p.UsesClaude ? ClaudeCodeOptions.ModelLabel(p.ClaudeModel) : p.UsesAntigravity ? AntigravityOptions.ModelLabel(p.AntigravityModel) : "local model")
             .Select(g => $"{string.Join(", ", g.Select(p => p.DisplayName))}: {g.Key}"));
     }
 
@@ -174,9 +204,15 @@ public static class ModelChoices
     {
         var profileOverride = OverrideFor(copy, settings, route.Role);
         profileOverride.Engine = route.Engine;
-        if (route.Engine != AgentEngine.ClaudeCode) return;
-        profileOverride.ClaudeModel = route.ClaudeModel;
-        profileOverride.ClaudeEffort = route.ClaudeEffort;
+        if (route.Engine == AgentEngine.ClaudeCode)
+        {
+            profileOverride.ClaudeModel = route.ClaudeModel;
+            profileOverride.ClaudeEffort = route.ClaudeEffort;
+        }
+        else if (route.Engine == AgentEngine.Antigravity)
+        {
+            profileOverride.AntigravityModel = route.AntigravityModel;
+        }
     }
 
     /// <summary>The role's override in the copy, added with the role's settings as they stand if it had none.</summary>
@@ -188,7 +224,8 @@ public static class ModelChoices
         var added = new AgentProfileOverride
         {
             Role = role, ReasoningEffort = profile.ReasoningEffort, Temperature = profile.Temperature,
-            ClaudeModel = profile.ClaudeModel, ClaudeEffort = profile.ClaudeEffort
+            ClaudeModel = profile.ClaudeModel, ClaudeEffort = profile.ClaudeEffort,
+            AntigravityModel = profile.AntigravityModel
         };
         copy.ProfileOverrides.Add(added);
         return added;
@@ -202,9 +239,9 @@ public static class ModelChoices
 
     /// <summary>
     /// Every choice on offer: the run profiles, the local models (the configured model, and whatever else the server has) and
-    /// Claude's. The first, with an empty value, is "as set in Settings".
+    /// Claude's and Antigravity's when provided. The first, with an empty value, is "as set in Settings".
     /// </summary>
-    public static IReadOnlyList<ModelOption> Options(FactorySettings settings, IEnumerable<string> localModels)
+    public static IReadOnlyList<ModelOption> Options(FactorySettings settings, IEnumerable<string> localModels, IEnumerable<(string Value, string Label)>? antigravityModels = null)
     {
         var options = new List<ModelOption> { new("", "As set in Settings", "") };
         foreach (var profile in settings.RunProfiles.Where(p => RunProfile.IsValidName(p.Name)))
@@ -215,6 +252,11 @@ public static class ModelChoices
             options.Add(new ModelOption(Local(id), id, "Local model"));
         foreach (var alias in ClaudeCodeOptions.Models)
             options.Add(new ModelOption(Claude(alias), ClaudeCodeOptions.ModelLabel(alias), "Claude, through Claude Code"));
+        foreach (var (id, label) in antigravityModels ?? [])
+        {
+            if (AntigravityOptions.IsValidModelId(id))
+                options.Add(new ModelOption(Antigravity(id), string.IsNullOrWhiteSpace(label) ? AntigravityOptions.ModelLabel(id) : label, "Gemini, through Antigravity"));
+        }
         return options;
     }
 }

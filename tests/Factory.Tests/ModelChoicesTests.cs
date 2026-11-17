@@ -19,6 +19,9 @@ public class ModelChoicesTests
     [InlineData("local: my model ", "local:my model")]
     [InlineData("profile:strong", "profile:strong")]
     [InlineData(" Profile: All-Opus ", "profile:all-opus")]
+    [InlineData("agy:gemini-4-argon-high", "agy:gemini-4-argon-high")]
+    [InlineData("AGY:Gemini-3.8-Flash-High", "agy:gemini-3.8-flash-high")]
+    [InlineData("gemini-4-argon-high", "agy:gemini-4-argon-high")]
     public void Choices_are_read_in_their_short_and_long_forms(string? given, string? expected) =>
         Assert.Equal(expected, ModelChoices.Normalize(given));
 
@@ -29,11 +32,12 @@ public class ModelChoicesTests
     [InlineData("profile:")]
     [InlineData("profile:two words")]
     [InlineData("profile:-x")]
+    [InlineData("agy:")]
     public void Choices_that_make_no_sense_are_refused_with_the_ways_to_write_one(string given)
     {
         var error = Assert.Throws<FactoryValidationException>(() => ModelChoices.Normalize(given));
 
-        Assert.True(error.Message.Contains("local:") || error.Message.Contains("claude:") || error.Message.Contains("profile:"));
+        Assert.True(error.Message.Contains("local:") || error.Message.Contains("claude:") || error.Message.Contains("profile:") || error.Message.Contains("agy:"));
     }
 
     [Fact]
@@ -224,10 +228,32 @@ public class ModelChoicesTests
     {
         Assert.Null(ModelChoices.Describe(null));
         Assert.Equal("Claude Opus", ModelChoices.Describe("opus"));
+        Assert.Equal("Gemini 4 Argon · high", ModelChoices.Describe("agy:gemini-4-argon-high"));
         Assert.Equal("qwen3.8 (local)", ModelChoices.Describe("local:qwen3.8"));
         Assert.Equal("sonnet", ModelChoices.ClaudeModelOf("claude:sonnet"));
+        Assert.Null(ModelChoices.ClaudeModelOf("agy:gemini-4-argon-high"));
         Assert.Null(ModelChoices.ClaudeModelOf("local:qwen3.8"));
         Assert.Null(ModelChoices.ClaudeModelOf(null));
+        Assert.Equal("gemini-4-argon-high", ModelChoices.AntigravityModelOf("agy:gemini-4-argon-high"));
+        Assert.Null(ModelChoices.AntigravityModelOf("claude:sonnet"));
+    }
+
+    [Fact]
+    public void An_antigravity_choice_moves_every_agent_to_that_model_and_keeps_each_ones_effort_and_prompt()
+    {
+        var settings = new FactorySettings();
+        settings.ProfileOverrides.Add(new AgentProfileOverride { Role = AgentRole.BugFixer, ReasoningEffort = "low", Temperature = 0.7, SystemPrompt = "Fix it my way." });
+
+        var applied = ModelChoices.Apply(settings, "agy:gemini-4-argon-high");
+
+        foreach (var role in Enum.GetValues<AgentRole>())
+        {
+            var profile = AgentProfiles.Resolve(applied, role);
+            Assert.True(profile.UsesAntigravity);
+            Assert.Equal("gemini-4-argon-high", profile.AntigravityModel);
+        }
+        var fixer = AgentProfiles.Resolve(applied, AgentRole.BugFixer);
+        Assert.Equal(("low", 0.7, "Fix it my way."), (fixer.ReasoningEffort, fixer.Temperature, fixer.SystemPrompt));
     }
 
     [Fact]
@@ -287,5 +313,28 @@ public class ModelChoicesTests
         Assert.Equal("As set in Settings", options[0].Label);
         Assert.Equal("all-opus (Task Planner, Context Specifier, Code Generator, Static Reviewer, Bug Fixer: Claude Opus)", options[3].Label);
         Assert.All(options.Skip(1), o => Assert.Equal(o.Value, ModelChoices.Normalize(o.Value)));
+    }
+
+    [Fact]
+    public void A_run_profile_can_route_an_agent_to_antigravity()
+    {
+        var settings = new FactorySettings
+        {
+            RunProfiles =
+            [
+                new RunProfile
+                {
+                    Name = "gemini-review",
+                    Roles = [new RunProfileRole { Role = AgentRole.StaticReviewer, Engine = AgentEngine.Antigravity, AntigravityModel = "gemini-4-argon-high" }]
+                }
+            ]
+        };
+
+        var applied = ModelChoices.Apply(settings, "profile:gemini-review");
+        var reviewer = AgentProfiles.Resolve(applied, AgentRole.StaticReviewer);
+
+        Assert.True(reviewer.UsesAntigravity);
+        Assert.Equal("gemini-4-argon-high", reviewer.AntigravityModel);
+        Assert.Contains("Static Reviewer: Gemini 4 Argon · high", ModelChoices.Summarize(settings.RunProfiles[0]));
     }
 }

@@ -72,6 +72,9 @@ public sealed class FactorySettings
     /// <summary>The Claude Code executable, for roles routed to Claude. A bare name is looked up on PATH.</summary>
     public string ClaudeCodePath { get; set; } = "claude";
 
+    /// <summary>The Antigravity executable, for roles routed to Antigravity. A bare name is looked up on PATH.</summary>
+    public string AntigravityPath { get; set; } = "agy";
+
     /// <summary>A copy that can be changed without touching these settings, which every run shares.</summary>
     public FactorySettings Clone()
     {
@@ -159,6 +162,7 @@ public sealed class RunProfileRole
     public AgentEngine Engine { get; set; }
     public string ClaudeModel { get; set; } = ClaudeCodeOptions.DefaultModel;
     public string ClaudeEffort { get; set; } = ClaudeCodeOptions.DefaultEffort;
+    public string AntigravityModel { get; set; } = AntigravityOptions.DefaultModel;
 
     public RunProfileRole Clone() => (RunProfileRole)MemberwiseClone();
 }
@@ -171,6 +175,7 @@ public sealed class AgentProfileOverride
     public AgentEngine Engine { get; set; }
     public string ClaudeModel { get; set; } = ClaudeCodeOptions.DefaultModel;
     public string ClaudeEffort { get; set; } = ClaudeCodeOptions.DefaultEffort;
+    public string AntigravityModel { get; set; } = AntigravityOptions.DefaultModel;
 
     /// <summary>A replacement system prompt, or null for the built-in one.</summary>
     public string? SystemPrompt { get; set; }

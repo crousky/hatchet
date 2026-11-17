@@ -113,11 +113,12 @@ public sealed class AdHocTools(AdHocManager manager, IConfiguration configuratio
         await FileReportAsync(RequestKind.Change, repositoryPath, description, screenshotPaths, model, waitSeconds, ct);
 
     [McpServerTool(Name = "list_models", ReadOnly = true)]
-    [Description("Lists what the model parameter of start_run, report_defect and request_change accepts: the run profiles from Settings (profile:<name>, with the model each one gives every agent), the local models (the configured one and whatever else the model server has) and Claude's. The empty value means as set in Settings.")]
+    [Description("Lists what the model parameter of start_run, report_defect and request_change accepts: the run profiles from Settings (profile:<name>, with the model each one gives every agent), the local models (the configured one and whatever else the model server has) Claude's, and Antigravity's when agy is available. The empty value means as set in Settings.")]
     public async Task<IReadOnlyList<ModelOption>> ListModels(CancellationToken ct = default)
     {
         var settings = await settingsStore.GetAsync(ct);
-        return ModelChoices.Options(settings, modelHealth.Current?.AvailableModels ?? []);
+        var agyModels = await AntigravityCatalog.ModelsAsync(settings.AntigravityPath);
+        return ModelChoices.Options(settings, modelHealth.Current?.AvailableModels ?? [], agyModels);
     }
 
     [McpServerTool(Name = "list_requests", ReadOnly = true)]

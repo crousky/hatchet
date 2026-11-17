@@ -127,6 +127,7 @@ public static class AgentProfiles
                 Engine = profileOverride.Engine,
                 ClaudeModel = profileOverride.ClaudeModel,
                 ClaudeEffort = profileOverride.ClaudeEffort,
+                AntigravityModel = profileOverride.AntigravityModel,
                 SystemPrompt = string.IsNullOrWhiteSpace(profileOverride.SystemPrompt) ? profile.SystemPrompt : profileOverride.SystemPrompt
             };
     }

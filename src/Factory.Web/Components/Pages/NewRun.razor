@@ -191,7 +191,8 @@
     protected override async Task OnInitializedAsync()
     {
         _settings = await SettingsStore.GetAsync();
-        _options = ModelChoices.Options(_settings, ModelHealth.Current?.AvailableModels ?? []);
+        var agyModels = await AntigravityCatalog.ModelsAsync(_settings.AntigravityPath);
+        _options = ModelChoices.Options(_settings, ModelHealth.Current?.AvailableModels ?? [], agyModels);
         var runs = await Store.ListRunsAsync();
         _recent = runs.Select(r => r.Task.RepositoryPath).Distinct(StringComparer.OrdinalIgnoreCase).Take(5).ToList();
     }

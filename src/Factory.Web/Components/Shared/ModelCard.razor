@@ -89,6 +89,27 @@ else if (Health.Current is { ContextLength: int contextLength } small && Context
     </div>
 }
 
+@if (Health.Antigravity is { LoggedIn: false } antigravity)
+{
+    <div class="notice notice-warn">
+        <Icon Name="sparkle" Size="16" />
+        <div class="notice-body">
+            <div class="notice-title">@string.Join(" and ", Health.AntigravityAgents) @(Health.AntigravityAgents.Count == 1 ? "runs" : "run") on Gemini (Antigravity), which @(antigravity.Installed ? "isn't signed in" : "isn't available")</div>
+            <div class="muted">
+                @if (antigravity.Installed)
+                {
+                    <text>Run <code>agy</code> in a terminal to sign in. Hatchet notices within a minute.</text>
+                }
+                else
+                {
+                    <text>@antigravity.Error</text>
+                }
+            </div>
+        </div>
+        <a class="btn" href="/settings">Settings</a>
+    </div>
+}
+
 @code {
     protected override void OnInitialized() => Health.Changed += OnChanged;
 

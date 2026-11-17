@@ -261,7 +261,7 @@ public sealed class HatchetTools(FactoryOrchestrator orchestrator, IRunStore sto
         """ + " " + McpNotes.Data)]
     public async Task<RunDetails> HandOverCall(
         [Description("The run's id.")] int runId,
-        [Description("local for the local model, or a Claude model: opus, sonnet or haiku.")] string to,
+        [Description("local for the local model, or a Claude model: opus, sonnet or haiku, or an Antigravity model: agy:gemini-4-argon-high, agy:gemini-3.8-flash-high, agy:gemini-3.8-flash-medium, agy:gemini-3.8-flash-low, agy:claude-opus-5-5-high, agy:claude-sonnet-5-5-high, agy:gpt-oss-120b-medium")] string to,
         CancellationToken ct = default)
     {
         await RequireRunAsync(runId, ct);

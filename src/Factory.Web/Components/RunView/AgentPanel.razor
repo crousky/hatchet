@@ -1,3 +1,6 @@
+@inject ModelHealthService Health
+@inject EfSettingsStore SettingsStore
+
 <div class="agent-panel">
     <div class="panel-header">
         <Icon Name="sparkle" Size="14" />
@@ -140,16 +143,43 @@
     [Parameter] public LiveCall? Live { get; set; }
     [Parameter] public int? SelectedSubtaskId { get; set; }
 
-    /// <summary>Hands the live call to another model: "local", or a Claude model name.</summary>
+    /// <summary>Hands the live call to another model: "local", a Claude model name, or an Antigravity model id.</summary>
     [Parameter] public EventCallback<string?> OnHandOver { get; set; }
     [Parameter] public bool HandingOver { get; set; }
 
+    // The models `agy models` reported. Stays null until they have been read, so the built-in list covers the gap.
+    private IReadOnlyList<(string Value, string Label)>? _agyModels;
+    private bool _loadingAgyModels;
 
-    private static IEnumerable<(string Value, string Label)> HandOverTargets(LiveCall live)
+    protected override async Task OnParametersSetAsync()
+    {
+        if (_agyModels is not null || _loadingAgyModels || Live is null) return;
+        _loadingAgyModels = true;
+        try
+        {
+            var settings = await SettingsStore.GetAsync();
+            var models = await AntigravityCatalog.ModelsAsync(settings.AntigravityPath);
+            if (models.Count > 0) _agyModels = models;
+        }
+        finally
+        {
+            _loadingAgyModels = false;
+        }
+    }
+
+    private IEnumerable<(string Value, string Label)> HandOverTargets(LiveCall live)
     {
         if (live.Model is not null) yield return (FactoryOrchestrator.LocalHandOverTarget, "Local model");
         foreach (var model in ClaudeCodeOptions.Models.Where(m => m != live.Model))
             yield return (model, ClaudeCodeOptions.ModelLabel(model));
+
+        // Antigravity models are offered when agy is installed and signed in, or when agy models succeeded.
+        if (Health.Antigravity is { Installed: true, LoggedIn: true } || _agyModels is { Count: > 0 })
+        {
+            var models = _agyModels is { Count: > 0 } ? _agyModels : Fmt.AntigravityModels;
+            foreach (var model in models.Where(m => m.Value != live.Model))
+                yield return ($"agy:{model.Value}", "Gemini: " + model.Label);
+        }
     }
 
     private readonly HashSet<long> _expanded = [];

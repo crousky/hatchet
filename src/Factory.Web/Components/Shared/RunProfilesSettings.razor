@@ -38,6 +38,7 @@
                     {
                         var route = profile.Roles.FirstOrDefault(r => r.Role == agent.Role);
                         var onClaude = route is { Engine: AgentEngine.ClaudeCode };
+                        var onAntigravity = route is { Engine: AgentEngine.Antigravity };
                         <tr>
                             <td><Icon Name="@Fmt.Icon(agent.Role)" Size="14" Class="muted" /> @agent.DisplayName</td>
                             <td class="engine-cell">
@@ -45,6 +46,7 @@
                                     <option value="@AsSettings" selected="@(route is null)">As set in Settings</option>
                                     <option value="@OnLocal" selected="@(route is { Engine: AgentEngine.Local })">Local model</option>
                                     <option value="@OnClaude" selected="@onClaude">Claude Code</option>
+                                    <option value="@OnAntigravity" selected="@onAntigravity">Gemini (Antigravity)</option>
                                 </select>
                                 @if (onClaude)
                                 {
@@ -52,6 +54,15 @@
                                         @foreach (var model in ClaudeCodeOptions.Models)
                                         {
                                             <option value="@model">@ClaudeCodeOptions.ModelLabel(model)</option>
+                                        }
+                                    </select>
+                                }
+                                @if (onAntigravity)
+                                {
+                                    <select @bind="route!.AntigravityModel" aria-label="Antigravity model">
+                                        @foreach (var model in Fmt.AntigravityChoices(route.AntigravityModel, AntigravityModels))
+                                        {
+                                            <option value="@model.Value">@model.Label</option>
                                         }
                                     </select>
                                 }
@@ -65,6 +76,10 @@
                                             <option value="@effort">@effort</option>
                                         }
                                     </select>
+                                }
+                                else if (onAntigravity)
+                                {
+                                    <span class="muted">Set by Gemini</span>
                                 }
                                 else
                                 {
@@ -91,14 +106,16 @@
     private const string AsSettings = "settings";
     private const string OnLocal = "local";
     private const string OnClaude = "claude";
+    private const string OnAntigravity = "antigravity";
 
     [Parameter, EditorRequired] public List<RunProfile> Profiles { get; set; } = [];
+    [Parameter] public IReadOnlyList<(string Value, string Label)> AntigravityModels { get; set; } = [];
 
     private List<RunProfile> MissingBuiltIns =>
         RunProfile.BuiltIn().Where(b => !Profiles.Any(p => p.Name.Trim().Equals(b.Name, StringComparison.OrdinalIgnoreCase))).ToList();
 
     private static string RouteValue(RunProfileRole? route) =>
-        route is null ? AsSettings : route.Engine == AgentEngine.ClaudeCode ? OnClaude : OnLocal;
+        route is null ? AsSettings : route.Engine == AgentEngine.ClaudeCode ? OnClaude : route.Engine == AgentEngine.Antigravity ? OnAntigravity : OnLocal;
 
     private static void SetRoute(RunProfile profile, AgentRole role, string? value)
     {
@@ -109,7 +126,7 @@
             return;
         }
         if (route is null) profile.Roles.Add(route = new RunProfileRole { Role = role });
-        route.Engine = value == OnClaude ? AgentEngine.ClaudeCode : AgentEngine.Local;
+        route.Engine = value == OnClaude ? AgentEngine.ClaudeCode : value == OnAntigravity ? AgentEngine.Antigravity : AgentEngine.Local;
     }
 
     private void Add()

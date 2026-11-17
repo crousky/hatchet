@@ -50,8 +50,9 @@ builder.Services.AddSingleton(sp => new AdHocManager(
 // Local models can take minutes per response. The client enforces its own stall timeout instead.
 builder.Services.AddSingleton<ILlmClient>(_ => new RoutingLlmClient(
     new OpenAiCompatibleLlmClient(new HttpClient { Timeout = Timeout.InfiniteTimeSpan }),
-    // Claude Code runs in a folder of its own, so it never picks up a repository's CLAUDE.md or settings.
-    new ClaudeCodeLlmClient(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Hatchet", "claude-code"))));
+    // Claude Code and Antigravity run in folders of their own, so they never pick up a repository's instructions or settings.
+    new ClaudeCodeLlmClient(Path.Combine(hatchetData, "claude-code")),
+    new AntigravityLlmClient(Path.Combine(hatchetData, "antigravity"))));
 builder.Services.AddSingleton(_ => new LmStudioModelLoader(new HttpClient { Timeout = Timeout.InfiniteTimeSpan }));
 
 // MCP endpoint for Claude Code and other clients. The tools never call back into the client, so no sessions are kept.
