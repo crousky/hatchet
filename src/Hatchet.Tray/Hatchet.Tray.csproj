@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net9.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <AssemblyName>Hatchet.Tray</AssemblyName>
+    <RootNamespace>Hatchet.Tray</RootNamespace>
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+    <!-- Runs on whichever Windows Desktop runtime the installed .NET SDK brought, 9 or newer. -->
+    <RollForward>LatestMajor</RollForward>
+    <!-- Lets "dotnet build" of the solution work on Linux and macOS too, where the tray is simply not used. -->
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Hatchet.Tray.Tests" />
+  </ItemGroup>
+
+</Project>

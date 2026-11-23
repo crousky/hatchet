@@ -64,6 +64,8 @@ builder.Services.AddMcpServer(options => options.ServerInfo = new() { Name = "ha
 builder.Services.AddSingleton<ModelHealthService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<ModelHealthService>());
 builder.Services.AddHostedService<OrchestratorLifetime>();
+// The tray app asks for a clean shutdown through a named event, since Hatchet has no console there for Ctrl+C.
+builder.Services.AddHostedService<StopSignal>();
 
 var app = builder.Build();
 

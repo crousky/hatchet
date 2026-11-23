@@ -37,11 +37,28 @@ You need:
    dotnet run --project src/Factory.Web
    ```
 
-   Then open http://localhost:5199. On Windows, `./run.ps1` does the same and opens your browser for you.
+   Then open http://localhost:5199. On Windows, `./run.ps1` does the same and opens your browser for you, or install the [tray app](#start-at-sign-in-with-the-tray-app) to have Hatchet start when you sign in.
 3. **Connect the model.** In **Settings**, pick your server and press **Test**. Choose the model ID your server actually reports. The default is `qwen3.8`, and servers often name it differently.
 4. **Start a run.** In **New run**, paste or upload your spec, point at a clean Git repository, and set the verification command, or leave it on automatic detection. Add extra checks for files your build doesn't cover, such as `az bicep build` for `infra/**`.
 
 New to this? Try a small, throwaway repository first, so you can watch a whole run before trusting it with anything you care about.
+
+### Start at sign-in with the tray app
+
+On Windows, a tray app can keep Hatchet running for you:
+
+```powershell
+./install-tray.ps1
+```
+
+This installs the tray in `%LOCALAPPDATA%\Hatchet\tray` and starts it. From then on it starts each time you sign in to Windows, and it starts Hatchet from your clone. Its icon shows whether Hatchet is running (green), starting or stopping (amber), stopped (grey) or failed (red). Click the icon to open Hatchet. Right-click it for:
+
+- **Start, Stop and Restart.** Hatchet runs from source, so each start rebuilds it, and Restart picks up code you've just pulled. A stop shuts Hatchet down cleanly, pausing any runs in flight as a normal shutdown does.
+- **Open log.** Hatchet's output goes to `logs\hatchet.log` in its data folder. Each start keeps the last log as `hatchet.previous.log`.
+- **Start at login**, to turn starting at sign-in off or on again.
+- **Exit**, which stops Hatchet too.
+
+The tray runs Hatchet in Release, so `dotnet build` and `dotnet test` still work while it runs. If Hatchet is already running when the tray starts, such as from `run.ps1`, the tray leaves it alone. Run `./install-tray.ps1` again to update the tray after pulling, and `./install-tray.ps1 -Uninstall` to remove it.
 
 ### What makes a good spec
 
@@ -134,7 +151,8 @@ Found a security problem? Please report it privately; see [CONTRIBUTING.md](CONT
 - **Your own skills:** the `skills` folder next to the database. See [Skills](docs/skills.md).
 - **Ad hoc copies:** the `adhoc` folder next to the database, one folder per repository and commit. Deleting the requests that used a copy removes it.
 - **Screenshots:** the `attachments` folder next to the database, one folder per report. Deleting the report removes them.
-- **Port:** `http://localhost:5199`, set by `Urls` in `src/Factory.Web/appsettings.json`.
+- **Port:** `http://localhost:5199`, set by `Urls` in `src/Factory.Web/appsettings.json`. The tray app passes its own address, `--url`, which defaults to the same.
+- **Tray app:** `%LOCALAPPDATA%\Hatchet\tray`, with Hatchet's log in the `logs` folder next to the database. Start at sign-in is the `Hatchet` value in your `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` key.
 
 Keyboard: `Ctrl+B` toggles the subtask pane, `Ctrl+Alt+B` the agent pane, `Ctrl+J` the terminal panel. Pane edges can be dragged to resize.
 
@@ -145,7 +163,9 @@ LocalSoftwareFactory.sln
 src/Factory.Contracts   Domain models, DTOs, state enums, strict JSON schemas
 src/Factory.Engine      LLM client, Git workspace, command runner, skills, orchestrator
 src/Factory.Web         Blazor Server UI, SQLite persistence (EF Core)
+src/Hatchet.Tray        Windows tray app that starts, stops and watches Hatchet
 tests/Factory.Tests     xUnit tests, including full pipeline runs against real Git repos
+tests/Hatchet.Tray.Tests  Tray app tests (Windows only)
 ```
 
 To build and test, see [CONTRIBUTING.md](CONTRIBUTING.md).

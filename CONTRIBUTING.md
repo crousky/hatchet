@@ -30,8 +30,12 @@ dotnet run --project src/Factory.Web
 src/Factory.Contracts   Domain models, DTOs, state enums, strict JSON schemas
 src/Factory.Engine      LLM client, Git workspace, command runner, skills, orchestrator
 src/Factory.Web         Blazor Server UI, SQLite persistence (EF Core)
+src/Hatchet.Tray        Windows tray app that starts, stops and watches Hatchet
 tests/Factory.Tests     xUnit tests
+tests/Hatchet.Tray.Tests  Tray app tests, which only run on Windows
 ```
+
+To try a change to the tray without touching your own Hatchet, run its build with another address and data folder, for example `src/Hatchet.Tray/bin/Debug/net9.0-windows/Hatchet.Tray.exe --url http://localhost:5311 --data-dir <scratch folder>`. Close it with the same arguments plus `--exit`.
 
 ## Database migrations
 
