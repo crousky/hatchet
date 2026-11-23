@@ -42,6 +42,40 @@ public sealed class LogFileTests : IDisposable
     }
 
     [Fact]
+    public void A_log_another_program_holds_open_keeps_being_written_instead_of_throwing()
+    {
+        using var log = new LogFile(Path.Combine(_root, "hatchet.log"), maxBytes: 100);
+        log.Write("first");
+        // Like Get-Content -Wait: shares reading and writing, but not deleting, so the file can't be moved.
+        using (new FileStream(log.Path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+        {
+            log.Write(new string('a', 120));
+            log.Rotate();
+            log.Write("still here");
+        }
+
+        Assert.Contains("still here", Read(log.Path));
+        Assert.False(File.Exists(log.PreviousPath));
+
+        // Once it's let go, the next roll-over goes ahead.
+        log.Write(new string('b', 120));
+        log.Write("after");
+        Assert.Contains("still here", Read(log.PreviousPath));
+        Assert.Equal("after", Read(log.Path).Trim());
+    }
+
+    [Fact]
+    public void A_log_that_cant_be_created_drops_lines_without_throwing()
+    {
+        File.WriteAllText(Path.Combine(_root, "not-a-folder"), "");
+        using var log = new LogFile(Path.Combine(_root, "not-a-folder", "hatchet.log"));
+
+        log.Rotate();
+        log.Write("dropped");
+        log.Note("dropped too");
+    }
+
+    [Fact]
     public void Notes_are_marked_as_the_trays()
     {
         using var log = new LogFile(Path.Combine(_root, "hatchet.log"));

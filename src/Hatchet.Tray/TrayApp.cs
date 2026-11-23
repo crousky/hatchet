@@ -24,6 +24,8 @@ internal sealed class TrayApp : ApplicationContext
     private ServerState _state = ServerState.Stopped;
     private string? _problem;
     private bool _answered, _probing, _busy, _openWhenReady, _exiting;
+    /// <summary>Counts starts and stops, so a probe that began before one can't speak for the server after it.</summary>
+    private int _generation;
 
     public TrayApp(TrayOptions options, WaitHandle exitRequested)
     {
@@ -79,6 +81,7 @@ internal sealed class TrayApp : ApplicationContext
         if (_busy || _exiting || _server.IsRunning) return;
         try
         {
+            _generation++;
             _server.Start();
             _answered = false;
             _problem = null;
@@ -96,6 +99,7 @@ internal sealed class TrayApp : ApplicationContext
         if (_busy || !_server.IsRunning) return;
         _busy = true;
         _openWhenReady = false;
+        _generation++;
         SetState(ServerState.Stopping);
         try
         {
@@ -133,8 +137,10 @@ internal sealed class TrayApp : ApplicationContext
         _probing = true;
         try
         {
+            var generation = _generation;
             var answers = await AnswersAsync();
-            if (_busy || _exiting) return;
+            // An answer from before a stop or start may have come from the old server, not the one now building.
+            if (_busy || _exiting || generation != _generation) return;
 
             if (_server.IsRunning)
             {

@@ -73,11 +73,31 @@ internal sealed class ServerProcess : IDisposable
                 throw;
             }
 
-            // dotnet takes far longer to load than this takes, so its builds and Hatchet itself start inside the job.
-            _job.Assign(process);
-            process.StandardInput.Close();
-            process.BeginOutputReadLine();
-            process.BeginErrorReadLine();
+            try
+            {
+                // dotnet takes far longer to load than this takes, so its builds and Hatchet itself start inside the job.
+                _job.Assign(process);
+                process.StandardInput.Close();
+                process.BeginOutputReadLine();
+                process.BeginErrorReadLine();
+            }
+            catch (Exception ex)
+            {
+                // Outside the job, nothing would stop it, and the Hatchet it went on to start would hold the port.
+                _log.Note($"Couldn't put the server in its job, so it was ended: {ex.Message}");
+                try
+                {
+                    process.Kill(entireProcessTree: true);
+                }
+                catch (Exception killError) when (killError is InvalidOperationException or System.ComponentModel.Win32Exception)
+                {
+                    // Already gone.
+                }
+                process.Dispose();
+                Cleanup();
+                throw;
+            }
+
             _process = process;
         }
     }
