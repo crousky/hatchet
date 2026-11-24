@@ -1174,6 +1174,90 @@ public class OrchestratorTests : IAsyncLifetime
     }
 
     [Fact]
+    public void The_fixer_reads_the_files_its_errors_name_first_even_when_not_staged_or_planned()
+    {
+        _repo.Write("tests/FooTests.cs", "public class FooTests { }\n");
+        var abs = Path.Combine(_repo.Path, "tests", "FooTests.cs");
+        var subtask = new FactorySubtask
+        {
+            TargetFilesToCreate = ["src/Created.cs", "tests/FooTests.cs"],
+            LastFailure = $"{abs}(70,89): error CS7036: no argument given [{Path.Combine(_repo.Path, "x.csproj")}]\n"
+                + $"{Path.Combine(Path.GetTempPath(), "elsewhere", "Other.cs")}(1,1): error CS0103: nope",
+        };
+
+        var paths = FactoryOrchestrator.FixContextPaths(subtask, ["src/Staged.cs"], _repo.Path);
+
+        Assert.Equal(["src/Staged.cs", "src/Created.cs", "tests/FooTests.cs"], paths); // Targets first, each once.
+    }
+
+    [Fact]
+    public void A_new_test_file_gets_its_neighbours_and_the_fakes_they_use()
+    {
+        _repo.Write("tests/App.Tests/App.Tests.csproj", "<Project />\n");
+        _repo.Write("tests/App.Tests/Web/AlphaTests.cs", "public class AlphaTests { }\n");
+        _repo.Write("tests/App.Tests/Web/BetaTests.cs", "public class BetaTests { }\n");
+        _repo.Write("tests/App.Tests/Web/GammaTests.cs", "public class GammaTests { }\n");
+        _repo.Write("tests/App.Tests/Fakes/FakeRepo.cs", "public class FakeRepo { }\n");
+        _repo.Write("tests/App.Tests/obj/Fakes/Junk.cs", "x\n");
+        _repo.Write("src/Fakes/Elsewhere.cs", "x\n");
+        _repo.Write("tests/App.Tests/Web/data.json", "{}\n"); // Not the kind of file being created.
+        var subtask = new FactorySubtask { TargetFilesToCreate = ["tests/App.Tests/Web/NewTests.cs"] };
+
+        var paths = FactoryOrchestrator.ContextPaths(subtask, _repo.Path);
+
+        Assert.Equal(["tests/App.Tests/Web/NewTests.cs", "tests/App.Tests/Web/AlphaTests.cs", "tests/App.Tests/Web/BetaTests.cs", "tests/App.Tests/Fakes/FakeRepo.cs"], paths);
+        // A subtask that creates no test file gets nothing extra.
+        Assert.Equal(["src/New.cs"], FactoryOrchestrator.ContextPaths(new FactorySubtask { TargetFilesToCreate = ["src/New.cs"] }, _repo.Path));
+    }
+
+    [Fact]
+    public void A_new_test_in_a_new_folder_still_gets_the_fakes_and_neighbours()
+    {
+        _repo.Write("tests/App.Tests/App.Tests.csproj", "<Project />\n");
+        _repo.Write("tests/App.Tests/Fakes/FakeRepo.cs", "public class FakeRepo { }\n");
+        var subtask = new FactorySubtask { TargetFilesToCreate = ["tests/App.Tests/Web/Attachments/NewTests.cs"] };
+
+        // The folder doesn't exist yet; the project's fakes still show.
+        Assert.Equal(["tests/App.Tests/Fakes/FakeRepo.cs"], FactoryOrchestrator.NeighbourTestFiles(subtask, _repo.Path));
+    }
+
+    [Fact]
+    public void Without_a_project_file_only_the_test_folder_is_searched_and_nothing_outside_the_repo()
+    {
+        _repo.Write("node_modules/pkg/fakes/Bad.js", "x\n");
+        _repo.Write("tests/fakes/Helper.js", "x\n");
+        var subtask = new FactorySubtask { TargetFilesToCreate = ["tests/a.spec.js", "../outside/b.spec.js"] };
+
+        Assert.Equal(["tests/fakes/Helper.js"], FactoryOrchestrator.NeighbourTestFiles(subtask, _repo.Path));
+    }
+
+    [Fact]
+    public void Error_named_files_come_after_the_files_to_edit_and_are_capped()
+    {
+        for (var i = 0; i < 8; i++) _repo.Write($"src/Gen{i}.cs", "x\n");
+        _repo.Write("src/Edit.cs", "x\n");
+        var errors = Enumerable.Range(0, 8).Select(i => $"{Path.Combine(_repo.Path, "src", $"Gen{i}.cs")}(1,1): error CS0103: nope")
+            .Append($"{Path.Combine(_repo.Path, "src", "Edit.cs")}(2,2): error CS0103: nope");
+        var subtask = new FactorySubtask { TargetFilesToModify = ["src/Edit.cs"], LastFailure = string.Join("\n", errors) };
+
+        var paths = FactoryOrchestrator.FixContextPaths(subtask, [], _repo.Path);
+
+        Assert.Equal(["src/Edit.cs", "src/Gen0.cs", "src/Gen1.cs", "src/Gen2.cs", "src/Gen3.cs"], paths);
+    }
+
+    [Fact]
+    public void The_fixer_reads_a_file_named_only_by_the_error()
+    {
+        _repo.Write("tests/FooTests.cs", "public class FooTests { /* ONLY-IN-ERROR */ }\n");
+        var subtask = new FactorySubtask { LastFailure = $"{Path.Combine(_repo.Path, "tests", "FooTests.cs")}(3,1): error CS1002: ; expected" };
+
+        var paths = FactoryOrchestrator.FixContextPaths(subtask, [], _repo.Path);
+        var files = RepositoryScanner.ReadFiles(_repo.Path, paths, 10_000, 10_000);
+
+        Assert.Contains("ONLY-IN-ERROR", RepositoryScanner.Render(files));
+    }
+
+    [Fact]
     public void Gate_tampering_covers_tests_and_the_files_that_define_the_check_unless_planned()
     {
         var subtask = new FactorySubtask { TargetFilesToModify = ["Makefile"] };

@@ -1198,7 +1198,7 @@ public sealed partial class FactoryOrchestrator(
         await SetSubtaskStatusAsync(subtask, SubtaskStatus.Refining, ct);
         await SetStageAsync(run, PipelineStage.Refine, subtask.Id, ct);
 
-        var planned = PlannedFiles(subtask).ToList();
+        var planned = ContextPaths(subtask, context.Task.RepositoryPath);
         var files = await ReadFilesAsync(context, planned, settings.MaxContextChars, ct);
         await LogWithheldAsync(run, subtask, files, PipelineStage.Refine, ct);
         var definitions = await ReadDefinitionsAsync(context, subtask, AgentRole.ContextSpecifier, planned, files, ct, subtask.Title, subtask.Description, subtask.HumanGuidance);
@@ -1227,7 +1227,7 @@ public sealed partial class FactoryOrchestrator(
         await SetSubtaskStatusAsync(subtask, SubtaskStatus.Building, ct);
         await SetStageAsync(run, PipelineStage.Build, subtask.Id, ct);
 
-        var planned = PlannedFiles(subtask).ToList();
+        var planned = ContextPaths(subtask, context.Task.RepositoryPath);
         var targets = subtask.TargetFilesToCreate.Concat(subtask.TargetFilesToModify).Select(NormalizePath).ToList();
         var written = new List<string>();
         var summaries = new List<string>();
@@ -1304,6 +1304,106 @@ public sealed partial class FactoryOrchestrator(
     }
 
     private const int MaxDefinitionFiles = 10;
+
+    /// <summary>The files a subtask's agents read: what it plans, then what a new test file needs to copy (see <see cref="NeighbourTestFiles"/>).</summary>
+    internal static List<string> ContextPaths(FactorySubtask subtask, string repositoryPath) =>
+        PlannedFiles(subtask).Concat(NeighbourTestFiles(subtask, repositoryPath))
+            .Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+
+    private const int MaxSiblingTests = 2;
+    private const int MaxTestHelpers = 6;
+    private const int MaxHelperDepth = 5;
+    private const int MaxErrorOnlyFiles = 4;
+    private static readonly string[] TestHelperFolders = ["fakes", "helpers", "support", "fixtures", "testdata", "mocks", "doubles", "testdoubles"];
+
+    /// <summary>
+    /// For a test file the subtask creates: a couple of the test files beside it, and the fakes and helpers in the test
+    /// project, which show how this repository builds its test objects. Without them the model invents helpers that
+    /// don't exist. Repository-relative paths, existing files of the same kind only, none the subtask already plans.
+    /// A folder the new file is about to create is looked up from its nearest existing parent.
+    /// </summary>
+    internal static List<string> NeighbourTestFiles(FactorySubtask subtask, string repositoryPath)
+    {
+        var planned = PlannedFiles(subtask).Select(p => NormalizePath(p)).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var found = new List<string>();
+        var root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(repositoryPath));
+        foreach (var created in subtask.TargetFilesToCreate.Select(p => NormalizePath(p)).Where(LooksLikeTestFile))
+        {
+            try
+            {
+                var full = Path.GetFullPath(Path.Combine(root, created));
+                var extension = Path.GetExtension(full);
+                var directory = Path.GetDirectoryName(full);
+                // Never look outside the repository.
+                while (directory is not null && !Directory.Exists(directory)) directory = Path.GetDirectoryName(directory);
+                if (directory is null || !IsInside(root, directory)) continue;
+
+                bool SameKind(string path) => string.Equals(Path.GetExtension(path), extension, StringComparison.OrdinalIgnoreCase);
+                found.AddRange(RelativeFiles(root, Directory.EnumerateFiles(directory), MaxSiblingTests, planned, r => SameKind(r) && LooksLikeTestFile(r)));
+
+                // The test project is the nearest folder up the path that holds a project file. Without one, the
+                // outermost test folder on the path, else the directory itself, so a whole repository is never walked.
+                var project = directory;
+                while (project.Length > root.Length && !Directory.EnumerateFiles(project, "*proj").Any())
+                    project = Path.GetDirectoryName(project) ?? root;
+                if (project.Length <= root.Length)
+                {
+                    project = directory;
+                    for (var up = directory; up is not null && up.Length > root.Length; up = Path.GetDirectoryName(up))
+                        if (TestFolders.Contains(Path.GetFileName(up), StringComparer.OrdinalIgnoreCase)) project = up;
+                }
+
+                var helpers = new List<string>();
+                CollectHelpers(project, inHelperFolder: false, MaxHelperDepth, helpers);
+                found.AddRange(RelativeFiles(root, helpers, MaxTestHelpers, planned, SameKind));
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+            {
+                // Context that can't be listed is context the agent goes without, not a failed subtask.
+            }
+        }
+        return found.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+    }
+
+    private static bool IsInside(string root, string path) =>
+        path.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) || string.Equals(path, root, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>Files under the helper folders, walking no deeper than <paramref name="depth"/> and never into build output, packages or Git.</summary>
+    private static void CollectHelpers(string directory, bool inHelperFolder, int depth, List<string> found)
+    {
+        if (inHelperFolder) found.AddRange(Directory.EnumerateFiles(directory));
+        if (depth == 0) return;
+        foreach (var child in Directory.EnumerateDirectories(directory))
+        {
+            var info = new DirectoryInfo(child);
+            if (info.Name.StartsWith('.') || RepositoryScanner.IsIgnoredDirectory(info)) continue;
+            CollectHelpers(child, inHelperFolder || TestHelperFolders.Contains(info.Name, StringComparer.OrdinalIgnoreCase), depth - 1, found);
+        }
+    }
+
+    private static IEnumerable<string> RelativeFiles(string root, IEnumerable<string> files, int max, HashSet<string> exclude, Func<string, bool> accept) =>
+        files.OrderBy(f => f, StringComparer.OrdinalIgnoreCase)
+            .Select(f => Path.GetRelativePath(root, f).Replace(Path.DirectorySeparatorChar, '/'))
+            .Where(r => !exclude.Contains(r) && accept(r))
+            .Take(max);
+
+    /// <summary>
+    /// The files the Bug Fixer reads, in the order the context budget is handed out: what the fix changed and what the
+    /// subtask is to edit, then up to a few files its last failure names that none of those cover (an existing test whose
+    /// call no longer compiles), then the other planned files and the neighbours of a new test file. The errors' files come
+    /// before the rest of the context but after the files the fixer must edit, which a handful of large ones can't starve.
+    /// </summary>
+    internal static List<string> FixContextPaths(FactorySubtask subtask, IEnumerable<string> changed, string repositoryPath)
+    {
+        var lines = (subtask.LastFailure ?? "").Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        var targets = changed.Concat(subtask.TargetFilesToModify).Concat(subtask.TargetFilesToCreate).Select(NormalizePath).ToList();
+        var errorOnly = FailureDigest.FilesNamed(lines, repositoryPath)
+            .Where(f => !targets.Contains(f, StringComparer.OrdinalIgnoreCase))
+            .Take(MaxErrorOnlyFiles);
+        return targets.Concat(errorOnly).Concat(ContextPaths(subtask, repositoryPath))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
 
     private static IEnumerable<string> PlannedFiles(FactorySubtask subtask) =>
         subtask.TargetFilesToModify.Concat(subtask.TargetFilesToCreate).Concat(subtask.ContextFilesToRead);
@@ -1430,7 +1530,7 @@ public sealed partial class FactoryOrchestrator(
 
         await git.StageAllAsync(ct);
         var changed = await git.GetStagedFilesAsync(ct);
-        var planned = changed.Concat(PlannedFiles(subtask)).ToList();
+        var planned = FixContextPaths(subtask, changed, context.Task.RepositoryPath);
         var files = await ReadFilesAsync(context, planned, settings.MaxContextChars, ct);
         // A final-check fix was never refined, so this is the first time its files are read.
         if (subtask.IsIntegrationFix) await LogWithheldAsync(run, subtask, files, PipelineStage.Fix, ct);
