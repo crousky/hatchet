@@ -1187,7 +1187,7 @@ public class OrchestratorTests : IAsyncLifetime
 
         var paths = FactoryOrchestrator.FixContextPaths(subtask, ["src/Staged.cs"], _repo.Path);
 
-        Assert.Equal(["tests/FooTests.cs", "src/Staged.cs", "src/Created.cs"], paths); // Named first, once.
+        Assert.Equal(["src/Staged.cs", "src/Created.cs", "tests/FooTests.cs"], paths); // Targets first, each once.
     }
 
     [Fact]
@@ -1200,6 +1200,7 @@ public class OrchestratorTests : IAsyncLifetime
         _repo.Write("tests/App.Tests/Fakes/FakeRepo.cs", "public class FakeRepo { }\n");
         _repo.Write("tests/App.Tests/obj/Fakes/Junk.cs", "x\n");
         _repo.Write("src/Fakes/Elsewhere.cs", "x\n");
+        _repo.Write("tests/App.Tests/Web/data.json", "{}\n"); // Not the kind of file being created.
         var subtask = new FactorySubtask { TargetFilesToCreate = ["tests/App.Tests/Web/NewTests.cs"] };
 
         var paths = FactoryOrchestrator.ContextPaths(subtask, _repo.Path);
@@ -1207,6 +1208,41 @@ public class OrchestratorTests : IAsyncLifetime
         Assert.Equal(["tests/App.Tests/Web/NewTests.cs", "tests/App.Tests/Web/AlphaTests.cs", "tests/App.Tests/Web/BetaTests.cs", "tests/App.Tests/Fakes/FakeRepo.cs"], paths);
         // A subtask that creates no test file gets nothing extra.
         Assert.Equal(["src/New.cs"], FactoryOrchestrator.ContextPaths(new FactorySubtask { TargetFilesToCreate = ["src/New.cs"] }, _repo.Path));
+    }
+
+    [Fact]
+    public void A_new_test_in_a_new_folder_still_gets_the_fakes_and_neighbours()
+    {
+        _repo.Write("tests/App.Tests/App.Tests.csproj", "<Project />\n");
+        _repo.Write("tests/App.Tests/Fakes/FakeRepo.cs", "public class FakeRepo { }\n");
+        var subtask = new FactorySubtask { TargetFilesToCreate = ["tests/App.Tests/Web/Attachments/NewTests.cs"] };
+
+        // The folder doesn't exist yet; the project's fakes still show.
+        Assert.Equal(["tests/App.Tests/Fakes/FakeRepo.cs"], FactoryOrchestrator.NeighbourTestFiles(subtask, _repo.Path));
+    }
+
+    [Fact]
+    public void Without_a_project_file_only_the_test_folder_is_searched_and_nothing_outside_the_repo()
+    {
+        _repo.Write("node_modules/pkg/fakes/Bad.js", "x\n");
+        _repo.Write("tests/fakes/Helper.js", "x\n");
+        var subtask = new FactorySubtask { TargetFilesToCreate = ["tests/a.spec.js", "../outside/b.spec.js"] };
+
+        Assert.Equal(["tests/fakes/Helper.js"], FactoryOrchestrator.NeighbourTestFiles(subtask, _repo.Path));
+    }
+
+    [Fact]
+    public void Error_named_files_come_after_the_files_to_edit_and_are_capped()
+    {
+        for (var i = 0; i < 8; i++) _repo.Write($"src/Gen{i}.cs", "x\n");
+        _repo.Write("src/Edit.cs", "x\n");
+        var errors = Enumerable.Range(0, 8).Select(i => $"{Path.Combine(_repo.Path, "src", $"Gen{i}.cs")}(1,1): error CS0103: nope")
+            .Append($"{Path.Combine(_repo.Path, "src", "Edit.cs")}(2,2): error CS0103: nope");
+        var subtask = new FactorySubtask { TargetFilesToModify = ["src/Edit.cs"], LastFailure = string.Join("\n", errors) };
+
+        var paths = FactoryOrchestrator.FixContextPaths(subtask, [], _repo.Path);
+
+        Assert.Equal(["src/Edit.cs", "src/Gen0.cs", "src/Gen1.cs", "src/Gen2.cs", "src/Gen3.cs"], paths);
     }
 
     [Fact]
